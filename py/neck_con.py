@@ -1,3 +1,7 @@
+## This script is built to move the pitch and yaw of the neck based on object recognition key points in a parallel script. 
+## this can be used as an example, and you can implement your own control by modifying the move() function to accept as many inouts as you want.
+## Refer to the readme for accepted serial commands: command = f"H30,X0,P0,S1,A1" ~ moves all actuators up 30mm
+
 import serial
 import time
 import bluetooth
