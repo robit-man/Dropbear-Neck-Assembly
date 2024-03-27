@@ -44,9 +44,9 @@ This project is focused on the development of a robot head and neck assembly, co
 4. **Bluetooth Configuration:**
    - Pair the ESP32 with your Bluetooth control device.
    - Use the device name "NECK_BT" for connecting.
-   - send commands with the script in the py folder called neck_con.py
+   - Send commands with the script in the py folder called neck_con.py
    - Import move(x,y) methods into parallel scripts, such as [Supervision](https://github.com/roboflow/supervision).
-   - add your own control schemes from and additional functions to neck_con.py and access them for your applicaiton.
+   - Add your own control schemes from and additional functions to neck_con.py and access them for your applicaiton.
 
 ## Usage
 
