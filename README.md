@@ -29,12 +29,27 @@ This project is focused on the development of a robot head and neck assembly, co
 - [PlatformIO](https://platformio.org/) for ESP32 development
 - [FastAccelStepper](https://github.com/gin66/FastAccelStepper) library for stepper motor control
 
+
+![photo_2024-03-26_12-58-00](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/1d6f9121-00f4-4cd6-9dc0-e236b38ce0d3)
+
 ## Setup and Configuration
 
 1. **Hardware Setup:**
-   - Connect each stepper motor to an A4988 driver.
+   - Connect each stepper motor to an A4988 driver according to the pin map below.
+     
+| Motor Number | Step Pin | Direction Pin |
+|--------------|----------|---------------|
+| Motor 1      | 33       | 32            |
+| Motor 2      | 18       | 26            |
+| Motor 3      | 23       | 14            |
+| Motor 4      | 19       | 27            |
+| Motor 5      | 22       | 12            |
+| Motor 6      | 21       | 13            |
+
+   - Pin 25 is optional for software based enable, however I tie all enable pins to ground to enable permanently.
    - Connect the step and direction pins of each A4988 driver to the corresponding pins on the ESP32.
-   - Ensure the power supply is adequately rated for the stepper motors and the ESP32.
+   - Ensure the power supply is adequately rated for the stepper motors and the ESP32, 12-24v is safe.
+   - If you want to modify your maxmimum current for the steppers, [please use this guide!](https://www.youtube.com/watch?v=OpaUwWouyE0)
 
 2. **Software Setup:**
    - Open this folder in VSCode
@@ -47,7 +62,7 @@ This project is focused on the development of a robot head and neck assembly, co
    - Use the device name "NECK_BT" for connecting.
    - Send commands with the script in the py folder called neck_con.py
    - Import move(x,y) methods into parallel scripts, such as [Supervision](https://github.com/roboflow/supervision).
-   - Add your own control schemes from and additional functions to neck_con.py and access them for your applicaiton.
+   - Add your own control schemes from and additional functions to neck_con.py and access them for your application.
 
 ## Usage
 
