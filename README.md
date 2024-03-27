@@ -61,6 +61,7 @@ This project is focused on the development of a robot head and neck assembly, co
    - Use the device name "NECK_BT" for connecting.
    - Send commands with the script in the py folder called neck_con.py
    - Import move(x,y) methods into parallel scripts, such as [Supervision](https://github.com/roboflow/supervision).
+   - Modify the values on line 45 through 53 to reflect your imager resolution.
    - Add your own control schemes from and additional functions to neck_con.py and access them for your application.
 
 ## Usage
