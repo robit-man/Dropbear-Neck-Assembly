@@ -90,5 +90,6 @@ This project is open-source and available under the [MIT License](LICENSE).
 - Thanks to the developers of the FastAccelStepper library for providing an efficient way to control stepper motors with the ESP32.
 - Gratitude to the ESP32 community for their valuable resources and support.
 
+#### THANK YOU EVERYONE IN [FRACTIONAL ROBOTS!!!](https://t.me/fractionalrobots)
 ![photo_2024-03-24_21-52-06](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/75925903-4144-4487-bab8-65af1bf8f8df) 
 
