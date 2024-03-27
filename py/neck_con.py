@@ -16,7 +16,7 @@ def bluetooth_connect(device_address, port):
 def serial_connect(port, baudrate):
     return serial.Serial(port, baudrate)
 
-device_address = "7C:9E:BD:F0:92:A4"
+device_address = "SET:THIS:TO:YOUR:ESP32:MAC:ADDRESS"
 port = 1
 ser = None
 
