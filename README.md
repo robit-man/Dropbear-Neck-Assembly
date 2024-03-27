@@ -36,13 +36,17 @@ This project is focused on the development of a robot head and neck assembly, co
    - Ensure the power supply is adequately rated for the stepper motors and the ESP32.
 
 2. **Software Setup:**
+   - Open this folder in VSCode
    - Install PlatformIO and set up a new project for the ESP32 DevKit V1.
    - Add the FastAccelStepper library to the project dependencies.
    - Upload the provided script to the ESP32.
 
-3. **Bluetooth Configuration:**
+4. **Bluetooth Configuration:**
    - Pair the ESP32 with your Bluetooth control device.
    - Use the device name "NECK_BT" for connecting.
+   - send commands with the script in the py folder called neck_con.py
+   - Import move(x,y) methods into parallel scripts, such as [Supervision](https://github.com/roboflow/supervision).
+   - add your own control schemes from and additional functions to neck_con.py and access them for your applicaiton.
 
 ## Usage
 
