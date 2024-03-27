@@ -1,6 +1,7 @@
 #### DROPBEAR
-| ![photo_2024-03-24_21-52-06](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/75925903-4144-4487-bab8-65af1bf8f8df)  | https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825  |
+![photo_2024-03-24_21-52-06](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/75925903-4144-4487-bab8-65af1bf8f8df) 
 
+https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825
 
 ## Overview
 
