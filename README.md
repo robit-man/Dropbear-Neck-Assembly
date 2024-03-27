@@ -1,6 +1,8 @@
 # Robot Head and Neck Assembly
 
-https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825
+<p align="center">
+  <iframe src="https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825" frameborder="0" allowfullscreen></iframe>
+</p>
 
 ## Overview
 
