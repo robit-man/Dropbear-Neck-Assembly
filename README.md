@@ -30,7 +30,7 @@ This project is focused on the development of a robot head and neck assembly, co
 - [FastAccelStepper](https://github.com/gin66/FastAccelStepper) library for stepper motor control
 
 
-![photo_2024-03-26_12-58-00](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/1d6f9121-00f4-4cd6-9dc0-e236b38ce0d3)
+![Group 1](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/05ccca6d-9036-46a9-8a09-2bdd573e0e20)
 
 ## Setup and Configuration
 
