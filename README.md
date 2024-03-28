@@ -59,6 +59,8 @@ This repository is focused on the development of a robot head and neck assembly,
    - Add the FastAccelStepper library to the project dependencies.
    - Upload the provided script to the ESP32.
 
+![corner-head-transparent](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/99549253-a490-414b-ba1d-fceb49ccb87a)
+
 4. **Bluetooth Configuration:**
    - Pair the ESP32 with your Bluetooth control device.
    - Use the device name "NECK_BT" for connecting.
