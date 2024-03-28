@@ -1,15 +1,6 @@
-<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
 
-<style>
-    h1, h2, h3, h4, h5, h6 {
-        color: yellow;
-        font-family: 'Roboto', sans-serif;
-    }
+![Group 2](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/bd13c6f5-7a3f-4262-9891-4259f17abbe0)
 
-    body {
-        font-family: 'Roboto', sans-serif;
-    }
-</style>
 
 # DROPBEAR NECK ASSEMBLY
 
