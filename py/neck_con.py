@@ -1,10 +1,25 @@
 ## This script is built to move the pitch and yaw of the neck based on object recognition key points in a parallel script. 
 ## this can be used as an example, and you can implement your own control by modifying the move() function to accept as many inouts as you want.
 ## Refer to the readme for accepted serial commands: command = f"H30,X0,P0,S1,A1" ~ moves all actuators up 30mm
-
 import serial
 import time
 import bluetooth
+
+# Stream dimensions
+streamWidth = 740
+streamHeight = 1280
+
+# Center of the stream
+center_x = streamWidth // 2
+center_y = streamHeight // 2
+
+# Delta thresholds
+delta_threshold_x = 5
+delta_threshold_y = 5
+
+# Maximum and minimum delta values
+max_delta = 700
+min_delta = -700
 
 # Try to connect via Bluetooth
 def bluetooth_connect(device_address, port):
@@ -20,7 +35,7 @@ def bluetooth_connect(device_address, port):
 def serial_connect(port, baudrate):
     return serial.Serial(port, baudrate)
 
-device_address = "SET:THIS:TO:YOUR:ESP32:MAC:ADDRESS"
+device_address = "7C:9E:BD:F0:92:A4"
 port = 1
 ser = None
 
@@ -33,8 +48,8 @@ else:
     print("Falling back to serial connection")
     ser = serial_connect('/dev/ttyUSB0', 115200)
 
-prev_x = 640
-prev_y = 360
+prev_x = center_x
+prev_y = center_y
 prev_time = time.time()
 
 def move(x, y):
@@ -46,15 +61,15 @@ def move(x, y):
     time_delta = current_time - prev_time
 
     # Adjust the deltas based on the position
-    if y < 355:
-        p_delta = 355 - y
-    elif y > 365:
-        p_delta = -(y - 365)
+    if y > center_y + delta_threshold_y:
+        p_delta = y - (center_y + delta_threshold_y)
+    elif y < center_y - delta_threshold_y:
+        p_delta = -(center_y - delta_threshold_y - y)
 
-    if x > 645:
-        x_delta = x - 645
-    elif x < 635:
-        x_delta = -(635 - x)
+    if x > center_x + delta_threshold_x:
+        x_delta = x - (center_x + delta_threshold_x)
+    elif x < center_x - delta_threshold_x:
+        x_delta = -(center_x - delta_threshold_x - x)
 
     # Calculate the distance moved since the last command
     distance_x = abs(x - prev_x)
@@ -69,7 +84,13 @@ def move(x, y):
     prev_y = y
     prev_time = current_time
 
+    # Constrain and then normalize the deltas
+    p_delta_constrained = max(min(p_delta, max_delta), min_delta)
+    x_delta_constrained = max(min(x_delta, max_delta), min_delta)
+    p_delta_normalized = -1.2 * p_delta_constrained
+    x_delta_normalized = -1.5 * x_delta_constrained
+
     # Send the command
-    command = f"H30,X{x_delta},P{p_delta},S{speed:.2f},A{acceleration:.2f}"
+    command = f"H30,X{x_delta_normalized},P{p_delta_normalized}, \n"
     print(command)
     ser.write(command.encode())
