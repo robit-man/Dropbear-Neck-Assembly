@@ -69,7 +69,8 @@ This project is focused on the development of a robot head and neck assembly, co
 Send movement commands to the ESP32 via Bluetooth or USB Serial in the following format:
 
 - **Direct Control:** `1:100,2:200,3:-150,...` where the number before the colon represents the motor number (1-6) and the number after the colon represents the target position in millimeters.
-- **Angle and Height Control:** `X10,Y-5,Z15,H30,S1.5,A2,R10,P-5` where `X`, `Y`, and `Z` are the angles for yaw, roll, and pitch respectively, `H` is the height offset, `S` is the speed multiplier, `A` is the acceleration multiplier, `R` is the roll angle, and `P` is the pitch angle.
+- **Angle and Height Control:** `X10,Y-5,Z15,H30,S1.5,A2,R10,P-5` where `X`, `Y`, and `Z` are the angles and planes for yaw or radial rotation, lateral, and ventral/dorsal translation respectively, `H` is the height offset, `S` is the speed multiplier, `A` is the acceleration multiplier, `R` is the roll angle, and `P` is the pitch angle.
+- **Default Values:** The speed variable (speedVar) is set to 48000 hz, and acceleration value (accVar) is set to 36000. Refer to [FastAccelStepper library](https://github.com/gin66/FastAccelStepper/) for more details on where those variables are passed.
 
 ## Limitations
 
