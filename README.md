@@ -1,3 +1,16 @@
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+
+<style>
+    h1, h2, h3, h4, h5, h6 {
+        color: yellow;
+        font-family: 'Roboto', sans-serif;
+    }
+
+    body {
+        font-family: 'Roboto', sans-serif;
+    }
+</style>
+
 # DROPBEAR NECK ASSEMBLY
 
 https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825
@@ -27,7 +40,6 @@ This project is focused on the development of a robot head and neck assembly, co
 
 - [PlatformIO](https://platformio.org/) for ESP32 development
 - [FastAccelStepper](https://github.com/gin66/FastAccelStepper) library for stepper motor control
-
 
 ![Group 1](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/05ccca6d-9036-46a9-8a09-2bdd573e0e20)
 
@@ -93,5 +105,4 @@ This project is open-source and available under the [MIT License](LICENSE).
 - Gratitude to the ESP32 community for their valuable resources and support.
 
 #### THANK YOU EVERYONE IN [FRACTIONAL ROBOTS!!!](https://t.me/fractionalrobots)
-![photo_2024-03-24_21-52-06](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/75925903-4144-4487-bab8-65af1bf8f8df) 
-
+![photo_2024-03-24_21-52-06](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/75925903-4144-4487-bab8-65af1bf8f8df)
