@@ -2,13 +2,11 @@
 ![Group 2](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/bd13c6f5-7a3f-4262-9891-4259f17abbe0)
 
 
-# DROPBEAR NECK ASSEMBLY
-
 https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825
 
-## Overview
+# DROPBEAR NECK ASSEMBLY
 
-This project is focused on the development of a robot head and neck assembly, controlled by an ESP32 DevKit V1. The assembly is designed to allow for precise movements in multiple axes, enabling the robot head to simulate human-like motions. The system is controlled via Bluetooth, allowing for wireless operation.
+This repository is focused on the development of a robot head and neck assembly, controlled by an ESP32 DevKit V1. The assembly is designed to allow for precise movements in multiple axes, enabling the robot head to simulate human-like motions. The system is controlled via Bluetooth, allowing for wireless operation.
 
 ## Features
 
