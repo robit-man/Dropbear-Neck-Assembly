@@ -30,7 +30,9 @@ This repository is focused on the development of a robot head and neck assembly,
 - [PlatformIO](https://platformio.org/) for ESP32 development
 - [FastAccelStepper](https://github.com/gin66/FastAccelStepper) library for stepper motor control
 
-![Group 1(1)](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/d1db872d-a6b0-459a-a1d7-9058c078fdc6)
+
+![Group 1(2)](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/d8ad1fae-21bd-44cc-b0aa-567115c87615)
+
 
 ## Setup and Configuration
 
