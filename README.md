@@ -1,5 +1,5 @@
 
-![Group 2](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/bd13c6f5-7a3f-4262-9891-4259f17abbe0)
+[![Group 2](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/bd13c6f5-7a3f-4262-9891-4259f17abbe0)](https://t.me/fractionalrobots)
 
 
 https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825
