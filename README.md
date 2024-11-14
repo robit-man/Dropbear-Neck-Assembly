@@ -1,8 +1,10 @@
 
 [![Group 2](https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/bd13c6f5-7a3f-4262-9891-4259f17abbe0)](https://t.me/fractionalrobots)
 
+![317462152-b25157ac-0184-4cff-bfda-d2495f46f825-ezgif com-optimize(1)](https://github.com/user-attachments/assets/cd753c06-48f7-4914-a3d4-d4f5289db4af)
+
+
 https://t.me/fractionalrobots/7838
-https://github.com/robit-man/dropbear-neck-assembly/assets/36677806/b25157ac-0184-4cff-bfda-d2495f46f825
 
 # DROPBEAR NECK ASSEMBLY
 
