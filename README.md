@@ -4,8 +4,6 @@
 ![317462152-b25157ac-0184-4cff-bfda-d2495f46f825-ezgif com-optimize(1)](https://github.com/user-attachments/assets/cd753c06-48f7-4914-a3d4-d4f5289db4af)
 
 
-https://t.me/fractionalrobots/7838
-
 # DROPBEAR NECK ASSEMBLY
 
 This repository is focused on the development of a robot head and neck assembly, controlled by an ESP32 DevKit V1. The assembly is designed to allow for precise movements in multiple axes, enabling the robot head to simulate human-like motions. The system is controlled via Bluetooth, allowing for wireless operation.
