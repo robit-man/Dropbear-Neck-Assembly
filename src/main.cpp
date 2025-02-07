@@ -1,11 +1,46 @@
-#include <FastAccelStepper.h>
-#include <BluetoothSerial.h>
+/*
+  Stewart Platform Controller for ESP32
 
+  This code controls a Stewart platform using 6 stepper motors via lead screws.
+  It accepts movement commands from both USB Serial and BluetoothSerial.
+  
+  The code supports three kinds of commands:
+    1. Direct control commands for individual steppers (e.g., "1:30,2:45")
+    2. General movement commands that specify platform head angles,
+       height offsets, and speed/acceleration multipliers (e.g., "H-40,S2,A2")
+    3. Quaternion-based commands for orientation control (e.g., 
+       "Q:0.7071,0,0.7071,0,S1,A1")
+       
+  Additionally, sending the "HOME" command over serial will run a startup procedure
+  that moves the platform head to a home position and resets the stepper positions.
+  
+  Make sure you have the FastAccelStepper library installed and select your ESP32 board.
+*/
+
+#include <FastAccelStepper.h>    // Library for high-speed stepper control
+#include <BluetoothSerial.h>     // Library for Bluetooth serial communication
+#include <math.h>                // For math functions (e.g., sqrt, atan2, asin)
+
+// Ensure PI is defined (Arduino usually defines PI already)
+#ifndef PI
+  #define PI 3.14159265358979323846
+#endif
+
+// ----------------------- Global Objects and Function Prototypes -----------------------
+
+// Create an instance of BluetoothSerial for handling Bluetooth communication.
 BluetoothSerial BTSerial;
 
 // Function prototypes
 void executeCommand(String command);
 void moveToStepper(int stepperNum, int positionSteps);
+void moveHead(int angleX, int angleY, int angleZ, int heightOffset,
+              float speedMultiplier, float accelMultiplier, int roll, int pitch);
+void parseAndMove(String input);
+void handleQuaternionCommand(String command);
+void setupStepper(FastAccelStepper* &stepper, int stepPin, int dirPin, int speed, int accel);
+
+// ----------------------- Pin Definitions and Constants -----------------------
 
 // Define the step and direction pins for each motor
 #define MOTOR1_STEP_PIN 33
@@ -21,20 +56,32 @@ void moveToStepper(int stepperNum, int positionSteps);
 #define MOTOR6_STEP_PIN 21
 #define MOTOR6_DIR_PIN 13
 
-// Leadscrew parameters
-#define LEADSCREW_PITCH 2.0 // Pitch of the leadscrew in mm
-#define STEPS_PER_REV 6400  // Steps per revolution for the stepper motor
+// Define the enable pin used for all steppers (common to all motors)
+#define MOTOR_ENABLE_PIN 25
 
+// Leadscrew parameters: pitch in mm and steps per revolution for each motor.
+#define LEADSCREW_PITCH 2.0   // mm pitch of the leadscrew
+#define STEPS_PER_REV 6400    // Steps per revolution for the stepper motor
+
+// Calculate the distance (in mm) that the leadscrew advances per step,
+// factoring in microstepping (here assumed to be 1/8 microstepping).
+// (This conversion is used in the head-movement calculations.)
+#define DISTANCE_PER_STEP ((LEADSCREW_PITCH / STEPS_PER_REV) / 8)
+
+// For direct control commands, we want to interpret the number after the colon in millimeters.
+// Based on your calibration, your hardware moves ~6 mm when 2560 steps are commanded,
+// which means approximately 2560/6 ≈ 426.67 steps per mm.
+// Define a constant for direct control conversion:
+#define STEPS_PER_MM 426.67
+
+// Global speed and acceleration variables (in Hz and steps/sec²)
 int speedVar = 48000;
 int accVar = 36000;
 
-// Calculate the distance per step
-#define DISTANCE_PER_STEP (LEADSCREW_PITCH / STEPS_PER_REV) / 8
-
-// Create a FastAccelStepperEngine object
+// Create a FastAccelStepperEngine instance to manage stepper motor actions.
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 
-// Create pointers for each stepper motor
+// Declare pointers for each of the 6 stepper motors.
 FastAccelStepper *stepper1 = NULL;
 FastAccelStepper *stepper2 = NULL;
 FastAccelStepper *stepper3 = NULL;
@@ -42,79 +89,44 @@ FastAccelStepper *stepper4 = NULL;
 FastAccelStepper *stepper5 = NULL;
 FastAccelStepper *stepper6 = NULL;
 
-void setup()
-{
-  Serial.begin(115200);
-  BTSerial.begin("NECK_BT"); // Start Bluetooth with a name "ESP32_BT"
+// ----------------------- Setup Functions -----------------------
 
-  // Initialize the stepper engine
+// Helper function to initialize and configure a stepper motor connected to a given step pin.
+void setupStepper(FastAccelStepper* &stepper, int stepPin, int dirPin, int speed, int accel) {
+  // Connect the stepper motor to the engine using the designated step pin.
+  stepper = engine.stepperConnectToPin(stepPin);
+  if (stepper) {
+    stepper->setDirectionPin(dirPin);      // Set the direction pin
+    stepper->setEnablePin(MOTOR_ENABLE_PIN); // Set the common enable pin
+    stepper->setAutoEnable(true);            // Automatically enable on move command
+    stepper->setSpeedInHz(speed);            // Set default speed (in Hz)
+    stepper->setAcceleration(accel);         // Set default acceleration
+  }
+}
+
+void setup() {
+  // ----------------------- Initialize Serial Communication -----------------------
+  Serial.begin(115200);          // Begin USB Serial communication for debugging
+  BTSerial.begin("NECK_BT");      // Start Bluetooth with the name "NECK_BT"
+  BTSerial.setTimeout(50);        // Set a short timeout for Bluetooth reads
+
+  // ----------------------- Initialize the Stepper Engine -----------------------
   engine.init();
 
-  // Create and configure the stepper motors
-  stepper1 = engine.stepperConnectToPin(MOTOR1_STEP_PIN);
-  if (stepper1)
-  {
-    stepper1->setDirectionPin(MOTOR1_DIR_PIN);
-    stepper1->setEnablePin(25);
-    stepper1->setAutoEnable(true);
-    stepper1->setSpeedInHz(speedVar);
-    stepper1->setAcceleration(accVar);
-  }
+  // ----------------------- Configure Each Stepper Motor -----------------------
+  setupStepper(stepper1, MOTOR1_STEP_PIN, MOTOR1_DIR_PIN, speedVar, accVar);
+  setupStepper(stepper2, MOTOR2_STEP_PIN, MOTOR2_DIR_PIN, speedVar, accVar);
+  setupStepper(stepper3, MOTOR3_STEP_PIN, MOTOR3_DIR_PIN, speedVar, accVar);
+  setupStepper(stepper4, MOTOR4_STEP_PIN, MOTOR4_DIR_PIN, speedVar, accVar);
+  setupStepper(stepper5, MOTOR5_STEP_PIN, MOTOR5_DIR_PIN, speedVar, accVar);
+  setupStepper(stepper6, MOTOR6_STEP_PIN, MOTOR6_DIR_PIN, speedVar, accVar);
 
-  stepper2 = engine.stepperConnectToPin(MOTOR2_STEP_PIN);
-  if (stepper2)
-  {
-    stepper2->setDirectionPin(MOTOR2_DIR_PIN);
-    stepper2->setEnablePin(25);
-    stepper2->setAutoEnable(true);
-    stepper2->setSpeedInHz(speedVar);
-    stepper2->setAcceleration(accVar);
-  }
-
-  stepper3 = engine.stepperConnectToPin(MOTOR3_STEP_PIN);
-  if (stepper3)
-  {
-    stepper3->setDirectionPin(MOTOR3_DIR_PIN);
-    stepper3->setEnablePin(25);
-    stepper3->setAutoEnable(true);
-    stepper3->setSpeedInHz(speedVar);
-    stepper3->setAcceleration(accVar);
-  }
-
-  stepper4 = engine.stepperConnectToPin(MOTOR4_STEP_PIN);
-  if (stepper4)
-  {
-    stepper4->setDirectionPin(MOTOR4_DIR_PIN);
-    stepper4->setEnablePin(25);
-    stepper4->setAutoEnable(true);
-    stepper4->setSpeedInHz(speedVar);
-    stepper4->setAcceleration(accVar);
-  }
-
-  stepper5 = engine.stepperConnectToPin(MOTOR5_STEP_PIN);
-  if (stepper5)
-  {
-    stepper5->setDirectionPin(MOTOR5_DIR_PIN);
-    stepper5->setEnablePin(25);
-    stepper5->setAutoEnable(true);
-    stepper5->setSpeedInHz(speedVar);
-    stepper5->setAcceleration(accVar);
-  }
-
-  stepper6 = engine.stepperConnectToPin(MOTOR6_STEP_PIN);
-  if (stepper6)
-  {
-    stepper6->setDirectionPin(MOTOR6_DIR_PIN);
-    stepper6->setEnablePin(25);
-    stepper6->setAutoEnable(true);
-    stepper6->setSpeedInHz(speedVar);
-    stepper6->setAcceleration(accVar);
-  }
-
-  // Execute the startup command
+  // ----------------------- Execute a Startup Command -----------------------
+  // This sample command positions the platform head. Adjust as needed.
   executeCommand("H-40,S2,A2");
-  delay(2000);
-  // Reset the position of each stepper motor to 0
+  delay(2000);  // Allow time for the movement to complete
+
+  // ----------------------- Reset Stepper Positions -----------------------
   if (stepper1) stepper1->setCurrentPosition(0);
   if (stepper2) stepper2->setCurrentPosition(0);
   if (stepper3) stepper3->setCurrentPosition(0);
@@ -122,25 +134,50 @@ void setup()
   if (stepper5) stepper5->setCurrentPosition(0);
   if (stepper6) stepper6->setCurrentPosition(0);
 }
-void moveHead(int angleX, int angleY, int angleZ, int heightOffset, float speedMultiplier, float accelMultiplier, int roll, int pitch)
-{
-  // Define scaling factors for converting angles to stepper steps
-  const float pitchScale = 10.0;   // Adjust as needed
-  const float rollScale = 10.0;    // Adjust as needed
-  const float yawScale = 10.0;     // Adjust as needed for Z-axis movement
-  const float heightScale = 400.0; // Adjust as needed, based on the mechanics of your platform
-  const float rollMovementScale = 10.0; // Adjust as needed for roll movement
-  const float pitchMovementScale = 10.0; // Adjust as needed for roll movement
 
-  // Calculate the movement for each stepper based on the angles and roll
-  int move1 = -angleX * pitchScale + angleY * rollScale + angleZ * yawScale + pitch * pitchMovementScale + roll * rollMovementScale;
-  int move2 = angleX * pitchScale - angleY * rollScale - angleZ * yawScale + pitch * pitchMovementScale + roll * rollMovementScale;
-  int move3 = -angleX * pitchScale - angleY * rollScale - angleZ * yawScale - pitch * pitchMovementScale + roll * rollMovementScale;
-  int move4 = angleX * pitchScale + angleY * rollScale - angleZ * yawScale - pitch * pitchMovementScale - roll * rollMovementScale;
-  int move5 = -angleX * pitchScale + angleY * rollScale - angleZ * yawScale + pitch * pitchMovementScale - roll * rollMovementScale;
-  int move6 = angleX * pitchScale - angleY * rollScale + angleZ * yawScale  + pitch * pitchMovementScale - roll * rollMovementScale;
+// ----------------------- Movement and Command Processing Functions -----------------------
 
-  // Apply the height offset to each stepper
+/*
+  moveHead()
+  -----------
+  Calculates and sets new target positions (in steps) for each of the 6 stepper motors
+  based on input angles, height offset, and speed/acceleration multipliers.
+
+  Parameters:
+    - angleX, angleY, angleZ: Base angles (or translations) for head movement.
+    - heightOffset: Additional vertical movement (in mm).
+    - speedMultiplier: Scaling factor to adjust the speed.
+    - accelMultiplier: Scaling factor to adjust the acceleration.
+    - roll, pitch: Additional rotational adjustments.
+
+  The movement for each stepper is computed as a linear combination of these inputs
+  using predefined scaling factors (which should be tuned for your platform's mechanics).
+*/
+void moveHead(int angleX, int angleY, int angleZ, int heightOffset,
+              float speedMultiplier, float accelMultiplier, int roll, int pitch) {
+  // Define scale factors (tweak these values based on your mechanical design)
+  const float pitchScale = 10.0;         // Scale for angleX (interpreted as yaw)
+  const float rollScale = 10.0;          // Scale for angleY (interpreted as lateral translation)
+  const float yawScale = 10.0;           // Scale for angleZ (interpreted as front/back translation)
+  const float heightScale = 400.0;       // Scale to convert height offset (mm) to steps
+  const float rollMovementScale = 10.0;  // Additional scale for roll adjustment
+  const float pitchMovementScale = 10.0; // Additional scale for pitch adjustment
+
+  // Compute target positions (in steps) for each stepper motor.
+  int move1 = -angleX * pitchScale + angleY * rollScale + angleZ * yawScale + 
+               pitch * pitchMovementScale + roll * rollMovementScale;
+  int move2 =  angleX * pitchScale - angleY * rollScale - angleZ * yawScale + 
+               pitch * pitchMovementScale + roll * rollMovementScale;
+  int move3 = -angleX * pitchScale - angleY * rollScale - angleZ * yawScale - 
+               pitch * pitchMovementScale + roll * rollMovementScale;
+  int move4 =  angleX * pitchScale + angleY * rollScale - angleZ * yawScale - 
+               pitch * pitchMovementScale - roll * rollMovementScale;
+  int move5 = -angleX * pitchScale + angleY * rollScale - angleZ * yawScale + 
+               pitch * pitchMovementScale - roll * rollMovementScale;
+  int move6 =  angleX * pitchScale - angleY * rollScale + angleZ * yawScale + 
+               pitch * pitchMovementScale - roll * rollMovementScale;
+
+  // Calculate height adjustment (in steps) and add to each motor's target.
   int heightMovement = heightOffset * heightScale;
   move1 += heightMovement;
   move2 += heightMovement;
@@ -149,240 +186,325 @@ void moveHead(int angleX, int angleY, int angleZ, int heightOffset, float speedM
   move5 += heightMovement;
   move6 += heightMovement;
 
-  // Adjust the speed and acceleration based on the multipliers
+  // Adjust speed and acceleration according to multipliers.
   int newSpeed = speedVar * speedMultiplier;
   int newAccel = accVar * accelMultiplier;
 
-  // Move the steppers with the adjusted speed and acceleration
-  if (stepper1)
-  {
-    stepper1->setSpeedInHz(newSpeed);
-    stepper1->setAcceleration(newAccel);
-    stepper1->moveTo(move1);
-  }
-  if (stepper2)
-  {
-    stepper2->setSpeedInHz(newSpeed);
-    stepper2->setAcceleration(newAccel);
-    stepper2->moveTo(move2);
-  }
-  if (stepper3)
-  {
-    stepper3->setSpeedInHz(newSpeed);
-    stepper3->setAcceleration(newAccel);
-    stepper3->moveTo(move3);
-  }
-  if (stepper4)
-  {
-    stepper4->setSpeedInHz(newSpeed);
-    stepper4->setAcceleration(newAccel);
-    stepper4->moveTo(move4);
-  }
-  if (stepper5)
-  {
-    stepper5->setSpeedInHz(newSpeed);
-    stepper5->setAcceleration(newAccel);
-    stepper5->moveTo(move5);
-  }
-  if (stepper6)
-  {
-    stepper6->setSpeedInHz(newSpeed);
-    stepper6->setAcceleration(newAccel);
-    stepper6->moveTo(move6);
-  }
+  // Command each stepper motor to move to its new target position.
+  if (stepper1) { stepper1->setSpeedInHz(newSpeed); stepper1->setAcceleration(newAccel); stepper1->moveTo(move1); }
+  if (stepper2) { stepper2->setSpeedInHz(newSpeed); stepper2->setAcceleration(newAccel); stepper2->moveTo(move2); }
+  if (stepper3) { stepper3->setSpeedInHz(newSpeed); stepper3->setAcceleration(newAccel); stepper3->moveTo(move3); }
+  if (stepper4) { stepper4->setSpeedInHz(newSpeed); stepper4->setAcceleration(newAccel); stepper4->moveTo(move4); }
+  if (stepper5) { stepper5->setSpeedInHz(newSpeed); stepper5->setAcceleration(newAccel); stepper5->moveTo(move5); }
+  if (stepper6) { stepper6->setSpeedInHz(newSpeed); stepper6->setAcceleration(newAccel); stepper6->moveTo(move6); }
 }
 
-
-void parseAndMove(String input)
-{
-  // Split the input into individual commands
+/*
+  parseAndMove()
+  ---------------
+  Parses a compound command string that may contain several commands separated by the '|'
+  character. Each individual command is then executed via executeCommand().
+*/
+void parseAndMove(String input) {
   int startIdx = 0;
   int endIdx = input.indexOf('|');
-  while (endIdx != -1)
-  {
-    String command = input.substring(startIdx, endIdx);
-    executeCommand(command); // Execute each command
 
+  // Process each command (delimited by '|')
+  while (endIdx != -1) {
+    String command = input.substring(startIdx, endIdx);
+    executeCommand(command);
     startIdx = endIdx + 1;
-    endIdx = input.indexOf('|', startIdx);
+    endIdx = input.indexOf(',', startIdx);
   }
 
-  // Execute the last command (since it's not followed by a pipe symbol)
+  // Execute the last (or only) command if any.
   String lastCommand = input.substring(startIdx);
-  executeCommand(lastCommand);
+  if (lastCommand.length() > 0) {
+    executeCommand(lastCommand);
+  }
 }
 
-void executeCommand(String command)
-{
-  // Check if the command is for direct control of axes
-  if (command.indexOf(':') != -1)
-  {
-    // Parse and execute direct control commands
+/*
+  executeCommand()
+  -----------------
+  Interprets and executes a single command string.
+
+  Command types:
+    - If the command equals "HOME" (case-insensitive), it is treated as a home command.
+    - If the command starts with 'Q', it is treated as a quaternion command.
+    - If the command contains a colon (':'), it is processed as direct
+      control of individual steppers (e.g., "1:30,2:45").
+    - Otherwise, it is interpreted as a general movement command
+      that sets head movement parameters (e.g., "H-40,S2,A2").
+*/
+void executeCommand(String command) {
+  command.trim();  // Remove any extraneous whitespace
+
+  // Ignore empty commands.
+  if (command.length() == 0)
+    return;
+
+  // ---------- Handle HOME Command ----------
+  if (command.equalsIgnoreCase("HOME")) {
+    Serial.println("Executing HOME command...");
+    executeCommand("H-40,S2,A2");
+    delay(2000);  // Allow time for the movement to complete
+    if (stepper1)
+      stepper1->setCurrentPosition(0);
+    if (stepper2)
+      stepper2->setCurrentPosition(0);
+    if (stepper3)
+      stepper3->setCurrentPosition(0);
+    if (stepper4)
+      stepper4->setCurrentPosition(0);
+    if (stepper5)
+      stepper5->setCurrentPosition(0);
+    if (stepper6)
+      stepper6->setCurrentPosition(0);
+    return;
+  }
+
+  // ---------- Handle Quaternion Commands ----------
+  if (command.charAt(0) == 'Q') {
+    handleQuaternionCommand(command);
+    return;
+  }
+
+  // ---------- Handle Direct Stepper Control Commands ----------
+  if (command.indexOf(':') != -1) {
     int startIdx = 0;
     int endIdx = command.indexOf(',');
-    while (endIdx != -1)
-    {
+    while (endIdx != -1) {
       String axisCommand = command.substring(startIdx, endIdx);
       int colonIdx = axisCommand.indexOf(':');
-      if (colonIdx != -1)
-      {
+      if (colonIdx != -1) {
+        // For direct control, interpret the value as millimeters,
+        // and convert it to steps using our calibrated conversion factor.
         int stepperNum = axisCommand.substring(0, colonIdx).toInt();
-        int positionMM = axisCommand.substring(colonIdx + 1).toFloat();
-        // Convert mm to steps
-        int positionSteps = positionMM / DISTANCE_PER_STEP;
-        // Move the corresponding stepper
+        float mmValue = axisCommand.substring(colonIdx + 1).toFloat();
+        int positionSteps = mmValue * STEPS_PER_MM;
         moveToStepper(stepperNum, positionSteps);
       }
       startIdx = endIdx + 1;
       endIdx = command.indexOf(',', startIdx);
     }
 
-    // Handle the last axis command (since it's not followed by a comma)
+    // Process the last token in the command
     String lastAxisCommand = command.substring(startIdx);
     int lastColonIdx = lastAxisCommand.indexOf(':');
-    if (lastColonIdx != -1)
-    {
+    if (lastAxisCommand.length() > 0 && lastColonIdx != -1) {
       int stepperNum = lastAxisCommand.substring(0, lastColonIdx).toInt();
-      int positionMM = lastAxisCommand.substring(lastColonIdx + 1).toFloat();
-      // Convert mm to steps
-      int positionSteps = positionMM / DISTANCE_PER_STEP;
-      // Move the corresponding stepper
+      float mmValue = lastAxisCommand.substring(lastColonIdx + 1).toFloat();
+      int positionSteps = mmValue * STEPS_PER_MM;
       moveToStepper(stepperNum, positionSteps);
     }
   }
-  else
-  {
-    // Initialize angles, height offset, and multipliers with default values
-    int angleX = 0;
-    int angleY = 0;
-    int angleZ = 0;
-    int heightOffset = 0;
-    int roll = 0; // Added roll
-    int pitch = 0; // Added pitch
-    float speedMultiplier = 1.0; // Default to no change
-    float accelMultiplier = 1.0; // Default to no change
+  // ---------- Handle General Movement Commands ----------
+  else {
+    // Default parameters for head movement
+    int angleX = 0;         // Typically yaw
+    int angleY = 0;         // Typically lateral translation
+    int angleZ = 0;         // Typically front-to-back translation
+    int heightOffset = 0;   // Height adjustment (mm)
+    int roll = 0;           // Additional roll adjustment
+    int pitch = 0;          // Additional pitch adjustment
+    float speedMultiplier = 1.0; // No speed scaling by default
+    float accelMultiplier = 1.0; // No acceleration scaling by default
 
-    // Parse the command for angles, height offset, and multipliers
+    // Parse the comma-separated tokens in the command.
     int startIdx = 0;
     int endIdx = command.indexOf(',');
-    while (endIdx != -1)
-    {
+    while (endIdx != -1) {
       String angleCommand = command.substring(startIdx, endIdx);
-      char axis = angleCommand.charAt(0);
-      float value = angleCommand.substring(1).toFloat();
-
-      switch (axis)
-      {
-      case 'X':
-        angleX = value; // Yaw or left to right rotation
-        break;
-      case 'Y':
-        angleY = value; // Translation left to right
-        break;
-      case 'Z':
-        angleZ = value; // Translation front to back
-        break;
-      case 'H':
-        heightOffset = value; // Height of the neck in mm
-        break;
-      case 'S':
-        speedMultiplier = value; // Acceleration Value in hz
-        break;
-      case 'A':
-        accelMultiplier = value; // Acceleration Value in hz
-        break;
-      case 'R': // Added case for roll or tilt
-        roll = value;
-        break;
-      case 'P': // Added case for pitch or chin up
-        pitch = value;
-        break;
+      if (angleCommand.length() > 0) {
+        char axis = angleCommand.charAt(0);
+        float value = angleCommand.substring(1).toFloat();
+        switch (axis) {
+          case 'X': angleX = value; break;
+          case 'Y': angleY = value; break;
+          case 'Z': angleZ = value; break;
+          case 'H': heightOffset = value; break;
+          case 'S': speedMultiplier = value; break;
+          case 'A': accelMultiplier = value; break;
+          case 'R': roll = value; break;
+          case 'P': pitch = value; break;
+        }
       }
-
       startIdx = endIdx + 1;
       endIdx = command.indexOf(',', startIdx);
     }
 
-    // Handle the last value (since it's not followed by a comma)
+    // Process the final token in the command.
     String lastCommand = command.substring(startIdx);
-    char lastAxis = lastCommand.charAt(0);
-    float lastValue = lastCommand.substring(1).toFloat();
-    switch (lastAxis)
-    {
-    case 'X':
-      angleX = lastValue;
-      break;
-    case 'Y':
-      angleY = lastValue;
-      break;
-    case 'Z':
-      angleZ = lastValue;
-      break;
-    case 'H':
-      heightOffset = lastValue;
-      break;
-    case 'S':
-      speedMultiplier = lastValue;
-      break;
-    case 'A':
-      accelMultiplier = lastValue;
-      break;
-    case 'R': // Added case for roll
-      roll = lastValue;
-      break;
-    case 'P': // Added case for roll
-      pitch = lastValue;
-      break;
+    if (lastCommand.length() > 0) {
+      char lastAxis = lastCommand.charAt(0);
+      float lastValue = lastCommand.substring(1).toFloat();
+      switch (lastAxis) {
+        case 'X': angleX = lastValue; break;
+        case 'Y': angleY = lastValue; break;
+        case 'Z': angleZ = lastValue; break;
+        case 'H': heightOffset = lastValue; break;
+        case 'S': speedMultiplier = lastValue; break;
+        case 'A': accelMultiplier = lastValue; break;
+        case 'R': roll = lastValue; break;
+        case 'P': pitch = lastValue; break;
+      }
     }
 
-    // Move the head based on the parsed angles, height offset, and multipliers
+    // Command the platform head to move with the specified parameters.
     moveHead(angleX, angleY, angleZ, heightOffset, speedMultiplier, accelMultiplier, roll, pitch);
   }
 }
 
-void moveToStepper(int stepperNum, int positionSteps)
-{
-  switch (stepperNum)
-  {
-  case 1:
-    if (stepper1)
-      stepper1->moveTo(positionSteps);
-    break;
-  case 2:
-    if (stepper2)
-      stepper2->moveTo(positionSteps);
-    break;
-  case 3:
-    if (stepper3)
-      stepper3->moveTo(positionSteps);
-    break;
-  case 4:
-    if (stepper4)
-      stepper4->moveTo(positionSteps);
-    break;
-  case 5:
-    if (stepper5)
-      stepper5->moveTo(positionSteps);
-    break;
-  case 6:
-    if (stepper6)
-      stepper6->moveTo(positionSteps);
-    break;
-  default:
-    Serial.println("Invalid stepper number");
-    break;
+/*
+  moveToStepper()
+  ----------------
+  Directs a specific stepper motor (identified by its number) to move to a target position.
+  The target position is given in steps (directly, without conversion).
+*/
+void moveToStepper(int stepperNum, int positionSteps) {
+  switch (stepperNum) {
+    case 1: if (stepper1) stepper1->moveTo(positionSteps); break;
+    case 2: if (stepper2) stepper2->moveTo(positionSteps); break;
+    case 3: if (stepper3) stepper3->moveTo(positionSteps); break;
+    case 4: if (stepper4) stepper4->moveTo(positionSteps); break;
+    case 5: if (stepper5) stepper5->moveTo(positionSteps); break;
+    case 6: if (stepper6) stepper6->moveTo(positionSteps); break;
+    default: Serial.println("Invalid stepper number"); break;
   }
 }
 
-void loop()
-{
-  if (BTSerial.available()) { // Check if there's data from Bluetooth
-    String input = BTSerial.readStringUntil('\n');
-    parseAndMove(input);
+/*
+  handleQuaternionCommand()
+  ---------------------------
+  Processes a command string that starts with 'Q' (for quaternion control).
+
+  Expected format:
+    Q:<w>,<x>,<y>,<z>[,S<speedMultiplier>][,A<accelMultiplier>]
+
+  The first four comma‐separated values are the quaternion components.
+  Optional tokens starting with 'S' and 'A' set the speed and acceleration multipliers.
+  The quaternion is normalized and converted to Euler angles (roll, pitch, yaw) using standard formulas.
+  For this implementation:
+    - The yaw angle is mapped to angleX.
+    - The pitch angle is mapped to angleY.
+    - The roll angle is mapped to angleZ.
+  (Height offset and additional roll/pitch adjustments are set to 0 here.)
+*/
+void handleQuaternionCommand(String command) {
+  // Remove the leading 'Q' and an optional colon.
+  command = command.substring(1);
+  command.trim();
+  if (command.startsWith(":")) {
+    command = command.substring(1);
+    command.trim();
   }
 
-  if (Serial.available()) { // Check if there's data from USB Serial
+  // Split the command by commas.
+  // Expect at least 4 tokens: w, x, y, z.
+  float q[4] = {0, 0, 0, 0};
+  float speedMultiplier = 1.0;
+  float accelMultiplier = 1.0;
+
+  // Tokenize the command into an array of strings (maximum 6 tokens).
+  String tokens[6];
+  int tokenCount = 0;
+  int startIdx = 0;
+  int endIdx = command.indexOf(',');
+  while (endIdx != -1 && tokenCount < 6) {
+    tokens[tokenCount++] = command.substring(startIdx, endIdx);
+    startIdx = endIdx + 1;
+    endIdx = command.indexOf(',', startIdx);
+  }
+  // Add the last token, if any.
+  if (startIdx < command.length() && tokenCount < 6) {
+    tokens[tokenCount++] = command.substring(startIdx);
+  }
+
+  // Verify that there are at least 4 tokens for the quaternion components.
+  if (tokenCount < 4) {
+    Serial.println("Invalid quaternion command: not enough parameters.");
+    return;
+  }
+
+  // Parse quaternion components (assumed order: w, x, y, z).
+  for (int i = 0; i < 4; i++) {
+    q[i] = tokens[i].toFloat();
+  }
+
+  // Parse optional speed (S) and acceleration (A) multipliers.
+  for (int i = 4; i < tokenCount; i++) {
+    String token = tokens[i];
+    token.trim();
+    if (token.startsWith("S")) {
+      speedMultiplier = token.substring(1).toFloat();
+    } else if (token.startsWith("A")) {
+      accelMultiplier = token.substring(1).toFloat();
+    }
+  }
+
+  // Normalize the quaternion to ensure it represents a valid rotation.
+  float norm = sqrt(q[0]*q[0] + q[1]*q[1] + q[2]*q[2] + q[3]*q[3]);
+  if (norm > 0) {
+    for (int i = 0; i < 4; i++) {
+      q[i] /= norm;
+    }
+  } else {
+    Serial.println("Invalid quaternion: norm is zero.");
+    return;
+  }
+
+  // Convert quaternion to Euler angles (in radians) using standard formulas.
+  // Assumes q[0] = w, q[1] = x, q[2] = y, q[3] = z.
+  float roll_rad  = atan2(2.0 * (q[0]*q[1] + q[2]*q[3]), 1.0 - 2.0 * (q[1]*q[1] + q[2]*q[2]));
+  float pitch_rad = asin(2.0 * (q[0]*q[2] - q[3]*q[1]));
+  float yaw_rad   = atan2(2.0 * (q[0]*q[3] + q[1]*q[2]), 1.0 - 2.0 * (q[2]*q[2] + q[3]*q[3]));
+
+  // Convert the Euler angles from radians to degrees.
+  int roll_deg  = round(roll_rad * (180.0 / PI));
+  int pitch_deg = round(pitch_rad * (180.0 / PI));
+  int yaw_deg   = round(yaw_rad * (180.0 / PI));
+
+  // Debug output for the quaternion conversion.
+  Serial.print("Quaternion command received. Euler angles (deg): Yaw=");
+  Serial.print(yaw_deg);
+  Serial.print(", Pitch=");
+  Serial.print(pitch_deg);
+  Serial.print(", Roll=");
+  Serial.println(roll_deg);
+
+  // Map the Euler angles to the movement command.
+  // For this example, we use:
+  //   angleX = yaw, angleY = pitch, angleZ = roll, with no height or extra roll/pitch adjustments.
+  int heightOffset = 0;
+  moveHead(yaw_deg, pitch_deg, roll_deg, heightOffset, speedMultiplier, accelMultiplier, 0, 0);
+}
+
+// ----------------------- Main Loop -----------------------
+
+/*
+  loop()
+  -------
+  Continuously checks for incoming data from both Bluetooth and USB Serial.
+  If data is available, it reads a full command (terminated by a newline),
+  trims it, and passes it to parseAndMove() for processing.
+*/
+void loop() {
+  // Check for Bluetooth data.
+  if (BTSerial.available()) {
+    String input = BTSerial.readStringUntil('\n');
+    input.trim();
+    if (input.length() > 0) {
+      parseAndMove(input);
+    }
+  }
+
+  // Check for USB Serial data.
+  if (Serial.available()) {
     String input = Serial.readStringUntil('\n');
-    parseAndMove(input);
+    input.trim();
+    if (input.length() > 0) {
+      parseAndMove(input);
+    }
   }
 }
