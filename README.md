@@ -25,6 +25,18 @@ This repository is focused on the development of a robot head and neck assembly,
 - Power Supply for the Motors and ESP32
 - Bluetooth Module (if not integrated into the ESP32 DevKit V1)
 
+## Added Control Software in /interface
+
+Just run via 
+```bash
+python3 app.py
+```
+
+and it will automatically generate a venv and start the application via flask.
+
+![image](https://github.com/user-attachments/assets/01263283-5a82-4957-b464-39c6f7d5e6b1)
+
+
 ## Software Requirements
 
 - [PlatformIO](https://platformio.org/) for ESP32 development
