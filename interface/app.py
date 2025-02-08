@@ -970,7 +970,7 @@ headstream_page = r"""
             grp.position.y = transformObj.position.z / 10 + 4;  // up/down from position.z, with offset
             grp.position.z = - transformObj.position.y / 10;     // front/back from position.y
             grp.rotation.x = euler.x;
-            grp.rotation.y = - euler.y;
+            grp.rotation.y = euler.y;
             grp.rotation.z = euler.z;
             
             // Generate and send the head-pose command string using the original multipliers.
@@ -993,7 +993,7 @@ headstream_page = r"""
                                ",Y" + lateralM.toFixed(1) +
                                ",Z" + frontBackM.toFixed(1) +
                                ",H" + height.toFixed(1) +
-                               ",S2,A3" +
+                               ",S4,A3" +
                                ",R" + rollM_clamped.toFixed(1) +
                                ",P" + pitchM_clamped.toFixed(1);
             document.getElementById('commandStream').textContent = commandStr;
