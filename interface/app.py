@@ -432,7 +432,7 @@ direct_page = """
         <button onclick="decMotor({{ i }})">-</button>
         <input type="number" id="motor{{ i }}" value="0" onchange="updateDirect()">
         <button onclick="incMotor({{ i }})">+</button>
-        <input type="range" id="slider{{ i }}" min="-800" max="800" value="0"
+        <input type="range" id="slider{{ i }}" min="0" max="80" value="0"
                oninput="document.getElementById('motor{{ i }}').value=this.value; updateDirect();">
       </div>
     {% endfor %}
