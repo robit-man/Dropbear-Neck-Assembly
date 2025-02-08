@@ -251,11 +251,13 @@ function sendHomeCommand() {
 nav_html = """
 <nav>
   <div class="nav-container">
+    <a href="/connect" class="nav-link">Connect</a>
     <a href="/home" class="nav-link">Home</a>
-    <a href="/direct" class="nav-link">Direct Motor Control</a>
-    <a href="/euler" class="nav-link">Euler Control</a>
-    <a href="/head" class="nav-link">Full Head Control</a>
-    <a href="/quaternion" class="nav-link">Quaternion Control</a>
+    <a href="/direct" class="nav-link">Direct Motor</a>
+    <a href="/euler" class="nav-link">Euler</a>
+    <a href="/head" class="nav-link">Full Head</a>
+    <a href="/quaternion" class="nav-link">Quaternion</a>
+    <a href="/headstream" class="nav-link">Morphtarget</a>
   </div>
       <button onclick="sendHomeCommand()" class="nav-button">HOME Command</button>
 
@@ -770,6 +772,261 @@ quat_page = """
 """
 quat_page = quat_page.replace("%%CSS%%", base_css).replace("%%JS%%", base_js).replace("%%NAV%%", nav_html);
 
+headstream_page = r"""
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <title>Head Pose Command Stream</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- Import fonts and basic styles -->
+    %%CSS%%
+    %%JS%%
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono&display=swap');
+      body {
+        background: #111;
+        color: #FFFAFA;
+        font-family: 'Roboto Mono', monospace;
+        margin: 0;
+        padding: 0;
+      }
+      .container {
+        width: 1024px;
+        margin: 0 auto;
+        padding: 1rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      #commandStream {
+        border: 1px solid #FFFAFA;
+        padding: 0.5rem;
+      }
+      #canvasContainer {
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 480px;
+        z-index: -2;
+      }
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+        filter:saturate(0)brightness(0.8)contrast(1)invert(0);
+      }
+    </style>
+    <!-- Importmap for three.js and its addons from CDN -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://unpkg.com/three@0.152.2/build/three.module.js",
+        "three/addons/": "https://unpkg.com/three@0.152.2/examples/jsm/"
+      }
+    }
+    </script>
+  </head>
+  <body>
+    <div class="container">
+      %%NAV%%
+      <h1>Head Pose Command Stream</h1>
+      <div id="commandStream">Waiting for head pose...</div>
+      <div id="canvasContainer"></div>
+    </div>
+    <script type="module">
+      import * as THREE from 'three';
+      import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+      import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+      import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+      import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+      
+      // Import MediaPipe tasks-vision from CDN
+      import vision from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0';
+      const { FaceLandmarker, FilesetResolver } = vision;
+      
+      // Setup renderer, scene, and camera (matching the example)
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      document.getElementById('canvasContainer').appendChild(renderer.domElement);
+      
+      // Do not flip the entire scene—only mirror the video texture.
+      const scene = new THREE.Scene();
+      
+      // Camera: 60° fov, near=1, far=100, positioned at z=5 (per example)
+      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 100);
+      camera.position.z = 3.8;
+      
+      const controls = new OrbitControls(camera, renderer.domElement);
+      // to disable zoom
+      controls.enableZoom = false;
+
+      // to disable rotation
+      controls.enableRotate = false;
+
+      // to disable pan
+      controls.enablePan = false;
+
+      // Create a group to hold the face model and receive transformation updates from MediaPipe
+      const grpTransform = new THREE.Group();
+      grpTransform.name = 'grp_transform';
+      scene.add(grpTransform);
+      
+      // Create a video element for the webcam stream
+      const video = document.createElement('video');
+      video.autoplay = true;
+      video.playsInline = true;
+      navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+        .then(stream => {
+          video.srcObject = stream;
+          video.play();
+        })
+        .catch(err => console.error('Camera error:', err));
+      
+      // Create a video texture from the webcam and add it as a plane.
+      // The plane is defined as 1×1 and will be scaled each frame to preserve the aspect ratio.
+      const videoTexture = new THREE.VideoTexture(video);
+      const videoMaterial = new THREE.MeshBasicMaterial({ map: videoTexture, depthWrite: false });
+      const videoGeometry = new THREE.PlaneGeometry(1, 1);
+      const videoMesh = new THREE.Mesh(videoGeometry, videoMaterial);
+      // Mirror the video texture by flipping its X scale
+      videoMesh.scale.x = -1;
+      //scene.add(videoMesh);
+      
+      // Load the Face Cap model (facecap.glb) from the official three.js examples CDN.
+      // In the original example, the face mesh is the first child,
+      // and the head (named "mesh_2") along with the eyes ("eyeLeft" and "eyeRight") are extracted.
+      let face = null, eyeL = null, eyeR = null;
+      const gltfLoader = new GLTFLoader();
+      const ktx2Loader = new KTX2Loader()
+          .setTranscoderPath('https://unpkg.com/three@0.152.2/examples/jsm/libs/basis/')
+          .detectSupport(renderer);
+      gltfLoader.setKTX2Loader(ktx2Loader);
+      gltfLoader.setMeshoptDecoder(MeshoptDecoder);
+      gltfLoader.load(
+        'https://threejs.org/examples/models/gltf/facecap.glb',
+        (gltf) => {
+          const mesh = gltf.scene.children[0];
+          // Attach the loaded mesh to our transformation group.
+          grpTransform.add(mesh);
+          const headMesh = mesh.getObjectByName('mesh_2');
+          headMesh.material = new THREE.MeshNormalMaterial();
+          face = headMesh;
+          eyeL = mesh.getObjectByName('eyeLeft');
+          eyeR = mesh.getObjectByName('eyeRight');
+        },
+        undefined,
+        (error) => { console.error('Error loading facecap model:', error); }
+      );
+      
+      // Setup MediaPipe FaceLandmarker
+      const filesetResolver = await FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
+      );
+      const faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+          delegate: 'GPU'
+        },
+        runningMode: 'VIDEO',
+        numFaces: 1,
+        outputFaceBlendshapes: true,
+        outputFacialTransformationMatrixes: true
+      });
+      
+      // Function to send head-pose commands (if needed)
+      function sendCommandToNeck(commandStr) {
+        fetch('/send_command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: commandStr })
+        })
+        .then(response => response.json())
+        .then(data => { console.log("Neck response:", data); })
+        .catch(err => console.error("Error sending command:", err));
+      }
+      
+      // Create an Object3D to hold the MediaPipe transform
+      const transformObj = new THREE.Object3D();
+      
+      function animate() {
+        requestAnimationFrame(animate);
+        
+        if (video.readyState >= video.HAVE_ENOUGH_DATA) {
+          const now = Date.now();
+          const results = faceLandmarker.detectForVideo(video, now);
+          if (results.facialTransformationMatrixes.length > 0) {
+            const matrixArray = results.facialTransformationMatrixes[0].data;
+            transformObj.matrix.fromArray(matrixArray);
+            transformObj.matrix.decompose(transformObj.position, transformObj.quaternion, transformObj.scale);
+            // Convert the quaternion to Euler angles (using YXZ order)
+            const euler = new THREE.Euler().setFromQuaternion(transformObj.quaternion, 'YXZ');
+            const grp = scene.getObjectByName('grp_transform');
+            // Updated GLB transformation: swap the front/back and up/down.
+            // Previously, it was:
+            //   grp.position.y = transformObj.position.z / 10 + 4;
+            //   grp.position.z = - transformObj.position.y / 10;
+            // Now, we swap these:
+            grp.position.x = transformObj.position.x / 10;
+            grp.position.y = transformObj.position.y / 10;  // Up/down now comes from position.y
+            grp.position.z = - transformObj.position.z / -10 + 4;     // Front/back now comes from position.z
+            grp.rotation.x = euler.x;
+            grp.rotation.y = euler.y;
+            grp.rotation.z = euler.z;
+            
+            // Generate and send the head-pose command string (unchanged multipliers)
+            const lateral = -transformObj.position.x;
+            const height = transformObj.position.y + 35;
+            const frontBack = (-transformObj.position.z - 50) * 1.5;
+            const yaw = THREE.MathUtils.radToDeg(euler.y);
+            const pitch = THREE.MathUtils.radToDeg(euler.x);
+            const roll = THREE.MathUtils.radToDeg(euler.z);
+            const yawM = yaw * 15;
+            const lateralM = lateral * 20;
+            const frontBackM = frontBack * 10;
+            const rollM = roll * -20;
+            const pitchM = pitch * -20;
+            const commandStr = "X" + yawM.toFixed(1) +
+                               ",Y" + lateralM.toFixed(1) +
+                               ",Z" + frontBackM.toFixed(1) +
+                               ",H" + height.toFixed(1) +
+                               ",S2,A5" +
+                               ",R" + rollM.toFixed(1) +
+                               ",P" + pitchM.toFixed(1);
+            document.getElementById('commandStream').textContent = commandStr;
+            sendCommandToNeck(commandStr);
+          }
+          
+          // Update the video mesh scale based on the actual video dimensions (to preserve aspect ratio)
+          if (video.videoWidth && video.videoHeight) {
+            // Ensure the X scale remains negative (to mirror the video)
+            videoMesh.scale.x = (video.videoWidth / 100);
+            videoMesh.scale.y = video.videoHeight / 100;
+          }
+        }
+        
+        controls.update();
+        renderer.render(scene, camera);
+      }
+      
+      animate();
+      
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
+"""
+headstream_page = headstream_page.replace("%%CSS%%", base_css).replace("%%JS%%", base_js).replace("%%NAV%%", nav_html);
+
+
+
+
 # ---------- Additional Flask Endpoints ----------
 
 @app.route("/available_ports")
@@ -938,6 +1195,10 @@ def index():
 @app.route("/connect")
 def connect():
     return render_template_string(connect_page)
+
+@app.route("/headstream")
+def headstream():
+    return render_template_string(headstream_page)
 
 @app.route("/home")
 def home():
