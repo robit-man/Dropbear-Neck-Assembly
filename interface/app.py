@@ -315,25 +315,46 @@ connect_page = """
           select.appendChild(opt);
       });
     });
-  function doConnectManual() {
-      let port = document.getElementById('portSelect').value;
-      fetch('/do_connect_manual', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({port: port})
-      })
-      .then(response => response.json())
-      .then(data => {
-          if (data.connected) {
-              document.getElementById('status').textContent = "Connected!";
-              document.getElementById('proceedBtn').style.display = "block";
-              logToConsole("Connected to " + port);
-          } else {
-              document.getElementById('status').textContent = "Connection failed.";
-              logToConsole("Connection failed to " + port);
+    // Add this onload handler to auto-select and connect to the last used port.
+    window.onload = function() {
+      let lastPort = localStorage.getItem('lastPort');
+      if (lastPort) {
+        let select = document.getElementById('portSelect');
+        // Wait a moment for the available ports to load.
+        setTimeout(() => {
+          for (let i = 0; i < select.options.length; i++) {
+            if (select.options[i].value === lastPort) {
+              select.selectedIndex = i;
+              doConnectManual(); // auto-connect if available
+              break;
+            }
           }
-      });
-  }
+        }, 1000);
+      }
+    };
+
+    // Update your existing doConnectManual() function to save the port:
+    function doConnectManual() {
+        let port = document.getElementById('portSelect').value;
+        fetch('/do_connect_manual', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({port: port})
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.connected) {
+                document.getElementById('status').textContent = "Connected!";
+                document.getElementById('proceedBtn').style.display = "block";
+                logToConsole("Connected to " + port);
+                // Save the successfully connected port to localStorage.
+                localStorage.setItem('lastPort', port);
+            } else {
+                document.getElementById('status').textContent = "Connection failed.";
+                logToConsole("Connection failed to " + port);
+            }
+        });
+    }
   </script>
 </body>
 </html>
@@ -973,34 +994,76 @@ headstream_page = r"""
             grp.rotation.x = euler.x;
             grp.rotation.y = euler.y;
             grp.rotation.z = euler.z;
+                   // Generate and send the head-pose command string using smoothing and dynamic S/A adjustments.
+
+            // 1. Compute raw values.
+            const rawLateral = -transformObj.position.x;
+            const rawHeight = transformObj.position.y + 30;
+            const rawFrontBack = (-transformObj.position.z - 50) * 1.5;
+            const rawYaw = THREE.MathUtils.radToDeg(euler.y);
+            const rawPitch = THREE.MathUtils.radToDeg(euler.x);
+            const rawRoll = THREE.MathUtils.radToDeg(euler.z);
             
-            // Generate and send the head-pose command string using the original multipliers.
-            const lateral = -transformObj.position.x;
-            const height = transformObj.position.y + 30;
-            const frontBack = (-transformObj.position.z - 50) * 1.5;
-            const yaw = THREE.MathUtils.radToDeg(euler.y);
-            const pitch = THREE.MathUtils.radToDeg(euler.x);
-            const roll = THREE.MathUtils.radToDeg(euler.z);
-            const yawM = yaw * 15;
-            const lateralM = lateral * 20;
-            const frontBackM = frontBack * 10;
-            const rollM = roll * -20;
-            const pitchM = pitch * -20;
-            // Clamp yawM, pitchM, and rollM so that they do not exceed ±600.
-            const yawM_clamped = clamp(yawM, -600, 600);
-            const pitchM_clamped = clamp(pitchM, -600, 600);
-            const rollM_clamped = clamp(rollM, -700, 700);
+            const yawM_raw = rawYaw * 15;
+            const lateralM_raw = rawLateral * 20;
+            const frontBackM_raw = rawFrontBack * 10;
+            const rollM_raw = rawRoll * -20;
+            const pitchM_raw = rawPitch * -25;
+            
+            // 2. Smooth the values using an exponential moving average.
+            // Use static variables (declared globally or as properties) to retain previous smoothed values.
+            if (typeof smoothedYawM === 'undefined') {
+                var smoothedYawM = yawM_raw;
+                var smoothedLateralM = lateralM_raw;
+                var smoothedFrontBackM = frontBackM_raw;
+                var smoothedRollM = rollM_raw;
+                var smoothedPitchM = pitchM_raw;
+                var smoothedHeight = rawHeight;
+            }
+            const alpha = 0.8; // Smoothing factor
+            smoothedYawM = alpha * yawM_raw + (1 - alpha) * smoothedYawM;
+            smoothedLateralM = alpha * lateralM_raw + (1 - alpha) * smoothedLateralM;
+            smoothedFrontBackM = alpha * frontBackM_raw + (1 - alpha) * smoothedFrontBackM;
+            smoothedRollM = alpha * rollM_raw + (1 - alpha) * smoothedRollM;
+            smoothedPitchM = alpha * pitchM_raw + (1 - alpha) * smoothedPitchM;
+            smoothedHeight = alpha * rawHeight + (1 - alpha) * smoothedHeight;
+            
+            // 3. Clamp the angular values.
+            const yawM_clamped = clamp(smoothedYawM, -550, 550);
+            const pitchM_clamped = clamp(smoothedPitchM, -600, 600);
+            const rollM_clamped = clamp(smoothedRollM, -700, 700);
+            
+            // Use the smoothed lateral, front/back, and height without extra clamping.
+            const lateralM_smoothed = smoothedLateralM;
+            const frontBackM_smoothed = smoothedFrontBackM;
+            const height_smoothed = smoothedHeight;
+            
+            // 4. Dynamically compute S and A multipliers based on the magnitude of the control values.
+            // Compute a magnitude from the smoothed values.
+            const mag = Math.max(
+              Math.abs(smoothedYawM),
+              Math.abs(smoothedPitchM),
+              Math.abs(smoothedRollM),
+              Math.abs(smoothedLateralM),
+              Math.abs(smoothedFrontBackM)
+            );
+            // When mag is 0: S=2, A=5; when mag is 600: S=0.5, A=1 (linear interpolation).
+            const S_dynamic = 2 - (1 * (mag / 600));
+            const A_dynamic = 5 - (3 * (mag / 600));
+            const S_final = clamp(S_dynamic, 1, 2);
+            const A_final = clamp(A_dynamic, 2, 6);
+            
+            // 5. Form the command string with the computed values.
             const commandStr = "X" + yawM_clamped.toFixed(1) +
-                               ",Y" + lateralM.toFixed(1) +
-                               ",Z" + frontBackM.toFixed(1) +
-                               ",H" + height.toFixed(1) +
-                               ",S2,A3" +
+                               ",Y" + lateralM_smoothed.toFixed(1) +
+                               ",Z" + frontBackM_smoothed.toFixed(1) +
+                               ",H" + height_smoothed.toFixed(1) +
+                               ",S" + S_final.toFixed(1) + ",A" + A_final.toFixed(1) +
                                ",R" + rollM_clamped.toFixed(1) +
                                ",P" + pitchM_clamped.toFixed(1);
             document.getElementById('commandStream').textContent = commandStr;
-            sendCommandToNeck(commandStr);
-          }
-          
+            sendCommandToNeck(commandStr);  
+            }
           // Update the video mesh scale based on the actual video dimensions (to preserve aspect ratio)
           if (video.videoWidth && video.videoHeight) {
             // Ensure the X scale remains negative to keep the video mirrored.
