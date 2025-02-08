@@ -380,16 +380,16 @@ void moveToStepper(int stepperNum, int positionSteps) {
   Processes a command string that starts with 'Q' (for quaternion control).
 
   Expected format:
-    Q:<w>,<x>,<y>,<z>[,S<speedMultiplier>][,A<accelMultiplier>]
+    Q:<w>,<x>,<y>,<z>[,H<height>][,S<speedMultiplier>][,A<accelMultiplier>]
 
   The first four comma‐separated values are the quaternion components.
-  Optional tokens starting with 'S' and 'A' set the speed and acceleration multipliers.
+  Optional tokens starting with 'H', 'S', and 'A' set the height offset, speed, and acceleration multipliers respectively.
   The quaternion is normalized and converted to Euler angles (roll, pitch, yaw) using standard formulas.
   For this implementation:
     - The yaw angle is mapped to angleX.
     - The pitch angle is mapped to angleY.
     - The roll angle is mapped to angleZ.
-  (Height offset and additional roll/pitch adjustments are set to 0 here.)
+  (Additional roll/pitch adjustments are set to 0 here.)
 */
 void handleQuaternionCommand(String command) {
   // Remove the leading 'Q' and an optional colon.
@@ -405,6 +405,7 @@ void handleQuaternionCommand(String command) {
   float q[4] = {0, 0, 0, 0};
   float speedMultiplier = 1.0;
   float accelMultiplier = 1.0;
+  int heightOffset = 0;  // New: height offset (in mm)
 
   // Tokenize the command into an array of strings (maximum 6 tokens).
   String tokens[6];
@@ -432,11 +433,13 @@ void handleQuaternionCommand(String command) {
     q[i] = tokens[i].toFloat();
   }
 
-  // Parse optional speed (S) and acceleration (A) multipliers.
+  // Parse optional tokens for height (H), speed (S) and acceleration (A) multipliers.
   for (int i = 4; i < tokenCount; i++) {
     String token = tokens[i];
     token.trim();
-    if (token.startsWith("S")) {
+    if (token.startsWith("H")) {
+      heightOffset = token.substring(1).toInt();
+    } else if (token.startsWith("S")) {
       speedMultiplier = token.substring(1).toFloat();
     } else if (token.startsWith("A")) {
       accelMultiplier = token.substring(1).toFloat();
@@ -475,10 +478,10 @@ void handleQuaternionCommand(String command) {
 
   // Map the Euler angles to the movement command.
   // For this example, we use:
-  //   angleX = yaw, angleY = pitch, angleZ = roll, with no height or extra roll/pitch adjustments.
-  int heightOffset = 0;
+  //   angleX = yaw, angleY = pitch, angleZ = roll, with the height offset applied.
   moveHead(yaw_deg, pitch_deg, roll_deg, heightOffset, speedMultiplier, accelMultiplier, 0, 0);
 }
+
 
 // ----------------------- Main Loop -----------------------
 

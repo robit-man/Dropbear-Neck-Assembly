@@ -297,7 +297,7 @@ connect_page = """
       <span id="status">Checking...</span>
     </div>
     <div class="row">
-      <a id="proceedBtn" href="/home" style="display:none;">Proceed to Control Interface</a>
+      <a id="proceedBtn" href="/home" style="display:none;"><button style="background:white;color:black;">Proceed to Control Interface</button></a>
     </div>
   </div>
   <footer id="console"></footer>
@@ -409,7 +409,7 @@ direct_page = """
         <button onclick="decMotor({{ i }})">-</button>
         <input type="number" id="motor{{ i }}" value="0" onchange="updateDirect()">
         <button onclick="incMotor({{ i }})">+</button>
-        <input type="range" id="slider{{ i }}" min="-500" max="500" value="0"
+        <input type="range" id="slider{{ i }}" min="-800" max="800" value="0"
                oninput="document.getElementById('motor{{ i }}').value=this.value; updateDirect();">
       </div>
     {% endfor %}
@@ -478,7 +478,7 @@ euler_page = """
       <button onclick="decField('yaw')">-</button>
       <input type="number" id="yaw" value="0" onchange="updateEuler()">
       <button onclick="incField('yaw')">+</button>
-      <input type="range" id="yawSlider" min="-500" max="500" value="0"
+      <input type="range" id="yawSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('yaw').value=this.value; updateEuler();">
     </div>
     <!-- Swap pitch and roll: the second row now is for Roll (Y) (i.e. the pitch value) -->
@@ -487,7 +487,7 @@ euler_page = """
       <button onclick="decField('roll')">-</button>
       <input type="number" id="roll" value="0" onchange="updateEuler()">
       <button onclick="incField('roll')">+</button>
-      <input type="range" id="rollSlider" min="-500" max="500" value="0"
+      <input type="range" id="rollSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('roll').value=this.value; updateEuler();">
     </div>
     <!-- The third row now is for Pitch (Z) -->
@@ -496,7 +496,7 @@ euler_page = """
       <button onclick="decField('pitch')">-</button>
       <input type="number" id="pitch" value="0" onchange="updateEuler()">
       <button onclick="incField('pitch')">+</button>
-      <input type="range" id="pitchSlider" min="-500" max="500" value="0"
+      <input type="range" id="pitchSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('pitch').value=this.value; updateEuler();">
     </div>
     <div class="row">
@@ -581,7 +581,7 @@ head_page = """
       <button onclick="decField('X', 1)">-</button>
       <input type="number" id="X" value="0" onchange="updateHead()">
       <button onclick="incField('X', 1)">+</button>
-      <input type="range" id="XSlider" min="-500" max="500" value="0"
+      <input type="range" id="XSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('X').value=this.value; updateHead();">
     </div>
     <div class="row">
@@ -589,7 +589,7 @@ head_page = """
       <button onclick="decField('Y', 1)">-</button>
       <input type="number" id="Y" value="0" onchange="updateHead()">
       <button onclick="incField('Y', 1)">+</button>
-      <input type="range" id="YSlider" min="-500" max="500" value="0"
+      <input type="range" id="YSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('Y').value=this.value; updateHead();">
     </div>
     <div class="row">
@@ -597,7 +597,7 @@ head_page = """
       <button onclick="decField('Z', 1)">-</button>
       <input type="number" id="Z" value="0" onchange="updateHead()">
       <button onclick="incField('Z', 1)">+</button>
-      <input type="range" id="ZSlider" min="-500" max="500" value="0"
+      <input type="range" id="ZSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('Z').value=this.value; updateHead();">
     </div>
     <div class="row">
@@ -629,7 +629,7 @@ head_page = """
       <button onclick="decField('R', 1)">-</button>
       <input type="number" id="R" value="0" onchange="updateHead()">
       <button onclick="incField('R', 1)">+</button>
-      <input type="range" id="RSlider" min="-500" max="500" value="0"
+      <input type="range" id="RSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('R').value=this.value; updateHead();">
     </div>
     <div class="row">
@@ -637,7 +637,7 @@ head_page = """
       <button onclick="decField('P', 1)">-</button>
       <input type="number" id="P" value="0" onchange="updateHead()">
       <button onclick="incField('P', 1)">+</button>
-      <input type="range" id="PSlider" min="-500" max="500" value="0"
+      <input type="range" id="PSlider" min="-800" max="800" value="0"
              oninput="document.getElementById('P').value=this.value; updateHead();">
     </div>
     <div class="row">
@@ -715,7 +715,7 @@ quat_page = """
       <button onclick="decField('x', 0.1)">-</button>
       <input type="number" id="x" value="0" step="0.1" onchange="updateQuat()">
       <button onclick="incField('x', 0.1)">+</button>
-      <input type="range" id="xSlider" min="-500" max="500" step="0.01" value="0"
+      <input type="range" id="xSlider" min="-800" max="800" step="0.01" value="0"
              oninput="document.getElementById('x').value=this.value; updateQuat();">
     </div>
     <div class="row">
@@ -723,7 +723,7 @@ quat_page = """
       <button onclick="decField('y', 0.1)">-</button>
       <input type="number" id="y" value="0" step="0.1" onchange="updateQuat()">
       <button onclick="incField('y', 0.1)">+</button>
-      <input type="range" id="ySlider" min="-500" max="500" step="0.01" value="0"
+      <input type="range" id="ySlider" min="-800" max="800" step="0.01" value="0"
              oninput="document.getElementById('y').value=this.value; updateQuat();">
     </div>
     <div class="row">
@@ -731,7 +731,7 @@ quat_page = """
       <button onclick="decField('z', 0.1)">-</button>
       <input type="number" id="z" value="0" step="0.1" onchange="updateQuat()">
       <button onclick="incField('z', 0.1)">+</button>
-      <input type="range" id="zSlider" min="-500" max="500" step="0.01" value="0"
+      <input type="range" id="zSlider" min="-800" max="800" step="0.01" value="0"
              oninput="document.getElementById('z').value=this.value; updateQuat();">
     </div>
     <div class="row">
@@ -747,7 +747,7 @@ quat_page = """
       <button onclick="decField('qS', 0.1)">-</button>
       <input type="number" id="qS" value="1" step="0.1" onchange="updateQuat()">
       <button onclick="incField('qS', 0.1)">+</button>
-      <input type="range" id="qSSlider" min="-500" max="500" value="1"
+      <input type="range" id="qSSlider" min="-800" max="800" value="1"
              oninput="document.getElementById('qS').value=this.value; updateQuat();">
     </div>
     <div class="row">
@@ -755,7 +755,7 @@ quat_page = """
       <button onclick="decField('qA', 0.1)">-</button>
       <input type="number" id="qA" value="1" step="0.1" onchange="updateQuat()">
       <button onclick="incField('qA', 0.1)">+</button>
-      <input type="range" id="qASlider" min="-500" max="500" value="1"
+      <input type="range" id="qASlider" min="-800" max="800" value="1"
              oninput="document.getElementById('qA').value=this.value; updateQuat();">
     </div>
     <div class="row">
