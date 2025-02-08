@@ -771,7 +771,6 @@ quat_page = """
 </html>
 """
 quat_page = quat_page.replace("%%CSS%%", base_css).replace("%%JS%%", base_js).replace("%%NAV%%", nav_html);
-
 headstream_page = r"""
 <!DOCTYPE html>
 <html lang="en">
@@ -815,7 +814,7 @@ headstream_page = r"""
         width: 100%;
         height: 100%;
         display: block;
-        filter:saturate(0)brightness(0.8)contrast(1)invert(0);
+        filter: saturate(0) brightness(0.8) contrast(1) invert(0);
       }
     </style>
     <!-- Importmap for three.js and its addons from CDN -->
@@ -855,20 +854,15 @@ headstream_page = r"""
       // Do not flip the entire scene—only mirror the video texture.
       const scene = new THREE.Scene();
       
-      // Camera: 60° fov, near=1, far=100, positioned at z=5 (per example)
+      // Camera: 60° fov, near=1, far=100, positioned at z=3.8 (per your settings)
       const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 100);
       camera.position.z = 3.8;
       
       const controls = new OrbitControls(camera, renderer.domElement);
-      // to disable zoom
       controls.enableZoom = false;
-
-      // to disable rotation
       controls.enableRotate = false;
-
-      // to disable pan
       controls.enablePan = false;
-
+      
       // Create a group to hold the face model and receive transformation updates from MediaPipe
       const grpTransform = new THREE.Group();
       grpTransform.name = 'grp_transform';
@@ -893,7 +887,8 @@ headstream_page = r"""
       const videoMesh = new THREE.Mesh(videoGeometry, videoMaterial);
       // Mirror the video texture by flipping its X scale
       videoMesh.scale.x = -1;
-      //scene.add(videoMesh);
+      // (If you want the video to be visible, you can add it to the scene; otherwise, it can remain hidden.)
+      // scene.add(videoMesh);
       
       // Load the Face Cap model (facecap.glb) from the official three.js examples CDN.
       // In the original example, the face mesh is the first child,
@@ -948,6 +943,11 @@ headstream_page = r"""
         .catch(err => console.error("Error sending command:", err));
       }
       
+      // Helper function to clamp a value between min and max
+      function clamp(value, min, max) {
+        return Math.max(min, Math.min(max, value));
+      }
+      
       // Create an Object3D to hold the MediaPipe transform
       const transformObj = new THREE.Object3D();
       
@@ -964,21 +964,18 @@ headstream_page = r"""
             // Convert the quaternion to Euler angles (using YXZ order)
             const euler = new THREE.Euler().setFromQuaternion(transformObj.quaternion, 'YXZ');
             const grp = scene.getObjectByName('grp_transform');
-            // Updated GLB transformation: swap the front/back and up/down.
-            // Previously, it was:
-            //   grp.position.y = transformObj.position.z / 10 + 4;
-            //   grp.position.z = - transformObj.position.y / 10;
-            // Now, we swap these:
+            // Swap the front/back and up/down translations:
+            // Up/down now comes from transformObj.position.z and front/back from transformObj.position.y.
             grp.position.x = transformObj.position.x / 10;
-            grp.position.y = transformObj.position.y / 10;  // Up/down now comes from position.y
-            grp.position.z = - transformObj.position.z / -10 + 4;     // Front/back now comes from position.z
+            grp.position.y = transformObj.position.z / 10 + 4;  // up/down from position.z, with offset
+            grp.position.z = - transformObj.position.y / 10;     // front/back from position.y
             grp.rotation.x = euler.x;
-            grp.rotation.y = euler.y;
+            grp.rotation.y = - euler.y;
             grp.rotation.z = euler.z;
             
-            // Generate and send the head-pose command string (unchanged multipliers)
+            // Generate and send the head-pose command string using the original multipliers.
             const lateral = -transformObj.position.x;
-            const height = transformObj.position.y + 35;
+            const height = transformObj.position.y + 30;
             const frontBack = (-transformObj.position.z - 50) * 1.5;
             const yaw = THREE.MathUtils.radToDeg(euler.y);
             const pitch = THREE.MathUtils.radToDeg(euler.x);
@@ -988,21 +985,25 @@ headstream_page = r"""
             const frontBackM = frontBack * 10;
             const rollM = roll * -20;
             const pitchM = pitch * -20;
-            const commandStr = "X" + yawM.toFixed(1) +
+            // Clamp yawM, pitchM, and rollM so that they do not exceed ±600.
+            const yawM_clamped = clamp(yawM, -600, 600);
+            const pitchM_clamped = clamp(pitchM, -600, 600);
+            const rollM_clamped = clamp(rollM, -700, 700);
+            const commandStr = "X" + yawM_clamped.toFixed(1) +
                                ",Y" + lateralM.toFixed(1) +
                                ",Z" + frontBackM.toFixed(1) +
                                ",H" + height.toFixed(1) +
-                               ",S2,A5" +
-                               ",R" + rollM.toFixed(1) +
-                               ",P" + pitchM.toFixed(1);
+                               ",S2,A3" +
+                               ",R" + rollM_clamped.toFixed(1) +
+                               ",P" + pitchM_clamped.toFixed(1);
             document.getElementById('commandStream').textContent = commandStr;
             sendCommandToNeck(commandStr);
           }
           
           // Update the video mesh scale based on the actual video dimensions (to preserve aspect ratio)
           if (video.videoWidth && video.videoHeight) {
-            // Ensure the X scale remains negative (to mirror the video)
-            videoMesh.scale.x = (video.videoWidth / 100);
+            // Ensure the X scale remains negative to keep the video mirrored.
+            videoMesh.scale.x = - (video.videoWidth / 100);
             videoMesh.scale.y = video.videoHeight / 100;
           }
         }
