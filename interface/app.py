@@ -967,8 +967,9 @@ headstream_page = r"""
             // Swap the front/back and up/down translations:
             // Up/down now comes from transformObj.position.z and front/back from transformObj.position.y.
             grp.position.x = transformObj.position.x / 10;
-            grp.position.y = transformObj.position.z / 10 + 4;  // up/down from position.z, with offset
-            grp.position.z = - transformObj.position.y / 10;     // front/back from position.y
+            grp.position.y = transformObj.position.y / 10;  // Up/down now comes from position.y
+            grp.position.z = - transformObj.position.z / -10 + 4;     // Front/back now comes from position.z
+           
             grp.rotation.x = euler.x;
             grp.rotation.y = euler.y;
             grp.rotation.z = euler.z;
