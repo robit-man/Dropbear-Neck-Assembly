@@ -994,7 +994,7 @@ headstream_page = r"""
                                ",Y" + lateralM.toFixed(1) +
                                ",Z" + frontBackM.toFixed(1) +
                                ",H" + height.toFixed(1) +
-                               ",S4,A3" +
+                               ",S2,A3" +
                                ",R" + rollM_clamped.toFixed(1) +
                                ",P" + pitchM_clamped.toFixed(1);
             document.getElementById('commandStream').textContent = commandStr;

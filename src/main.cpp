@@ -26,6 +26,11 @@
   #define PI 3.14159265358979323846
 #endif
 
+// Global flag to control whether negative target positions are clamped.
+// When false (the default), any negative computed target value will be clamped to 0.
+// When true (as in the HOME command), negative values are allowed.
+bool bypassClamp = false;
+
 // ----------------------- Global Objects and Function Prototypes -----------------------
 
 // Create an instance of BluetoothSerial for handling Bluetooth communication.
@@ -71,7 +76,6 @@ void setupStepper(FastAccelStepper* &stepper, int stepPin, int dirPin, int speed
 // For direct control commands, we want to interpret the number after the colon in millimeters.
 // Based on your calibration, your hardware moves ~6 mm when 2560 steps are commanded,
 // which means approximately 2560/6 ≈ 426.67 steps per mm.
-// Define a constant for direct control conversion:
 #define STEPS_PER_MM 426.67
 
 // Global speed and acceleration variables (in Hz and steps/sec²)
@@ -122,17 +126,21 @@ void setup() {
   setupStepper(stepper6, MOTOR6_STEP_PIN, MOTOR6_DIR_PIN, speedVar, accVar);
 
   // ----------------------- Execute a Startup Command -----------------------
-  // This sample command positions the platform head. Adjust as needed.
-  executeCommand("H-40,S2,A2");
-  delay(2000);  // Allow time for the movement to complete
-
-  // ----------------------- Reset Stepper Positions -----------------------
-  if (stepper1) stepper1->setCurrentPosition(0);
-  if (stepper2) stepper2->setCurrentPosition(0);
-  if (stepper3) stepper3->setCurrentPosition(0);
-  if (stepper4) stepper4->setCurrentPosition(0);
-  if (stepper5) stepper5->setCurrentPosition(0);
-  if (stepper6) stepper6->setCurrentPosition(0);
+  // For the HOME command, we want negative height values allowed.
+  // Set bypassClamp to true during HOME.
+  if (String("HOME").equalsIgnoreCase("HOME")) { // This is just to simulate receiving HOME
+    bypassClamp = true;
+    Serial.println("Executing HOME command...");
+    executeCommand("H-40,S2,A2");
+    delay(2000);  // Allow time for the movement to complete
+    if (stepper1) stepper1->setCurrentPosition(0);
+    if (stepper2) stepper2->setCurrentPosition(0);
+    if (stepper3) stepper3->setCurrentPosition(0);
+    if (stepper4) stepper4->setCurrentPosition(0);
+    if (stepper5) stepper5->setCurrentPosition(0);
+    if (stepper6) stepper6->setCurrentPosition(0);
+    bypassClamp = false;  // Reset flag so that future non-HOME commands are clamped
+  }
 }
 
 // ----------------------- Movement and Command Processing Functions -----------------------
@@ -152,6 +160,9 @@ void setup() {
 
   The movement for each stepper is computed as a linear combination of these inputs
   using predefined scaling factors (which should be tuned for your platform's mechanics).
+
+  IMPORTANT: If bypassClamp is false (i.e. not a HOME command), any computed target value
+  that is negative is clamped to 0 before issuing the command to the stepper driver.
 */
 void moveHead(int angleX, int angleY, int angleZ, int heightOffset,
               float speedMultiplier, float accelMultiplier, int roll, int pitch) {
@@ -186,6 +197,16 @@ void moveHead(int angleX, int angleY, int angleZ, int heightOffset,
   move5 += heightMovement;
   move6 += heightMovement;
 
+  // If not a HOME command, clamp any negative target values to 0.
+  if (!bypassClamp) {
+    if (move1 < 0) move1 = 0;
+    if (move2 < 0) move2 = 0;
+    if (move3 < 0) move3 = 0;
+    if (move4 < 0) move4 = 0;
+    if (move5 < 0) move5 = 0;
+    if (move6 < 0) move6 = 0;
+  }
+  
   // Adjust speed and acceleration according to multipliers.
   int newSpeed = speedVar * speedMultiplier;
   int newAccel = accVar * accelMultiplier;
@@ -202,8 +223,8 @@ void moveHead(int angleX, int angleY, int angleZ, int heightOffset,
 /*
   parseAndMove()
   ---------------
-  Parses a compound command string that may contain several commands separated by the '|'
-  character. Each individual command is then executed via executeCommand().
+  Parses a compound command string that may contain several commands separated by the '|' character.
+  Each individual command is then executed via executeCommand().
 */
 void parseAndMove(String input) {
   int startIdx = 0;
@@ -231,6 +252,7 @@ void parseAndMove(String input) {
 
   Command types:
     - If the command equals "HOME" (case-insensitive), it is treated as a home command.
+      (For HOME commands, bypassClamp is set to true so negative height values are allowed.)
     - If the command starts with 'Q', it is treated as a quaternion command.
     - If the command contains a colon (':'), it is processed as direct
       control of individual steppers (e.g., "1:30,2:45").
@@ -247,20 +269,16 @@ void executeCommand(String command) {
   // ---------- Handle HOME Command ----------
   if (command.equalsIgnoreCase("HOME")) {
     Serial.println("Executing HOME command...");
+    bypassClamp = true;  // Allow negative values for HOME command
     executeCommand("H-40,S2,A2");
     delay(2000);  // Allow time for the movement to complete
-    if (stepper1)
-      stepper1->setCurrentPosition(0);
-    if (stepper2)
-      stepper2->setCurrentPosition(0);
-    if (stepper3)
-      stepper3->setCurrentPosition(0);
-    if (stepper4)
-      stepper4->setCurrentPosition(0);
-    if (stepper5)
-      stepper5->setCurrentPosition(0);
-    if (stepper6)
-      stepper6->setCurrentPosition(0);
+    if (stepper1) stepper1->setCurrentPosition(0);
+    if (stepper2) stepper2->setCurrentPosition(0);
+    if (stepper3) stepper3->setCurrentPosition(0);
+    if (stepper4) stepper4->setCurrentPosition(0);
+    if (stepper5) stepper5->setCurrentPosition(0);
+    if (stepper6) stepper6->setCurrentPosition(0);
+    bypassClamp = false;  // Reset clamp flag after HOME command
     return;
   }
 
