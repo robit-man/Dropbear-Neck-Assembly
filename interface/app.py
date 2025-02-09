@@ -1004,11 +1004,11 @@ headstream_page = r"""
             const rawPitch = THREE.MathUtils.radToDeg(euler.x);
             const rawRoll = THREE.MathUtils.radToDeg(euler.z);
             
-            const yawM_raw = rawYaw * 15;
+            const yawM_raw = rawYaw * 20;
             const lateralM_raw = rawLateral * 20;
-            const frontBackM_raw = rawFrontBack * 10;
-            const rollM_raw = rawRoll * -20;
-            const pitchM_raw = rawPitch * -25;
+            const frontBackM_raw = rawFrontBack * 15;
+            const rollM_raw = rawRoll * -30;
+            const pitchM_raw = rawPitch * -35;
             
             // 2. Smooth the values using an exponential moving average.
             // Use static variables (declared globally or as properties) to retain previous smoothed values.
