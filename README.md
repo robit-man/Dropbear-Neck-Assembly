@@ -50,7 +50,16 @@ and it will automatically generate a venv and start the application via flask.
 
 1. **Hardware Setup:**
    - Connect each stepper motor to an A4988 driver according to the pin map below.
-     
+   - Solid color is STEP pin on the driver breakout
+   - Outline is the DIRECTION pin on the driver breakout
+   - All Driver Breakouts have a daisy chained low power supply from the ESP
+   - All Driver Breakouts also have a daisy chained HIGH power (isolated and for driving the nema's)
+  
+   
+![Frame 28](https://github.com/user-attachments/assets/230d9c0f-3435-4cf0-aefa-7b66cac9cc2a)
+
+
+
 | Motor Number | Step Pin | Direction Pin |
 |--------------|----------|---------------|
 | Motor 1      | 33       | 32            |
