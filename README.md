@@ -55,9 +55,8 @@ and it will automatically generate a venv and start the application via flask.
    - All Driver Breakouts have a daisy chained low power supply from the ESP
    - All Driver Breakouts also have a daisy chained HIGH power (isolated and for driving the nema's)
   
-   
-![Frame 28](https://github.com/user-attachments/assets/230d9c0f-3435-4cf0-aefa-7b66cac9cc2a)
 
+<img src="https://github.com/user-attachments/assets/a763decf-8748-48f2-a691-b59eb5c05b28" style="width:400px">
 
 
 | Motor Number | Step Pin | Direction Pin |
