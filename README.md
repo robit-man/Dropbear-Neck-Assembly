@@ -19,9 +19,10 @@ This repository is focused on the development of a robot head and neck assembly,
 ## Hardware Requirements
 
 - ESP32 DevKit V1
-- Six A4988 Stepper Motor Drivers
-- Six NEMA 17 Stepper Motors
-- Leadscrews and Mechanical Assembly for the Robot Head and Neck
+- Six A4988 Stepper Motor Drivers and Associated Breakout Boards
+- Six Standard NEMA 17 Stepper Motors
+- Six 100mm length M8 Leadscrews and Associated T8 2mm pitch ACME Brass Nuts
+- Six Universal Joints, 5mm to 5mm (neck to head) and an additional Six which are 5mm to 8mm (Motor to Leadscrews)
 - Power Supply for the Motors and ESP32
 - Bluetooth Module (if not integrated into the ESP32 DevKit V1)
 
