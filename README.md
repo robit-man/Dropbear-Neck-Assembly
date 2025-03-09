@@ -24,7 +24,7 @@ This repository is focused on the development of a robot head and neck assembly,
 - Six 100mm length M8 Leadscrews and Associated T8 2mm pitch ACME Brass Nuts
 - Six Universal Joints, 5mm to 5mm (neck to head) and an additional Six which are 5mm to 8mm (Motor to Leadscrews)
 - Power Supply for the Motors and ESP32
-- Bluetooth Module (if not integrated into the ESP32 DevKit V1)
+- Linux or Other serial or bluetooth control source, we use an AGX Xavier, but a raspberry pi or laptop will suffice!
 
 ## Added Control Software in /interface
 
