@@ -57,8 +57,7 @@ and it will automatically generate a venv and start the application via flask.
    - All Driver Breakouts also have a daisy chained HIGH power (isolated and for driving the nema's)
   
 
-<img src="https://github.com/user-attachments/assets/a763decf-8748-48f2-a691-b59eb5c05b28" style="width:100%">
-
+<img src="https://github.com/user-attachments/assets/38b86df8-174a-4e31-9354-d8ee06d28a55" style="width:100%">
 
 | Motor Number | Step Pin | Direction Pin |
 |--------------|----------|---------------|
