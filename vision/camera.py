@@ -101,16 +101,19 @@ if use_realsense:
 app = Flask(__name__)
 
 # HTML template using darkmode, flexbox, and modular cards for each device.
+
+# HTML template using darkmode, flexbox, and modular cards for each device.
 HTML_TEMPLATE = """
 <!doctype html>
 <html>
   <head>
     <title>Camera Streams</title>
     <style>
+    *{transition:all 0.2s ease;font-family: 'Courier New', monospace;}
       body {
-        background-color: #121212;
+        background-color: #101010;
         color: #fff;
-        font-family: Arial, sans-serif;
+        font-family: 'Courier New', monospace;
         margin: 0;
         padding: 0;
       }
@@ -126,34 +129,80 @@ HTML_TEMPLATE = """
         padding: 20px;
       }
       .card {
-        background-color: #1e1e1e;
-        border-radius: 8px;
+      	position:relative;
+        background-color: #212121;
+        border-radius: 16px;
         padding: 15px;
         width: 300px;
+        height:fit-content;
+        display:flex;
+        flex-flow:column;
+        gap:10px;
+        box-sizing:border-box;
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
       }
       .card h3 {
-        margin-top: 0;
+        display:flex;
+        mix-blend-mode:exclusion;
+        margin:0px;
+        border-radius:4px;
+        opacity:0.3;
+        width:270px;
+        box-sizing:border-box;
+        text-transform:uppercase;
+        font-size:0.75rem;
+        font-weight:800;
+        position:relative;
+        border:2px solid white;
+        padding:10px;
       }
       .card img {
         width: 100%;
         border-radius: 4px;
       }
       .card .buttons {
+        box-sizing:border-box;
+      	position:relative;
         text-align: center;
-        margin-top: 10px;
+        display:flex;
+        flex-flow:row;
+        gap:10px;
+        width:100%;
+        opacity:0.3;
+        mix-blend-mode:difference;
       }
-      .card button {
-        margin: 5px;
+      
+      
+      .card button:nth-child(odd) {
+        width:130px;
         padding: 10px;
         border: none;
         border-radius: 4px;
-        background-color: #6200ee;
-        color: #fff;
+        background-color: white;
+        color: black;
         cursor: pointer;
+        border:1px solid white;
+        box-sizing:border-box;
       }
-      .card button:hover {
-        background-color: #3700b3;
+      .card button:nth-child(odd):hover {
+        background-color: black;
+        color:white;
+      }
+      
+      .card button:nth-child(even) {
+        width:130px;
+        padding: 10px;
+        border: none;
+        border-radius: 4px;
+        background-color: black;
+        color:white;
+        cursor: pointer;
+        border:1px solid white;
+        box-sizing:border-box;
+      }
+      .card button:nth-child(even):hover {
+        background-color: white;
+        color: black;
       }
       a {
         text-decoration: none;
@@ -161,7 +210,6 @@ HTML_TEMPLATE = """
     </style>
   </head>
   <body>
-    <h1>Camera Streams</h1>
     <div class="container">
       {% for dev in default_devices %}
       <div class="card">
@@ -169,8 +217,8 @@ HTML_TEMPLATE = """
         <!-- Display live video stream -->
         <img src="{{ dev.video_url }}" alt="{{ dev.label }}">
         <div class="buttons">
-          <a href="{{ dev.snapshot_url }}"><button>CAMERA (Snapshot)</button></a>
-          <a href="{{ dev.video_url }}"><button>VIDEO (Live)</button></a>
+          <a href="{{ dev.snapshot_url }}"><button>CAMERA</button></a>
+          <a href="{{ dev.video_url }}"><button>VIDEO</button></a>
         </div>
       </div>
       {% endfor %}
@@ -179,16 +227,16 @@ HTML_TEMPLATE = """
         <h3>Realsense D455 - Color</h3>
         <img src="/video/realsense_color" alt="Realsense Color">
         <div class="buttons">
-          <a href="/camera/realsense_color"><button>CAMERA (Snapshot)</button></a>
-          <a href="/video/realsense_color"><button>VIDEO (Live)</button></a>
+          <a href="/camera/realsense_color"><button>CAMERA</button></a>
+          <a href="/video/realsense_color"><button>VIDEO</button></a>
         </div>
       </div>
       <div class="card">
         <h3>Realsense D455 - Depth</h3>
         <img src="/video/realsense_depth" alt="Realsense Depth">
         <div class="buttons">
-          <a href="/camera/realsense_depth"><button>CAMERA (Snapshot)</button></a>
-          <a href="/video/realsense_depth"><button>VIDEO (Live)</button></a>
+          <a href="/camera/realsense_depth"><button>CAMERA</button></a>
+          <a href="/video/realsense_depth"><button>VIDEO</button></a>
         </div>
       </div>
       {% endif %}
@@ -324,7 +372,7 @@ def video_realsense_depth():
     return Response(rs_stream_generator(get_depth),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# ----------------- Run Flask Server with Auto-Reload -----------------
+# ----------------- Run Flask Server -----------------
 if __name__ == "__main__":
-    print("Flask server starting on port 8080 with auto-reload enabled...")
-    app.run(host="0.0.0.0", port=8080, debug=True, use_reloader=True)
+    print("Flask server starting on port 8080...")
+    app.run(host="0.0.0.0", port=8080)
