@@ -13,7 +13,7 @@ All-in-one Python script that:
    Commands can be the special "home" command or any subset (in any order) of the following fields:
       X, Y, Z, H, S, A, R, P
    with allowed ranges:
-      • X, Y, Z, R, P: integers between -800 and 800
+      • X, Y, Z, R, P: integers between -700 and 700
       • H: integer between 0 and 70
       • S, A: floats between 0 and 10
 7. The system maintains a current command state (initialized with defaults) so that if a subsequent command
@@ -71,14 +71,14 @@ except ImportError:
 
 # --- Allowed Ranges for Fields ---
 allowed_ranges = {
-    "X": (-800, 800, int),
-    "Y": (-800, 800, int),
-    "Z": (-800, 800, int),
+    "X": (-700, 700, int),
+    "Y": (-700, 700, int),
+    "Z": (-700, 700, int),
     "H": (0, 70, int),
     "S": (0, 10, float),
     "A": (0, 10, float),
-    "R": (-800, 800, int),
-    "P": (-800, 800, int)
+    "R": (-700, 700, int),
+    "P": (-700, 700, int)
 }
 
 # --- Default Current State ---
