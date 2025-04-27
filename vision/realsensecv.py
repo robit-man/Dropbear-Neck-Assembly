@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-RealSense D455 capture helper  — v3
-• Streams colour, refined depth (white-near → black-far), and both IR imagers
-• Applies on-device post-processing filters:
-    – Decimation  (down-samples & removes bad pixels)
-    – Spatial     (edge-preserving smoothing)
-    – Temporal    (temporal smoothing)
-    – Hole-filling
-    – Disparity-domain trick (as recommended by Intel)
-Public API is unchanged:  start() · read() · release()
+RealSense D455 capture helper – v6
+──────────────────────────────────
+Goal: keep very-close objects pure white, *and* retain far-field contrast.
+
+Strategy
+========
+• Always pin the near end of the gradient to 0.30 m (≈ minimum useful range).
+• Dynamically choose the far end from the 99-percentile of **valid** pixels,
+  but never above 15 m.  →  Scene-adaptive stretch that still preserves
+  distant detail instead of collapsing it into solid black.
+• Optional gamma (=0.6) brightens the dark end so fine far details show up.
+• Same filter stack for accuracy.
+
+Public API unchanged:  start() · read() · release()
 """
 
 import pyrealsense2 as rs
@@ -18,123 +23,128 @@ import cv2
 
 class RealsenseCapture:
     # ---------- stream parameters ----------
-    WIDTH, HEIGHT, FPS       = 1280, 720, 15               # depth + IR
-    WIDTH_C, HEIGHT_C, FPS_C = 1280, 800, 30               # colour
-    MAX_DEPTH_MM             = 8_000                       # clip at 8 m for gradient
+    WIDTH, HEIGHT, FPS       = 1280, 720, 15
+    WIDTH_C, HEIGHT_C, FPS_C = 1280, 800, 30
+
+    # ---------- gradient settings ----------
+    MIN_DEPTH_M   = 0.01      # pure white
+    MAX_DEPTH_CAP = 15.0      # never map beyond this
+    GAMMA         = 1       # <1 boosts far-end contrast; set to 1.0 for linear
 
     def __init__(self):
-        # ---------- pipeline & streams ----------
         self.config = rs.config()
+        self.config.enable_stream(rs.stream.color,
+                                  self.WIDTH_C, self.HEIGHT_C,
+                                  rs.format.bgr8, self.FPS_C)
+        self.config.enable_stream(rs.stream.depth,
+                                  self.WIDTH, self.HEIGHT,
+                                  rs.format.z16, self.FPS)
+        for i in (1, 2):
+            self.config.enable_stream(rs.stream.infrared, i,
+                                      self.WIDTH, self.HEIGHT,
+                                      rs.format.y8, self.FPS)
 
-        self.config.enable_stream(
-            rs.stream.color,
-            self.WIDTH_C, self.HEIGHT_C,
-            rs.format.bgr8, self.FPS_C
-        )
+        # --------- filter chain ---------
+        self.decimate   = rs.decimation_filter()
+        self.decimate.set_option(rs.option.filter_magnitude, 2)
 
-        self.config.enable_stream(
-            rs.stream.depth,
-            self.WIDTH, self.HEIGHT,
-            rs.format.z16, self.FPS
-        )
+        self.d2disp     = rs.disparity_transform(True)
+        self.spatial    = rs.spatial_filter();  self.spatial.set_option(rs.option.holes_fill, 2)
+        self.temporal   = rs.temporal_filter()
+        self.disp2d     = rs.disparity_transform(False)
+        self.hole_fill  = rs.hole_filling_filter()
 
-        for idx in (1, 2):                                 # infrared L / R
-            self.config.enable_stream(
-                rs.stream.infrared, idx,
-                self.WIDTH, self.HEIGHT,
-                rs.format.y8, self.FPS
-            )
+        self.pipeline   = None
+        self.depth_scale = None
 
-        # ---------- post-processing filters ----------
-        self.decimate             = rs.decimation_filter()
-        self.decimate.set_option(rs.option.filter_magnitude, 2)   # 2× reduction (optional)
-
-        self.depth_to_disparity   = rs.disparity_transform(True)
-        self.disparity_to_depth   = rs.disparity_transform(False)
-
-        self.spatial              = rs.spatial_filter()
-        self.spatial.set_option(rs.option.holes_fill, 2)          # light hole-filling
-
-        self.temporal             = rs.temporal_filter()
-
-        self.hole_filling         = rs.hole_filling_filter()
-
-        self.pipeline = None
-
-    # ---------- lifecycle ----------
+    # --------- lifecycle ---------
     def start(self):
         self.pipeline = rs.pipeline()
-        self.pipeline.start(self.config)
-        print("RealSense pipeline started with smoothing filters.")
+        prof = self.pipeline.start(self.config)
+        sensor = prof.get_device().first_depth_sensor()
+        self.depth_scale = sensor.get_depth_scale()
+        print(f"[RealSense] depth_scale = {self.depth_scale:.6f} m/unit")
+
+        # try long-range preset (ignore errors)
+        try:
+            sensor.set_option(rs.option.visual_preset, rs.rs400_visual_preset.long_range)
+        except Exception:
+            pass
 
     def release(self):
         if self.pipeline:
             self.pipeline.stop()
             self.pipeline = None
-            print("RealSense pipeline stopped.")
+            print("[RealSense] pipeline stopped.")
 
-    # ---------- helpers ----------
-    def _process_depth(self, depth_frame: rs.frame) -> rs.frame:
-        """Apply the librealsense recommended filter chain."""
-        f = self.decimate.process(depth_frame)
-        f = self.depth_to_disparity.process(f)
+    # --------- helpers ---------
+    def _filter_depth(self, df):
+        f = self.decimate.process(df)
+        f = self.d2disp.process(f)
         f = self.spatial.process(f)
         f = self.temporal.process(f)
-        f = self.disparity_to_depth.process(f)
-        f = self.hole_filling.process(f)
+        f = self.disp2d.process(f)
+        f = self.hole_fill.process(f)
         return f
 
     @staticmethod
-    def _to_numpy(frame: rs.video_frame) -> np.ndarray:
-        return np.asanyarray(frame.get_data())
+    def _np(frame): return np.asanyarray(frame.get_data())
 
-    # ---------- frame grab ----------
-    def read(self, *, as_numpy: bool = True, include_ir: bool = False):
+    def _depth_vis(self, depth_f):
+        depth_m = self._np(depth_f).astype(np.float32) * self.depth_scale
+        valid   = depth_m[(depth_m > 0) & (depth_m < self.MAX_DEPTH_CAP)]
+
+        if valid.size < 100:
+            return np.zeros((*depth_m.shape, 3), dtype=np.uint8)
+
+        near = self.MIN_DEPTH_M
+        far  = np.percentile(valid, 99)              # dynamic far
+        far  = max(far, near + 0.1)                  # avoid zero span
+        far  = min(far, self.MAX_DEPTH_CAP)
+
+        span = far - near
+        norm = np.clip((depth_m - near) / span, 0, 1)
+        inv  = 1.0 - norm
+        if self.GAMMA != 1.0:
+            inv = inv ** self.GAMMA                 # boost dark tones
+        img8 = (inv * 255).astype(np.uint8)
+        return cv2.cvtColor(img8, cv2.COLOR_GRAY2BGR)
+
+    # --------- main read ---------
+    def read(self, *, as_numpy=True, include_ir=False):
         """
-        Returns
-        -------
-        ret    : bool
-        frames : tuple
-          (colour, depth_vis)           – if include_ir=False
-          (colour, depth_vis, irL, irR) – if include_ir=True
+        ret, (colour, depth_vis[, irL, irR])   if as_numpy
+        ret, (colour_f, depth_f[, irL_f, irR_f])  otherwise
         """
         if self.pipeline is None:
-            raise RuntimeError("start() must be called before read()")
+            raise RuntimeError("start() must be called first")
 
         fs = self.pipeline.wait_for_frames()
-
-        color_f = fs.get_color_frame()
-        depth_f_raw = fs.get_depth_frame()
+        color_f  = fs.get_color_frame()
+        depth_f0 = fs.get_depth_frame()
+        ir_l_f = ir_r_f = None
         if include_ir:
             ir_l_f = fs.get_infrared_frame(1)
             ir_r_f = fs.get_infrared_frame(2)
-        else:
-            ir_l_f = ir_r_f = None
 
-        if not color_f or not depth_f_raw or (include_ir and (not ir_l_f or not ir_r_f)):
+        if not color_f or not depth_f0 or (include_ir and (not ir_l_f or not ir_r_f)):
             return False, (None,) * (4 if include_ir else 2)
 
-        # ---------- depth post-processing ----------
-        depth_f = self._process_depth(depth_f_raw)
+        depth_f = self._filter_depth(depth_f0)
 
         if not as_numpy:
             base = (color_f, depth_f)
             return True, base + (ir_l_f, ir_r_f) if include_ir else base
 
-        # ---> NumPy conversions
-        color_img = self._to_numpy(color_f)
-
-        depth_mm = self._to_numpy(depth_f).astype(np.uint16)
-        depth_mm_clipped = np.clip(depth_mm, 0, self.MAX_DEPTH_MM)
-        depth8 = cv2.convertScaleAbs(depth_mm_clipped,
-                                     alpha=255.0 / self.MAX_DEPTH_MM,
-                                     beta=0)
-        depth_inv = 255 - depth8                         # white near / black far
-        depth_vis = cv2.cvtColor(depth_inv, cv2.COLOR_GRAY2BGR)
+        colour    = self._np(color_f)
+        depth_vis = self._depth_vis(depth_f)
 
         if not include_ir:
-            return True, (color_img, depth_vis)
+            return True, (colour, depth_vis)
 
-        ir_left  = self._to_numpy(ir_l_f)
-        ir_right = self._to_numpy(ir_r_f)
-        return True, (color_img, depth_vis, ir_left, ir_right)
+        return True, (
+            colour,
+            depth_vis,
+            self._np(ir_l_f),
+            self._np(ir_r_f)
+        )
