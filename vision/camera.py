@@ -6,22 +6,19 @@ import glob
 import socket
 import time
 import threading
+from flask import Flask, Response, render_template_string
 
-# ----------------- Auto‑venv Bootstrap -----------------
+# ----------------- Auto-venv Bootstrap -----------------
 if sys.prefix == sys.base_prefix:
     venv_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv")
     if not os.path.exists(venv_dir):
         print("Creating virtual environment...")
         subprocess.check_call([sys.executable, "-m", "venv", "venv"])
-    if os.name == "nt":
-        pip_exe = os.path.join(venv_dir, "Scripts", "pip.exe")
-        python_exe = os.path.join(venv_dir, "Scripts", "python.exe")
-    else:
-        pip_exe = os.path.join(venv_dir, "bin", "pip")
-        python_exe = os.path.join(venv_dir, "bin", "python")
+    pip_exe = os.path.join(venv_dir, "Scripts" if os.name == "nt" else "bin", "pip")
+    python_exe = os.path.join(venv_dir, "Scripts" if os.name == "nt" else "bin", "python")
     print("Installing dependencies...")
     subprocess.check_call([pip_exe, "install", "--upgrade", "pip"])
-    subprocess.check_call([pip_exe, "install", "flask", "opencv-python", "numpy", "flask"])
+    subprocess.check_call([pip_exe, "install", "flask", "opencv-python", "numpy"])
     print("Relaunching inside virtual environment...")
     subprocess.check_call([python_exe] + sys.argv)
     sys.exit()
@@ -30,79 +27,65 @@ if sys.prefix == sys.base_prefix:
 use_realsense = False
 try:
     from realsensecv import RealsenseCapture
-    import cv2  # required for realsense processing as well
-    import numpy as np
-    from flask import Flask, Response, render_template_string
-    use_realsense = True
-except ImportError:
-    # Even if realsense is unavailable, we need cv2 and numpy for default cameras.
     import cv2
     import numpy as np
-    from flask import Flask, Response, render_template_string
+    use_realsense = True
+except ImportError:
+    import cv2
+    import numpy as np
 
 # ----------------- Default Camera Setup via GStreamer -----------------
-# For default video devices (e.g., /dev/video*), we spawn GStreamer pipelines.
-BASE_PORT = 9000  # starting TCP port for streams
-default_camera_ports = {}  # mapping: device id (e.g. "default_0") -> TCP port
-gst_processes = []         # list to hold gst-launch process objects
+BASE_PORT = 9000
+default_camera_ports = {}
+gst_processes = []
+
 
 def get_camera_devices():
     devices = glob.glob("/dev/video*")
     devices.sort()
     return devices
 
-devices = get_camera_devices()
-if devices:
-    for i, device in enumerate(devices):
-        # Label these devices as "Default Camera X"
-        dev_id = f"default_{i}"
-        port = BASE_PORT + i
-        default_camera_ports[dev_id] = port
-        # GStreamer pipeline: encode as JPEG, mux into multipart stream over TCP.
-        command = (
-            f'gst-launch-1.0 nvv4l2camerasrc device={device} ! '
-            f'"video/x-raw(memory:NVMM), format=(string)UYVY, width=(int)1920, height=(int)1080" ! '
-            f'nvvidconv flip-method=3 ! '
-            f'"video/x-raw(memory:NVMM), format=(string)I420, width=(int)1080, height=(int)1920" ! '
-            f'nvvidconv ! videoconvert ! jpegenc ! multipartmux boundary=frame ! '
-            f'tcpserversink host=0.0.0.0 port={port}'
-        )
-        print(f"Starting GStreamer pipeline for {device} on port {port}:\n{command}\n")
-        proc = subprocess.Popen(command, shell=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        gst_processes.append(proc)
-else:
-    print("No default video devices found at /dev/video*")
 
-# ----------------- Realsense D455 Capture Setup -----------------
-# If available, we start a thread to capture frames from the Realsense camera.
+for i, dev in enumerate(get_camera_devices()):
+    dev_id = f"default_{i}"
+    port = BASE_PORT + i
+    default_camera_ports[dev_id] = port
+    cmd = (
+        f'gst-launch-1.0 nvv4l2camerasrc device={dev} ! '
+        f'"video/x-raw(memory:NVMM), format=(string)UYVY, width=(int)1920, height=(int)1080" ! '
+        f'nvvidconv flip-method=3 ! '
+        f'"video/x-raw(memory:NVMM), format=(string)I420, width=(int)1080, height=(int)1920" ! '
+        f'nvvidconv ! videoconvert ! jpegenc ! multipartmux boundary=frame ! '
+        f'tcpserversink host=0.0.0.0 port={port}'
+    )
+    print(f"Starting GStreamer pipeline for {dev} on port {port}\n")
+    gst_processes.append(subprocess.Popen(cmd, shell=True,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+
+# ----------------- RealSense Capture Thread -----------------
 if use_realsense:
-    current_rs_color = None
-    current_rs_depth = None
+    current_rs_color = current_rs_depth = None
+    current_rs_ir_left = current_rs_ir_right = None
 
-    def capture_rs_frames():
-        global current_rs_color, current_rs_depth
-        cap = RealsenseCapture()  # use native resolution; add parameters if supported
+    def capture_rs():
+        global current_rs_color, current_rs_depth, current_rs_ir_left, current_rs_ir_right
+        cap = RealsenseCapture()
         cap.start()
         while True:
-            ret, frame = cap.read()
-            if not ret:
+            ok, fr = cap.read(include_ir=True)
+            if not ok:
                 continue
-            # Extract color and depth frames; rotate if needed
-            color_frame = cv2.rotate(frame[0], cv2.ROTATE_90_CLOCKWISE)
-            depth_frame = cv2.rotate(frame[1], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_color = color_frame
-            current_rs_depth = depth_frame
-            time.sleep(0.03)  # roughly 30fps
+            current_rs_color = cv2.rotate(fr[0], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_depth = cv2.rotate(fr[1], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_ir_left = cv2.rotate(fr[2], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_ir_right = cv2.rotate(fr[3], cv2.ROTATE_90_CLOCKWISE)
+            time.sleep(0.03)
 
-    threading.Thread(target=capture_rs_frames, daemon=True).start()
+    threading.Thread(target=capture_rs, daemon=True).start()
 
 # ----------------- Flask Application -----------------
 app = Flask(__name__)
 
-# HTML template using darkmode, flexbox, and modular cards for each device.
-
-# HTML template using darkmode, flexbox, and modular cards for each device.
 HTML_TEMPLATE = """
 <!doctype html>
 <html>
@@ -211,91 +194,28 @@ HTML_TEMPLATE = """
   </head>
   <body>
     <div class="container">
-      {% for dev in default_devices %}
+      {% for cam in cams %}
       <div class="card">
-        <h3>{{ dev.label }}</h3>
-        <!-- Display live video stream -->
-        <img src="{{ dev.video_url }}" alt="{{ dev.label }}">
+        <h3>{{ cam.label }}</h3>
+        <img src="{{ cam.video_url }}" alt="{{ cam.label }}">
         <div class="buttons">
-          <a href="{{ dev.snapshot_url }}"><button>CAMERA</button></a>
-          <a href="{{ dev.video_url }}"><button>VIDEO</button></a>
+          <a href="{{ cam.snapshot_url }}"><button>CAMERA</button></a>
+          <a href="{{ cam.video_url }}"><button>VIDEO</button></a>
         </div>
       </div>
       {% endfor %}
-      {% if realsense_available %}
-      <div class="card">
-        <h3>Realsense D455 - Color</h3>
-        <img src="/video/realsense_color" alt="Realsense Color">
-        <div class="buttons">
-          <a href="/camera/realsense_color"><button>CAMERA</button></a>
-          <a href="/video/realsense_color"><button>VIDEO</button></a>
-        </div>
-      </div>
-      <div class="card">
-        <h3>Realsense D455 - Depth</h3>
-        <img src="/video/realsense_depth" alt="Realsense Depth">
-        <div class="buttons">
-          <a href="/camera/realsense_depth"><button>CAMERA</button></a>
-          <a href="/video/realsense_depth"><button>VIDEO</button></a>
-        </div>
-      </div>
-      {% endif %}
     </div>
   </body>
 </html>
 """
 
-@app.route("/")
-def index():
-    # Build list of default devices info for HTML.
-    default_devices = []
-    for dev_id, port in default_camera_ports.items():
-        default_devices.append({
-            "label": f"Default Camera ({dev_id})",
-            "snapshot_url": f"/camera/{dev_id}",
-            "video_url": f"/video/{dev_id}"
-        })
-    return render_template_string(HTML_TEMPLATE,
-                                  default_devices=default_devices,
-                                  realsense_available=use_realsense)
+# ----------------- Helper Functions -----------------
+def jpeg_buf(frame):
+    ok, buf = cv2.imencode('.jpg', frame)
+    return buf.tobytes() if ok else None
 
-# ----------------- Default Camera Endpoints (GStreamer) -----------------
-@app.route("/camera/<dev_id>")
-def camera_snapshot(dev_id):
-    # For default cameras, dev_id should be in default_camera_ports.
-    if dev_id not in default_camera_ports:
-        return Response(b"Camera not found", status=404, mimetype="text/plain")
-    port = default_camera_ports[dev_id]
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        s.connect(("127.0.0.1", port))
-    except Exception as e:
-        error_msg = f"Error connecting to camera stream on port {port}: {e}"
-        return Response(error_msg.encode("utf-8"), status=500, mimetype="text/plain")
-    data = b""
-    frame = None
-    try:
-        while True:
-            chunk = s.recv(1024)
-            if not chunk:
-                break
-            data += chunk
-            start = data.find(b'\xff\xd8')  # JPEG start
-            end = data.find(b'\xff\xd9')    # JPEG end
-            if start != -1 and end != -1 and end > start:
-                frame = data[start:end+2]
-                break
-    except Exception as e:
-        print(f"Error reading from socket: {e}")
-    finally:
-        s.close()
-    if frame:
-        return Response(frame, mimetype="image/jpeg")
-    else:
-        return Response(b"No frame received", status=500, mimetype="text/plain")
 
-def default_video_stream_generator(port):
-    # This generator proxies the multipart stream from gst-launch.
+def socket_stream(port):
     while True:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
@@ -306,73 +226,124 @@ def default_video_stream_generator(port):
                     break
                 yield data
         except Exception as e:
-            print(f"Error in default video stream on port {port}: {e}")
+            print(f"Socket error port {port}: {e}")
         finally:
             s.close()
         time.sleep(0.03)
 
-@app.route("/video/<dev_id>")
-def video_stream(dev_id):
-    if dev_id not in default_camera_ports:
-        return Response(b"Camera not found", status=404, mimetype="text/plain")
-    port = default_camera_ports[dev_id]
-    return Response(default_video_stream_generator(port),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# ----------------- Realsense Endpoints -----------------
-def generate_frame(frame):
-    ret, jpeg = cv2.imencode('.jpg', frame)
-    if not ret:
-        return None
-    return jpeg.tobytes()
-
-# Realsense Snapshot Endpoints
-@app.route("/camera/realsense_color")
-def camera_realsense_color():
-    if not use_realsense or current_rs_color is None:
-        return Response(b"No frame received", status=500, mimetype="text/plain")
-    frame = generate_frame(current_rs_color)
-    if frame is None:
-        return Response(b"Failed to encode frame", status=500, mimetype="text/plain")
-    return Response(frame, mimetype="image/jpeg")
-
-@app.route("/camera/realsense_depth")
-def camera_realsense_depth():
-    if not use_realsense or current_rs_depth is None:
-        return Response(b"No frame received", status=500, mimetype="text/plain")
-    frame = generate_frame(current_rs_depth)
-    if frame is None:
-        return Response(b"Failed to encode frame", status=500, mimetype="text/plain")
-    return Response(frame, mimetype="image/jpeg")
-
-# Realsense Live Video Streaming Generators
-def rs_stream_generator(get_frame_func):
+def rs_stream(frame_fn):
     while True:
-        frame = get_frame_func()
-        if frame is not None:
-            ret, jpeg = cv2.imencode('.jpg', frame)
-            if ret:
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' +
-                       jpeg.tobytes() +
-                       b'\r\n')
+        f = frame_fn()
+        if f is not None:
+            jpeg = jpeg_buf(f)
+            if jpeg:
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' +
+                       jpeg + b'\r\n')
         time.sleep(0.03)
 
-@app.route("/video/realsense_color")
-def video_realsense_color():
-    def get_color():
-        return current_rs_color
-    return Response(rs_stream_generator(get_color),
+# ----------------- Index -----------------
+@app.route("/")
+def index():
+    cams = [
+        {
+            "label": f"Default Camera ({dev_id})",
+            "snapshot_url": f"/camera/{dev_id}",
+            "video_url": f"/video/{dev_id}",
+        }
+        for dev_id in default_camera_ports
+    ]
+
+    if use_realsense:
+        cams += [
+            {"label": "Realsense D455 - Color", "snapshot_url": "/camera/rs_color", "video_url": "/video/rs_color"},
+            {"label": "Realsense D455 - Depth", "snapshot_url": "/camera/rs_depth", "video_url": "/video/rs_depth"},
+            {"label": "Realsense D455 - IR Left", "snapshot_url": "/camera/rs_ir_left", "video_url": "/video/rs_ir_left"},
+            {"label": "Realsense D455 - IR Right", "snapshot_url": "/camera/rs_ir_right", "video_url": "/video/rs_ir_right"},
+        ]
+
+    return render_template_string(HTML_TEMPLATE, cams=cams)
+
+# ----------------- Snapshot Endpoints -----------------
+@app.route("/camera/<dev_id>")
+def snap_default(dev_id):
+    if dev_id not in default_camera_ports:
+        return Response(b"Camera not found", 404)
+    port = default_camera_ports[dev_id]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.connect(("127.0.0.1", port))
+        data = b""
+        while True:
+            chunk = sock.recv(1024)
+            if not chunk:
+                break
+            data += chunk
+            st = data.find(b'\xff\xd8')
+            en = data.find(b'\xff\xd9')
+            if st != -1 and en != -1 and en > st:
+                return Response(data[st:en+2], mimetype="image/jpeg")
+    finally:
+        sock.close()
+    return Response(b"No frame", 500)
+
+@app.route("/camera/rs_color")
+def snap_rs_color():
+    if not use_realsense or current_rs_color is None:
+        return Response(b"No frame", 500)
+    buf = jpeg_buf(current_rs_color)
+    return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
+
+@app.route("/camera/rs_depth")
+def snap_rs_depth():
+    if not use_realsense or current_rs_depth is None:
+        return Response(b"No frame", 500)
+    buf = jpeg_buf(current_rs_depth)
+    return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
+
+@app.route("/camera/rs_ir_left")
+def snap_rs_ir_left():
+    if not use_realsense or current_rs_ir_left is None:
+        return Response(b"No frame", 500)
+    buf = jpeg_buf(current_rs_ir_left)
+    return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
+
+@app.route("/camera/rs_ir_right")
+def snap_rs_ir_right():
+    if not use_realsense or current_rs_ir_right is None:
+        return Response(b"No frame", 500)
+    buf = jpeg_buf(current_rs_ir_right)
+    return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
+
+# ----------------- Video Endpoints -----------------
+@app.route("/video/<dev_id>")
+def video_default(dev_id):
+    if dev_id not in default_camera_ports:
+        return Response(b"Camera not found", 404)
+    return Response(socket_stream(default_camera_ports[dev_id]),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@app.route("/video/realsense_depth")
-def video_realsense_depth():
-    def get_depth():
-        return current_rs_depth
-    return Response(rs_stream_generator(get_depth),
+@app.route("/video/rs_color")
+def video_rs_color():
+    return Response(rs_stream(lambda: current_rs_color),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
-# ----------------- Run Flask Server -----------------
+@app.route("/video/rs_depth")
+def video_rs_depth():
+    return Response(rs_stream(lambda: current_rs_depth),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route("/video/rs_ir_left")
+def video_rs_ir_left():
+    return Response(rs_stream(lambda: current_rs_ir_left),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route("/video/rs_ir_right")
+def video_rs_ir_right():
+    return Response(rs_stream(lambda: current_rs_ir_right),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# ----------------- Run -----------------
 if __name__ == "__main__":
     print("Flask server starting on port 8080...")
     app.run(host="0.0.0.0", port=8080)
