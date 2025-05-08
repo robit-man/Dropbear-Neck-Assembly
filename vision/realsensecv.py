@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 RealSense D455 capture helper – v6
-──────────────────────────────────
+──────────────────────────
 Goal: keep very-close objects pure white, *and* retain far-field contrast.
 
 Strategy
@@ -16,6 +16,7 @@ Strategy
 Public API unchanged:  start() · read() · release()
 """
 
+import time
 import pyrealsense2 as rs
 import numpy as np
 import cv2
@@ -29,7 +30,7 @@ class RealsenseCapture:
     # ---------- gradient settings ----------
     MIN_DEPTH_M   = 0.01      # pure white
     MAX_DEPTH_CAP = 15.0      # never map beyond this
-    GAMMA         = 1       # <1 boosts far-end contrast; set to 1.0 for linear
+    GAMMA         = 1         # <1 boosts far-end contrast; set to 1.0 for linear
 
     def __init__(self):
         self.config = rs.config()
@@ -43,6 +44,12 @@ class RealsenseCapture:
             self.config.enable_stream(rs.stream.infrared, i,
                                       self.WIDTH, self.HEIGHT,
                                       rs.format.y8, self.FPS)
+
+        # --- enable IMU (accel + gyro) ---
+        self.config.enable_stream(rs.stream.accel,
+                                  rs.format.motion_xyz32f, 250)
+        self.config.enable_stream(rs.stream.gyro,
+                                  rs.format.motion_xyz32f, 200)
 
         # --------- filter chain ---------
         self.decimate   = rs.decimation_filter()
@@ -60,7 +67,17 @@ class RealsenseCapture:
     # --------- lifecycle ---------
     def start(self):
         self.pipeline = rs.pipeline()
-        prof = self.pipeline.start(self.config)
+        backoff = 1.0
+        # retry indefinitely with exponential backoff
+        while True:
+            try:
+                prof = self.pipeline.start(self.config)
+                break
+            except Exception as e:
+                print(f"[RealSense] start() failed: {e!r}, retrying in {backoff:.1f}s...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30.0)
+
         sensor = prof.get_device().first_depth_sensor()
         self.depth_scale = sensor.get_depth_scale()
         print(f"[RealSense] depth_scale = {self.depth_scale:.6f} m/unit")
@@ -113,13 +130,26 @@ class RealsenseCapture:
     # --------- main read ---------
     def read(self, *, as_numpy=True, include_ir=False):
         """
-        ret, (colour, depth_vis[, irL, irR])   if as_numpy
-        ret, (colour_f, depth_f[, irL_f, irR_f])  otherwise
+        ret, (colour, depth_vis[, irL, irR, imu_data]) if as_numpy
+        ret, (colour_f, depth_f[, irL_f, irR_f, imu_data]) otherwise
         """
         if self.pipeline is None:
             raise RuntimeError("start() must be called first")
 
         fs = self.pipeline.wait_for_frames()
+
+        # fetch IMU frames
+        accel_f = fs.first_or_default(rs.stream.accel)
+        gyro_f  = fs.first_or_default(rs.stream.gyro)
+
+        imu_data = {}
+        if accel_f:
+            m = accel_f.as_motion_frame().get_motion_data()
+            imu_data['accel'] = (m.x, m.y, m.z, accel_f.get_timestamp())
+        if gyro_f:
+            m = gyro_f.as_motion_frame().get_motion_data()
+            imu_data['gyro']  = (m.x, m.y, m.z, gyro_f.get_timestamp())
+
         color_f  = fs.get_color_frame()
         depth_f0 = fs.get_depth_frame()
         ir_l_f = ir_r_f = None
@@ -127,24 +157,29 @@ class RealsenseCapture:
             ir_l_f = fs.get_infrared_frame(1)
             ir_r_f = fs.get_infrared_frame(2)
 
+        # if any core frame missing, return False + appropriate-length None tuple
         if not color_f or not depth_f0 or (include_ir and (not ir_l_f or not ir_r_f)):
-            return False, (None,) * (4 if include_ir else 2)
+            length = (4 if include_ir else 2) + 1
+            return False, (None,) * length
 
         depth_f = self._filter_depth(depth_f0)
 
         if not as_numpy:
             base = (color_f, depth_f)
-            return True, base + (ir_l_f, ir_r_f) if include_ir else base
+            if include_ir:
+                base = base + (ir_l_f, ir_r_f)
+            return True, base + (imu_data,)
 
         colour    = self._np(color_f)
         depth_vis = self._depth_vis(depth_f)
 
         if not include_ir:
-            return True, (colour, depth_vis)
+            return True, (colour, depth_vis, imu_data)
 
         return True, (
             colour,
             depth_vis,
             self._np(ir_l_f),
-            self._np(ir_r_f)
+            self._np(ir_r_f),
+            imu_data
         )
