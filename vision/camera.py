@@ -6,7 +6,7 @@ import glob
 import socket
 import time
 import threading
-from flask import Flask, Response, render_template_string
+from flask import Flask, Response, render_template_string, jsonify
 
 # ----------------- Auto-venv Bootstrap -----------------
 if sys.prefix == sys.base_prefix:
@@ -66,19 +66,22 @@ for i, dev in enumerate(get_camera_devices()):
 if use_realsense:
     current_rs_color = current_rs_depth = None
     current_rs_ir_left = current_rs_ir_right = None
+    current_rs_imu = {}
 
     def capture_rs():
-        global current_rs_color, current_rs_depth, current_rs_ir_left, current_rs_ir_right
+        global current_rs_color, current_rs_depth, current_rs_ir_left, current_rs_ir_right, current_rs_imu
         cap = RealsenseCapture()
         cap.start()
         while True:
             ok, fr = cap.read(include_ir=True)
             if not ok:
                 continue
-            current_rs_color = cv2.rotate(fr[0], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_depth = cv2.rotate(fr[1], cv2.ROTATE_90_CLOCKWISE)
+            # fr == (color, depth_vis, ir_left, ir_right, imu_data)
+            current_rs_color   = cv2.rotate(fr[0], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_depth   = cv2.rotate(fr[1], cv2.ROTATE_90_CLOCKWISE)
             current_rs_ir_left = cv2.rotate(fr[2], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_ir_right = cv2.rotate(fr[3], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_ir_right= cv2.rotate(fr[3], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_imu     = fr[4]
             time.sleep(0.03)
 
     threading.Thread(target=capture_rs, daemon=True).start()
@@ -92,17 +95,11 @@ HTML_TEMPLATE = """
   <head>
     <title>Camera Streams</title>
     <style>
-    *{transition:all 0.2s ease;font-family: 'Courier New', monospace;}
+      * { transition: all 0.2s ease; font-family: 'Courier New', monospace; }
       body {
         background-color: #101010;
         color: #fff;
-        font-family: 'Courier New', monospace;
-        margin: 0;
-        padding: 0;
-      }
-      h1 {
-        text-align: center;
-        margin: 20px 0;
+        margin: 0; padding: 0;
       }
       .container {
         display: flex;
@@ -112,83 +109,58 @@ HTML_TEMPLATE = """
         padding: 20px;
       }
       .card {
-      	position:relative;
         background-color: #212121;
         border-radius: 16px;
         padding: 15px;
         width: 300px;
-        height:fit-content;
-        display:flex;
-        flex-flow:column;
-        gap:10px;
-        box-sizing:border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        position: relative;
       }
       .card h3 {
-        display:flex;
-        mix-blend-mode:exclusion;
-        margin:0px;
-        border-radius:4px;
-        opacity:0.3;
-        width:270px;
-        box-sizing:border-box;
-        text-transform:uppercase;
-        font-size:0.75rem;
-        font-weight:800;
-        position:relative;
-        border:2px solid white;
-        padding:10px;
+        margin: 0;
+        padding: 10px;
+        border: 2px solid #fff;
+        border-radius: 4px;
+        opacity: 0.3;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        mix-blend-mode: exclusion;
       }
       .card img {
         width: 100%;
         border-radius: 4px;
       }
-      .card .buttons {
-        box-sizing:border-box;
-      	position:relative;
-        text-align: center;
-        display:flex;
-        flex-flow:row;
-        gap:10px;
-        width:100%;
-        opacity:0.3;
-        mix-blend-mode:difference;
+      .buttons {
+        display: flex;
+        gap: 10px;
+        opacity: 0.3;
+        mix-blend-mode: difference;
       }
-      
-      
-      .card button:nth-child(odd) {
-        width:130px;
+      .buttons button {
+        flex: 1;
         padding: 10px;
-        border: none;
         border-radius: 4px;
-        background-color: white;
-        color: black;
+        border: 1px solid #fff;
         cursor: pointer;
-        border:1px solid white;
-        box-sizing:border-box;
       }
-      .card button:nth-child(odd):hover {
-        background-color: black;
-        color:white;
+      .buttons button:first-child {
+        background-color: #fff; color: #000;
       }
-      
-      .card button:nth-child(even) {
-        width:130px;
-        padding: 10px;
-        border: none;
-        border-radius: 4px;
-        background-color: black;
-        color:white;
-        cursor: pointer;
-        border:1px solid white;
-        box-sizing:border-box;
+      .buttons button:last-child {
+        background-color: #000; color: #fff;
       }
-      .card button:nth-child(even):hover {
-        background-color: white;
-        color: black;
+      .buttons button:hover {
+        background-color: currentColor;
+        color: currentBackground;
       }
-      a {
-        text-decoration: none;
+      .imu {
+        font-size: 0.8rem;
+        color: #0f0;
+        opacity: 0.8;
+        white-space: pre;
       }
     </style>
   </head>
@@ -202,9 +174,31 @@ HTML_TEMPLATE = """
           <a href="{{ cam.snapshot_url }}"><button>CAMERA</button></a>
           <a href="{{ cam.video_url }}"><button>VIDEO</button></a>
         </div>
+        {% if cam.imu %}
+        <div class="imu">Accel: -- | Gyro: --</div>
+        {% endif %}
       </div>
       {% endfor %}
     </div>
+    <script>
+      async function updateIMU() {
+        try {
+          const res = await fetch('/imu');
+          const data = await res.json();
+          document.querySelectorAll('.card').forEach((card, i) => {
+            if (!card.querySelector('.imu')) return;
+            const a = data.accel || [0,0,0];
+            const g = data.gyro  || [0,0,0];
+            card.querySelector('.imu').innerHTML =
+              `Accel: ${a[0].toFixed(3)},${a[1].toFixed(3)},${a[2].toFixed(3)} ` +
+              `<br>Gyro: ${g[0].toFixed(3)},${g[1].toFixed(3)},${g[2].toFixed(3)}`;
+          });
+        } catch (e) {
+          // silent
+        }
+      }
+      setInterval(updateIMU, 200);
+    </script>
   </body>
 </html>
 """
@@ -238,9 +232,9 @@ def rs_stream(frame_fn):
         if f is not None:
             jpeg = jpeg_buf(f)
             if jpeg:
-                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' +
-                       jpeg + b'\r\n')
+                yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + jpeg + b'\r\n')
         time.sleep(0.03)
+
 
 # ----------------- Index -----------------
 @app.route("/")
@@ -250,19 +244,21 @@ def index():
             "label": f"Default Camera ({dev_id})",
             "snapshot_url": f"/camera/{dev_id}",
             "video_url": f"/video/{dev_id}",
+            "imu": False
         }
         for dev_id in default_camera_ports
     ]
 
     if use_realsense:
         cams += [
-            {"label": "Realsense D455 - Color", "snapshot_url": "/camera/rs_color", "video_url": "/video/rs_color"},
-            {"label": "Realsense D455 - Depth", "snapshot_url": "/camera/rs_depth", "video_url": "/video/rs_depth"},
-            {"label": "Realsense D455 - IR Left", "snapshot_url": "/camera/rs_ir_left", "video_url": "/video/rs_ir_left"},
-            {"label": "Realsense D455 - IR Right", "snapshot_url": "/camera/rs_ir_right", "video_url": "/video/rs_ir_right"},
+            {"label": "Realsense D455 - Color",   "snapshot_url": "/camera/rs_color",   "video_url": "/video/rs_color",   "imu": True},
+            {"label": "Realsense D455 - Depth",   "snapshot_url": "/camera/rs_depth",   "video_url": "/video/rs_depth",   "imu": True},
+            {"label": "Realsense D455 - IR Left", "snapshot_url": "/camera/rs_ir_left", "video_url": "/video/rs_ir_left", "imu": True},
+            {"label": "Realsense D455 - IR Right","snapshot_url": "/camera/rs_ir_right","video_url": "/video/rs_ir_right","imu": True},
         ]
 
     return render_template_string(HTML_TEMPLATE, cams=cams)
+
 
 # ----------------- Snapshot Endpoints -----------------
 @app.route("/camera/<dev_id>")
@@ -287,12 +283,14 @@ def snap_default(dev_id):
         sock.close()
     return Response(b"No frame", 500)
 
+
 @app.route("/camera/rs_color")
 def snap_rs_color():
     if not use_realsense or current_rs_color is None:
         return Response(b"No frame", 500)
     buf = jpeg_buf(current_rs_color)
     return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
+
 
 @app.route("/camera/rs_depth")
 def snap_rs_depth():
@@ -301,6 +299,7 @@ def snap_rs_depth():
     buf = jpeg_buf(current_rs_depth)
     return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
 
+
 @app.route("/camera/rs_ir_left")
 def snap_rs_ir_left():
     if not use_realsense or current_rs_ir_left is None:
@@ -308,12 +307,20 @@ def snap_rs_ir_left():
     buf = jpeg_buf(current_rs_ir_left)
     return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
 
+
 @app.route("/camera/rs_ir_right")
 def snap_rs_ir_right():
     if not use_realsense or current_rs_ir_right is None:
         return Response(b"No frame", 500)
     buf = jpeg_buf(current_rs_ir_right)
     return Response(buf, mimetype="image/jpeg") if buf else Response(b"Err", 500)
+
+
+# ----------------- IMU Endpoint -----------------
+@app.route("/imu")
+def imu_endpoint():
+    return jsonify(current_rs_imu)
+
 
 # ----------------- Video Endpoints -----------------
 @app.route("/video/<dev_id>")
@@ -323,25 +330,30 @@ def video_default(dev_id):
     return Response(socket_stream(default_camera_ports[dev_id]),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
 @app.route("/video/rs_color")
 def video_rs_color():
     return Response(rs_stream(lambda: current_rs_color),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
 
 @app.route("/video/rs_depth")
 def video_rs_depth():
     return Response(rs_stream(lambda: current_rs_depth),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
 @app.route("/video/rs_ir_left")
 def video_rs_ir_left():
     return Response(rs_stream(lambda: current_rs_ir_left),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
+
 @app.route("/video/rs_ir_right")
 def video_rs_ir_right():
     return Response(rs_stream(lambda: current_rs_ir_right),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
 
 # ----------------- Run -----------------
 if __name__ == "__main__":
