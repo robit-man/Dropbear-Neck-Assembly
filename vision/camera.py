@@ -72,19 +72,43 @@ if use_realsense:
         global current_rs_color, current_rs_depth, current_rs_ir_left, current_rs_ir_right, current_rs_imu
         cap = RealsenseCapture()
         cap.start()
+        retry_delay = 0.1
+        max_retries = 5
         while True:
-            ok, fr = cap.read(include_ir=True)
-            if not ok:
+            retries = 0
+            ok = False
+            fr = None
+            # retry loop for transient wait_for_frames errors
+            while retries < max_retries:
+                try:
+                    ok, fr = cap.read(include_ir=True)
+                    break
+                except RuntimeError as e:
+                    print(f"[Realsense] read error: {e}. Retrying {retries+1}/{max_retries}")
+                    retries += 1
+                    time.sleep(retry_delay)
+            # if still failed, reinitialize sensor
+            if not ok or fr is None:
+                print("[Realsense] frame capture failed after retries, reinitializing sensor")
+                try:
+                    cap.stop()
+                except Exception as e:
+                    print(f"[Realsense] error stopping capture: {e}")
+                cap = RealsenseCapture()
+                cap.start()
                 continue
+
+            # successful frame
             # fr == (color, depth_vis, ir_left, ir_right, imu_data)
-            current_rs_color   = cv2.rotate(fr[0], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_depth   = cv2.rotate(fr[1], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_ir_left = cv2.rotate(fr[2], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_ir_right= cv2.rotate(fr[3], cv2.ROTATE_90_CLOCKWISE)
-            current_rs_imu     = fr[4]
+            current_rs_color    = cv2.rotate(fr[0], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_depth    = cv2.rotate(fr[1], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_ir_left  = cv2.rotate(fr[2], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_ir_right = cv2.rotate(fr[3], cv2.ROTATE_90_CLOCKWISE)
+            current_rs_imu      = fr[4]
             time.sleep(0.03)
 
     threading.Thread(target=capture_rs, daemon=True).start()
+
 
 # ----------------- Flask Application -----------------
 app = Flask(__name__)
