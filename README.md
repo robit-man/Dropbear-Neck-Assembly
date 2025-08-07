@@ -26,6 +26,10 @@ This repository is focused on the development of a robot head and neck assembly,
 - Power Supply for the Motors and ESP32
 - Linux or Other serial or bluetooth control source, we use an AGX Xavier, but a raspberry pi or laptop will suffice!
 
+## Update to signaling / Remote control August 7 2025
+
+[Visit this repository](https://github.com/robit-man/neck-signal) for all components needed to remote control the neck via signaling server
+
 ## Added Control Software in /interface
 
 Just run [this script](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/interface/app.py) via 
