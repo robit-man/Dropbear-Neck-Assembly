@@ -55,6 +55,7 @@ if not in_virtualenv():
 
 from flask import Flask, render_template_string, request, jsonify, redirect, url_for
 import serial
+import socket
 from serial.tools import list_ports
 import threading
 import time
@@ -191,10 +192,9 @@ base_js = """
 // Define PI if you need quaternion math.
 const PI = Math.PI;
 
-// Pull in the adapter WS URL from Flask:
-const WS_URL = "{{ ws_url }}";
+// Determine WS URL from localStorage first (if set), otherwise fallback to Flask default.
+let WS_URL = localStorage.getItem('wsUrl') || "{{ ws_url }}";
 let ws = null;
-// tracks whether we should use WS; flips to true on open, false on close/error
 let useWS = false;
 
 // Common logger for the footer console.
@@ -259,42 +259,66 @@ function sendCommand(command) {
     }
 }
 
-// On page load: open WS and wire its events, then run your old port-reconnect logic.
-window.addEventListener('load', () => {
-    // Attempt WebSocket connection.
-    try {
-        ws = new WebSocket(WS_URL);
-        ws.onopen = () => {
-            useWS = true;
-            logToConsole("✅ WS connected — now using WebSocket");
-        };
-        ws.onmessage = e => logToConsole("👈 WS ← " + e.data);
-        ws.onclose = () => {
-            useWS = false;
-            logToConsole("⚠️ WS closed — falling back to HTTP");
-        };
-        ws.onerror = () => {
-            useWS = false;
-            logToConsole("❌ WS error — falling back to HTTP");
-        };
-    } catch (e) {
-        console.warn("WebSocket init failed:", e);
-    }
 
-    // Your previous auto-connect lastPort logic:
-    const lastPort = localStorage.getItem('lastPort');
-    if (lastPort) {
-        setTimeout(() => {
-            const sel = document.getElementById('portSelect');
-            for (let i = 0; i < sel.options.length; i++) {
-                if (sel.options[i].value === lastPort) {
-                    sel.selectedIndex = i;
-                    doConnectManual();
-                    break;
-                }
-            }
-        }, 1000);
-    }
+
+// Initialize the WebSocket connection.
+function initWebSocket() {
+  try {
+    ws = new WebSocket(WS_URL);
+    ws.onopen = () => {
+      useWS = true;
+      logToConsole("✅ WS connected — now using WebSocket at " + WS_URL);
+      // hide serial UI when WS is live
+      document.getElementById('serialSection').style.display = 'none';
+    };
+    ws.onmessage = e => logToConsole("👈 WS ← " + e.data);
+    ws.onclose = () => {
+      useWS = false;
+      logToConsole("⚠️ WS closed — falling back to HTTP/serial");
+      document.getElementById('serialSection').style.display = '';
+    };
+    ws.onerror = () => {
+      useWS = false;
+      logToConsole("❌ WS error — falling back to HTTP/serial");
+      document.getElementById('serialSection').style.display = '';
+    };
+  } catch (err) {
+    console.warn("WebSocket init failed:", err);
+  }
+}
+
+// Called when you click “Connect WS”
+function connectWS() {
+  const endpoint = document.getElementById('wsUrlInput').value.trim();
+  if (!endpoint) return alert("Please enter a WS URL");
+  localStorage.setItem('wsUrl', endpoint);
+  WS_URL = endpoint;
+  logToConsole("🔗 Using new WS endpoint: " + WS_URL);
+  if (ws) ws.close();
+  initWebSocket();
+}
+
+window.addEventListener('load', () => {
+  // Pre-fill the box if we have a saved WS URL
+  const saved = localStorage.getItem('wsUrl');
+  if (saved) document.getElementById('wsUrlInput').value = saved;
+  // Kick off WS first
+  initWebSocket();
+
+  // Existing serial auto-connect logic stays here…
+  const lastPort = localStorage.getItem('lastPort');
+  if (lastPort) {
+    setTimeout(() => {
+      const sel = document.getElementById('portSelect');
+      for (let i = 0; i < sel.options.length; i++) {
+        if (sel.options[i].value === lastPort) {
+          sel.selectedIndex = i;
+          doConnectManual();
+          break;
+        }
+      }
+    }, 1000);
+  }
 });
 </script>
 """
@@ -345,14 +369,27 @@ connect_page = """
 <body>
   <div class="container">
     <h1>Connect to Neck</h1>
-    <div class="row">
-      <label for="portSelect">Select Port:</label>
-      <select id="portSelect"></select>
-      <button onclick="doConnectManual()">Connect</button>
-      <span id="status">Checking...</span>
+    <div id="wsSection" class="row">
+      <label for="wsUrlInput">Adapter WS URL:</label>
+      <input type="text" id="wsUrlInput" placeholder="e.g. ws://192.168.1.39:5001/ws">
+      <button onclick="connectWS()">Connect WS</button>
     </div>
-    <div class="row">
-      <a id="proceedBtn" href="/home" style="display:none;"><button style="background:white;color:black;">Proceed to Control Interface</button></a>
+
+    <!-- ——— SERIAL CONNECT UI ——— -->
+    <div id="serialSection">
+      <div class="row">
+        <label for="portSelect">Select Port:</label>
+        <select id="portSelect"></select>
+        <button onclick="doConnectManual()">Connect</button>
+        <span id="status">Checking...</span>
+      </div>
+      <div class="row">
+        <a id="proceedBtn" href="/home" style="display:none;">
+          <button style="background:white;color:black;">
+            Proceed to Control Interface
+          </button>
+        </a>
+      </div>
     </div>
   </div>
   <footer id="console"></footer>
