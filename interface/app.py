@@ -59,6 +59,7 @@ import socket
 from serial.tools import list_ports
 import threading
 import time
+from time import sleep
 import json
 import math
 
@@ -290,12 +291,21 @@ function initWebSocket() {
 // Called when you click “Connect WS”
 function connectWS() {
   const endpoint = document.getElementById('wsUrlInput').value.trim();
-  if (!endpoint) return alert("Please enter a WS URL");
-  localStorage.setItem('wsUrl', endpoint);
-  WS_URL = endpoint;
-  logToConsole("🔗 Using new WS endpoint: " + WS_URL);
-  if (ws) ws.close();
-  initWebSocket();
+  if (!endpoint) {
+    alert("Please enter a WS URL");
+    return;
+  }
+
+  // 1) gracefully drop the serial link
+  fetch('/do_disconnect', { method: 'POST' })
+    .finally(() => {
+      // 2) then proceed with WebSocket connect
+      localStorage.setItem('wsUrl', endpoint);
+      WS_URL = endpoint;
+      logToConsole("🔗 Using new WS endpoint: " + WS_URL);
+      if (ws) ws.close();
+      initWebSocket();
+    });
 }
 
 window.addEventListener('load', () => {
@@ -425,25 +435,31 @@ connect_page = """
 
     // Update your existing doConnectManual() function to save the port:
     function doConnectManual() {
-        let port = document.getElementById('portSelect').value;
-        fetch('/do_connect_manual', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({port: port})
-        })
-        .then(response => response.json())
-        .then(data => {
-            if (data.connected) {
-                document.getElementById('status').textContent = "Connected!";
-                document.getElementById('proceedBtn').style.display = "block";
-                logToConsole("Connected to " + port);
-                // Save the successfully connected port to localStorage.
-                localStorage.setItem('lastPort', port);
-            } else {
-                document.getElementById('status').textContent = "Connection failed.";
-                logToConsole("Connection failed to " + port);
-            }
-        });
+      const port = document.getElementById('portSelect').value;
+    
+      // If we were on WS, close it and tell the adapter to disconnect serial
+      if (useWS && ws) {
+        ws.close();
+        fetch('/do_disconnect', { method: 'POST' }).catch(() => {});
+      }
+    
+      fetch('/do_connect_manual', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ port: port })
+      })
+      .then(response => response.json())
+      .then(data => {
+        if (data.connected) {
+          document.getElementById('status').textContent = "Connected!";
+          document.getElementById('proceedBtn').style.display = "block";
+          logToConsole("Connected to " + port);
+          localStorage.setItem('lastPort', port);
+        } else {
+          document.getElementById('status').textContent = "Connection failed.";
+          logToConsole("Connection failed to " + port);
+        }
+      });
     }
   </script>
 </body>
@@ -1202,7 +1218,29 @@ def do_connect_manual():
         print(f"Error connecting to port {port}: {e}")
         connected = False
     return jsonify({"connected": connected})
-  
+
+@app.route("/do_disconnect", methods=["POST"])
+def do_disconnect():
+    """
+    Send a proper HOME command, wait briefly, then close the serial port.
+    """
+    global ser
+    try:
+        if ser and ser.is_open:
+            # 1) send a clean HOME\n
+            ser.write(b"HOME\n")
+            print("Sent HOME before disconnect")
+            # 2) allow firmware to process
+            sleep(0.1)
+            # 3) then close
+            ser.close()
+            print("Serial port closed.")
+        ser = None
+        return jsonify({"disconnected": True})
+    except Exception as e:
+        print(f"Error in do_disconnect: {e}")
+        return jsonify({"disconnected": False, "error": str(e)}), 500
+
 @app.route("/status")
 def status():
     connected = (ser is not None) and ser.isOpen()
@@ -1238,12 +1276,13 @@ def update_state(cmd):
     Updates the global current_state dictionary based on the command string.
     This function mimics the parsing performed by the firmware.
     """
-    global current_state
-    cmd = cmd.strip()
+    # Normalize and bail on empty
+    cmd = cmd.strip().upper()
     if not cmd:
         return
-    # Homing command: if cmd equals "HOME", reset state.
-    if cmd.lower() == "home":
+
+    # Proper HOME handling
+    if cmd == "HOME":
         current_state["X"] = 0
         current_state["Y"] = 0
         current_state["Z"] = 0
