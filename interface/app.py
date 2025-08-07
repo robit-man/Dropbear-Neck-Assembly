@@ -66,6 +66,7 @@ import math
 SERIAL_BAUD = 115200
 ser = None
 ser_lock = threading.Lock()
+WEBSOCKET_URL = os.environ.get("ADAPTER_WS_URL", "ws://127.0.0.1:5001/ws")
 
 # ---------- Global State Tracking ----------
 # current_state stores the latest known values for each actuator (in mm) and head parameters.
@@ -187,65 +188,117 @@ footer {
 
 base_js = """
 <script>
-// Define PI for use in any quaternion math if needed.
+// Define PI if you need quaternion math.
 const PI = Math.PI;
 
+// Pull in the adapter WS URL from Flask:
+const WS_URL = "{{ ws_url }}";
+let ws = null;
+// tracks whether we should use WS; flips to true on open, false on close/error
+let useWS = false;
+
+// Common logger for the footer console.
 function logToConsole(msg) {
-    var consoleEl = document.getElementById('console');
+    const consoleEl = document.getElementById('console');
     if (consoleEl) {
-        var newLine = document.createElement('div');
-        newLine.textContent = msg;
-        consoleEl.appendChild(newLine);
+        const line = document.createElement('div');
+        line.textContent = msg;
+        consoleEl.appendChild(line);
         consoleEl.scrollTop = consoleEl.scrollHeight;
     }
 }
 
+// All your original defaults:
+const DEFAULTS = {
+    'motor': 0,'yaw': 0,'pitch': 0,'roll': 0,'height': 0,
+    'X': 0,'Y': 0,'Z': 0,'H': 0,'S': 1,'A': 1,'R': 0,'P': 0,
+    'w': 1,'x': 0,'y': 0,'z': 0,'qH': 0,'qS': 1,'qA': 1
+};
+
+// Reset sliders/inputs back to defaults and clear the command display.
 function resetSliders() {
-    // Default values for various controls.
-    let defaults = {
-        'motor': 0,
-        'yaw': 0,
-        'pitch': 0,
-        'roll': 0,
-        'height': 0,
-        'X': 0,
-        'Y': 0,
-        'Z': 0,
-        'H': 0,
-        'S': 1,
-        'A': 1,
-        'R': 0,
-        'P': 0,
-        'w': 1,
-        'x': 0,
-        'y': 0,
-        'z': 0,
-        'qH': 0,
-        'qS': 1,
-        'qA': 1
-    };
-    document.querySelectorAll("input[type='number'], input[type='range']").forEach(function(input) {
-        for (let key in defaults) {
-            if (input.id.startsWith(key)) {
-                input.value = defaults[key];
+    document.querySelectorAll("input[type='number'], input[type='range']").forEach(input => {
+        for (let k in DEFAULTS) {
+            if (input.id.startsWith(k)) {
+                input.value = DEFAULTS[k];
                 input.dispatchEvent(new Event('change'));
                 break;
             }
         }
     });
-    let currentCmdEl = document.getElementById('currentCmd');
-    if(currentCmdEl) {
-        currentCmdEl.textContent = "";
-    }
+    const cur = document.getElementById('currentCmd');
+    if (cur) cur.textContent = "";
 }
 
+// Send HOME command and then reset UI.
 function sendHomeCommand() {
     sendCommand("HOME");
     resetSliders();
     logToConsole("Sent HOME command");
 }
+
+// Centralized sendCommand: whichever path is currently active.
+function sendCommand(command) {
+    if (useWS && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(command);
+        logToConsole("▶ WS → " + command);
+    } else {
+        // If WS not yet open (or closed), do HTTP POST
+        fetch('/send_command', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command})
+        })
+        .then(r => r.json())
+        .then(data => {
+            logToConsole("▶ HTTP → " + command);
+            if (data.status !== 'success')
+                logToConsole("‼️ Error: " + (data.message || JSON.stringify(data)));
+        })
+        .catch(err => logToConsole("‼️ Fetch error: " + err));
+    }
+}
+
+// On page load: open WS and wire its events, then run your old port-reconnect logic.
+window.addEventListener('load', () => {
+    // Attempt WebSocket connection.
+    try {
+        ws = new WebSocket(WS_URL);
+        ws.onopen = () => {
+            useWS = true;
+            logToConsole("✅ WS connected — now using WebSocket");
+        };
+        ws.onmessage = e => logToConsole("👈 WS ← " + e.data);
+        ws.onclose = () => {
+            useWS = false;
+            logToConsole("⚠️ WS closed — falling back to HTTP");
+        };
+        ws.onerror = () => {
+            useWS = false;
+            logToConsole("❌ WS error — falling back to HTTP");
+        };
+    } catch (e) {
+        console.warn("WebSocket init failed:", e);
+    }
+
+    // Your previous auto-connect lastPort logic:
+    const lastPort = localStorage.getItem('lastPort');
+    if (lastPort) {
+        setTimeout(() => {
+            const sel = document.getElementById('portSelect');
+            for (let i = 0; i < sel.options.length; i++) {
+                if (sel.options[i].value === lastPort) {
+                    sel.selectedIndex = i;
+                    doConnectManual();
+                    break;
+                }
+            }
+        }, 1000);
+    }
+});
 </script>
 """
+
 
 # Navigation block using only divs and flexbox.
 nav_html = """
@@ -1112,7 +1165,7 @@ def do_connect_manual():
         print(f"Error connecting to port {port}: {e}")
         connected = False
     return jsonify({"connected": connected})
-
+  
 @app.route("/status")
 def status():
     connected = (ser is not None) and ser.isOpen()
@@ -1259,31 +1312,32 @@ def index():
 
 @app.route("/connect")
 def connect():
-    return render_template_string(connect_page)
+    return render_template_string(connect_page, ws_url=WEBSOCKET_URL)
 
 @app.route("/headstream")
 def headstream():
-    return render_template_string(headstream_page)
+    return render_template_string(headstream_page, ws_url=WEBSOCKET_URL)
 
 @app.route("/home")
 def home():
-    return render_template_string(home_page)
+    return render_template_string(home_page, ws_url=WEBSOCKET_URL)
 
 @app.route("/direct")
 def direct():
-    return render_template_string(direct_page)
+    return render_template_string(direct_page, ws_url=WEBSOCKET_URL)
 
 @app.route("/euler")
 def euler():
-    return render_template_string(euler_page)
+    return render_template_string(euler_page, ws_url=WEBSOCKET_URL)
 
 @app.route("/head")
 def head():
-    return render_template_string(head_page)
+    return render_template_string(head_page, ws_url=WEBSOCKET_URL)
 
 @app.route("/quaternion")
 def quaternion():
-    return render_template_string(quat_page)
+    return render_template_string(quat_page, ws_url=WEBSOCKET_URL)
+
 
 # ---------- Run Flask App ----------
 if __name__ == "__main__":
