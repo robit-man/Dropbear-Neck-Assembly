@@ -212,7 +212,6 @@ def main():
             print("Invalid port number. Please try again.\n")
             continue
         if is_port_available(listen_port):
-            # Update configuration with new port.
             config["listen_port"] = listen_port
             config_changed = True
             break
@@ -233,14 +232,16 @@ def main():
         config["listen_route"] = listen_route
         config_changed = True
 
-    # --- Auto-save configuration if changes were made and no config existed before ---
+    # --- Auto-save configuration if changes were made ---
     if config_changed:
         save_config(config)
 
     # --- Host Setup (allow binding beyond localhost) ---
     listen_host = config.get("listen_host")
     if not listen_host:
-        host_input = input("Enter bind host/IP (default 0.0.0.0 for all interfaces): ").strip()
+        host_input = input(
+            "Enter bind host/IP (default 0.0.0.0 for all interfaces): "
+        ).strip()
         listen_host = host_input or "0.0.0.0"
         config["listen_host"] = listen_host
         save_config(config)
@@ -297,13 +298,15 @@ def main():
 
         return jsonify({"status": "success", "command": full_command})
 
-    # Informational log with LAN hint if bound to all interfaces
+    # Informational log with LAN hint if binding to all interfaces
     bind_msg = f"Starting server on http://{listen_host}:{listen_port}{listen_route}"
     if listen_host == "0.0.0.0":
         try:
             hostname = socket.gethostname()
             lan_ip = socket.gethostbyname(hostname)
-            bind_msg += f"  (reachable on LAN at http://{lan_ip}:{listen_port}{listen_route})"
+            bind_msg += (
+                f"  (reachable on LAN at http://{lan_ip}:{listen_port}{listen_route})"
+            )
         except:
             pass
     log(bind_msg)
