@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Robotic Neck Control</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.152.2/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.152.2/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="./script.js" defer></script>
+  <script type="module" src="./headstream-module.js"></script>
+</head>
+<body>
+  <div id="connectionModal" class="modal active">
+    <div class="modal-content">
+      <div class="modal-header">Connect to Neck Adapter</div>
+
+      <div class="modal-section">
+        <h3 style="margin-top:0;">Authentication</h3>
+        <div class="column">
+          <label for="passwordInput">Password:</label>
+          <input type="password" id="passwordInput" placeholder="Enter adapter password">
+        </div>
+      </div>
+
+      <div class="modal-section">
+        <h3 style="margin-top:0;">Adapter Endpoints</h3>
+        <div class="column">
+          <label for="httpUrlInput">HTTP URL:</label>
+          <input type="text" id="httpUrlInput" placeholder="http://127.0.0.1:5001/send_command">
+
+          <label for="wsUrlInput">WebSocket URL (optional):</label>
+          <input type="text" id="wsUrlInput" placeholder="ws://127.0.0.1:5001/ws">
+        </div>
+        <button onclick="fetchTunnelUrl()" style="width:100%;margin-top:0.5rem;">
+          Fill Endpoints From Tunnel URL
+        </button>
+        <p style="font-size:0.85rem;opacity:0.7;margin:0.5rem 0 0 0;">
+          Paste a tunnel/base URL, then click above to derive /send_command and /ws endpoints
+        </p>
+      </div>
+
+      <button onclick="connectToAdapter()" class="primary" style="width:100%;padding:1rem;font-size:1.1rem;">
+        Connect
+      </button>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="metrics-bar">
+      <div class="metric">
+        <div class="metric-label">Connection</div>
+        <div id="metricStatus" class="metric-value">Checking...</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Latency</div>
+        <div id="metricLatency" class="metric-value">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Data Rate</div>
+        <div id="metricRate" class="metric-value">0 cmd/s</div>
+      </div>
+      <div style="margin-left:auto;">
+        <button onclick="showConnectionModal()" style="padding:0.25rem 0.75rem;font-size:0.85rem;">
+          Settings
+        </button>
+      </div>
+    </div>
+
+    <nav>
+      <div class="nav-container">
+        <a href="#connect" class="nav-link" data-route="connect">Connect</a>
+        <a href="#home" class="nav-link" data-route="home">Home</a>
+        <a href="#direct" class="nav-link" data-route="direct">Direct Motor</a>
+        <a href="#euler" class="nav-link" data-route="euler">Euler</a>
+        <a href="#head" class="nav-link" data-route="head">Full Head</a>
+        <a href="#quaternion" class="nav-link" data-route="quaternion">Quaternion</a>
+        <a href="#headstream" class="nav-link" data-route="headstream">Morphtarget</a>
+      </div>
+      <div class="row">
+        <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>
+        <button onclick="sendHomeSoftCommand()" class="nav-button">HOME Soft</button>
+        <button onclick="resetAdapterPort(false)" class="nav-button">Reset Port</button>
+      </div>
+    </nav>
+
+    <section class="view" data-view="connect">
+      <h1>Robotic Neck Control</h1>
+      <div class="control-section">
+        <p>Please configure your connection to the adapter in the settings modal.</p>
+        <p style="opacity:0.7;font-size:0.9rem;">
+          The adapter must be running and reachable at the specified URL.
+          Default password is "neck2025" unless changed in adapter config.
+        </p>
+      </div>
+      <div class="control-section">
+        <button class="primary" onclick="setRoute('home')">Proceed to Controls -&gt;</button>
+      </div>
+    </section>
+
+    <section class="view" data-view="home">
+      <h1>Stewart Platform Control Interface</h1>
+      <div class="control-section">
+        <p>Select a control mode from the navigation menu above.</p>
+        <ul style="line-height:1.8;">
+          <li><strong>Direct Motor:</strong> Control each of the 6 actuators individually</li>
+          <li><strong>Euler:</strong> Control yaw, pitch, roll, and height</li>
+          <li><strong>Full Head:</strong> Complete head control with speed/acceleration</li>
+          <li><strong>Quaternion:</strong> Quaternion-based orientation control</li>
+          <li><strong>Morphtarget:</strong> Real-time face tracking control</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="view" data-view="direct">
+      <h2>Direct Motor Control</h2>
+
+      <div class="control-section">
+        <div class="row">
+          <label>Motor 1:</label>
+          <button onclick="decMotor(1)">-</button>
+          <input type="number" id="motor1" value="0" onchange="updateDirect()" style="width:80px;">
+          <button onclick="incMotor(1)">+</button>
+          <input type="range" id="slider1" min="0" max="80" value="0" oninput="document.getElementById('motor1').value=this.value; updateDirect();">
+        </div>
+        <div class="row">
+          <label>Motor 2:</label>
+          <button onclick="decMotor(2)">-</button>
+          <input type="number" id="motor2" value="0" onchange="updateDirect()" style="width:80px;">
+          <button onclick="incMotor(2)">+</button>
+          <input type="range" id="slider2" min="0" max="80" value="0" oninput="document.getElementById('motor2').value=this.value; updateDirect();">
+        </div>
+        <div class="row">
+          <label>Motor 3:</label>
+          <button onclick="decMotor(3)">-</button>
+          <input type="number" id="motor3" value="0" onchange="updateDirect()" style="width:80px;">
+          <button onclick="incMotor(3)">+</button>
+          <input type="range" id="slider3" min="0" max="80" value="0" oninput="document.getElementById('motor3').value=this.value; updateDirect();">
+        </div>
+        <div class="row">
+          <label>Motor 4:</label>
+          <button onclick="decMotor(4)">-</button>
+          <input type="number" id="motor4" value="0" onchange="updateDirect()" style="width:80px;">
+          <button onclick="incMotor(4)">+</button>
+          <input type="range" id="slider4" min="0" max="80" value="0" oninput="document.getElementById('motor4').value=this.value; updateDirect();">
+        </div>
+        <div class="row">
+          <label>Motor 5:</label>
+          <button onclick="decMotor(5)">-</button>
+          <input type="number" id="motor5" value="0" onchange="updateDirect()" style="width:80px;">
+          <button onclick="incMotor(5)">+</button>
+          <input type="range" id="slider5" min="0" max="80" value="0" oninput="document.getElementById('motor5').value=this.value; updateDirect();">
+        </div>
+        <div class="row">
+          <label>Motor 6:</label>
+          <button onclick="decMotor(6)">-</button>
+          <input type="number" id="motor6" value="0" onchange="updateDirect()" style="width:80px;">
+          <button onclick="incMotor(6)">+</button>
+          <input type="range" id="slider6" min="0" max="80" value="0" oninput="document.getElementById('motor6').value=this.value; updateDirect();">
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Manual Command</h3>
+        <div class="row">
+          <input type="text" id="directCmdInput" placeholder="e.g., 1:30,2:45" style="flex:1;">
+          <button onclick="sendCommand(document.getElementById('directCmdInput').value)" class="primary">Send</button>
+        </div>
+        <p style="margin:0.5rem 0 0 0;opacity:0.7;">Current: <span id="directCurrentCmd" class="current-command"></span></p>
+      </div>
+    </section>
+
+    <section class="view" data-view="euler">
+      <h2>Euler Control</h2>
+
+      <div class="control-section">
+        <div class="row">
+          <label>Yaw (X):</label>
+          <button onclick="decEulerField('yaw')">-</button>
+          <input type="number" id="yaw" value="0" onchange="updateEulerView()" style="width:80px;">
+          <button onclick="incEulerField('yaw')">+</button>
+          <input type="range" id="yawSlider" min="-800" max="800" value="0" oninput="document.getElementById('yaw').value=this.value; updateEulerView();">
+        </div>
+        <div class="row">
+          <label>Roll (Y):</label>
+          <button onclick="decEulerField('roll')">-</button>
+          <input type="number" id="roll" value="0" onchange="updateEulerView()" style="width:80px;">
+          <button onclick="incEulerField('roll')">+</button>
+          <input type="range" id="rollSlider" min="-800" max="800" value="0" oninput="document.getElementById('roll').value=this.value; updateEulerView();">
+        </div>
+        <div class="row">
+          <label>Pitch (Z):</label>
+          <button onclick="decEulerField('pitch')">-</button>
+          <input type="number" id="pitch" value="0" onchange="updateEulerView()" style="width:80px;">
+          <button onclick="incEulerField('pitch')">+</button>
+          <input type="range" id="pitchSlider" min="-800" max="800" value="0" oninput="document.getElementById('pitch').value=this.value; updateEulerView();">
+        </div>
+        <div class="row">
+          <label>Height (H):</label>
+          <button onclick="decEulerField('height')">-</button>
+          <input type="number" id="height" value="0" onchange="updateEulerView()" style="width:80px;">
+          <button onclick="incEulerField('height')">+</button>
+          <input type="range" id="heightSlider" min="0" max="70" value="0" oninput="document.getElementById('height').value=this.value; updateEulerView();">
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Manual Command</h3>
+        <div class="row">
+          <input type="text" id="eulerCmdInput" placeholder="e.g., X30,Y15,Z-10,H50" style="flex:1;">
+          <button onclick="sendCommand(document.getElementById('eulerCmdInput').value)" class="primary">Send</button>
+        </div>
+        <p style="margin:0.5rem 0 0 0;opacity:0.7;">Current: <span id="eulerCurrentCmd" class="current-command"></span></p>
+      </div>
+    </section>
+
+    <section class="view" data-view="head">
+      <h2>Full Head Control</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Position &amp; Orientation</h3>
+        <div class="row">
+          <label>Yaw (X):</label>
+          <button onclick="decHeadField('X', 1)">-</button>
+          <input type="number" id="X" value="0" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('X', 1)">+</button>
+          <input type="range" id="XSlider" min="-800" max="800" value="0" oninput="document.getElementById('X').value=this.value; updateHeadView();">
+        </div>
+        <div class="row">
+          <label>Lateral (Y):</label>
+          <button onclick="decHeadField('Y', 1)">-</button>
+          <input type="number" id="Y" value="0" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('Y', 1)">+</button>
+          <input type="range" id="YSlider" min="-800" max="800" value="0" oninput="document.getElementById('Y').value=this.value; updateHeadView();">
+        </div>
+        <div class="row">
+          <label>Front/Back (Z):</label>
+          <button onclick="decHeadField('Z', 1)">-</button>
+          <input type="number" id="Z" value="0" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('Z', 1)">+</button>
+          <input type="range" id="ZSlider" min="-800" max="800" value="0" oninput="document.getElementById('Z').value=this.value; updateHeadView();">
+        </div>
+        <div class="row">
+          <label>Height (H):</label>
+          <button onclick="decHeadField('H', 1)">-</button>
+          <input type="number" id="H" value="0" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('H', 1)">+</button>
+          <input type="range" id="HSlider" min="0" max="70" value="0" oninput="document.getElementById('H').value=this.value; updateHeadView();">
+        </div>
+        <div class="row">
+          <label>Roll (R):</label>
+          <button onclick="decHeadField('R', 1)">-</button>
+          <input type="number" id="R" value="0" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('R', 1)">+</button>
+          <input type="range" id="RSlider" min="-800" max="800" value="0" oninput="document.getElementById('R').value=this.value; updateHeadView();">
+        </div>
+        <div class="row">
+          <label>Pitch (P):</label>
+          <button onclick="decHeadField('P', 1)">-</button>
+          <input type="number" id="P" value="0" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('P', 1)">+</button>
+          <input type="range" id="PSlider" min="-800" max="800" value="0" oninput="document.getElementById('P').value=this.value; updateHeadView();">
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Motion Parameters</h3>
+        <div class="row">
+          <label>Speed (S):</label>
+          <button onclick="decHeadField('S', 0.1)">-</button>
+          <input type="number" id="S" value="1" step="0.1" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('S', 0.1)">+</button>
+          <input type="range" id="SSlider" min="0" max="10" step="0.1" value="1" oninput="document.getElementById('S').value=this.value; updateHeadView();">
+        </div>
+        <div class="row">
+          <label>Acceleration (A):</label>
+          <button onclick="decHeadField('A', 0.1)">-</button>
+          <input type="number" id="A" value="1" step="0.1" onchange="updateHeadView()" style="width:80px;">
+          <button onclick="incHeadField('A', 0.1)">+</button>
+          <input type="range" id="ASlider" min="0" max="10" step="0.1" value="1" oninput="document.getElementById('A').value=this.value; updateHeadView();">
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Manual Command</h3>
+        <div class="row">
+          <input type="text" id="headCmdInput" placeholder="e.g., X30,Y0,Z10,H-40,S1,A1,R0,P0" style="flex:1;">
+          <button onclick="sendCommand(document.getElementById('headCmdInput').value)" class="primary">Send</button>
+        </div>
+        <p style="margin:0.5rem 0 0 0;opacity:0.7;">Current: <span id="headCurrentCmd" class="current-command"></span></p>
+      </div>
+    </section>
+
+    <section class="view" data-view="quaternion">
+      <h2>Quaternion Control</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Quaternion Components</h3>
+        <div class="row">
+          <label>W:</label>
+          <button onclick="decQuatField('w', 0.1)">-</button>
+          <input type="number" id="w" value="1" step="0.1" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('w', 0.1)">+</button>
+          <input type="range" id="wSlider" min="0" max="1" step="0.01" value="1" oninput="document.getElementById('w').value=this.value; updateQuatView();">
+        </div>
+        <div class="row">
+          <label>X:</label>
+          <button onclick="decQuatField('x', 0.1)">-</button>
+          <input type="number" id="x" value="0" step="0.1" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('x', 0.1)">+</button>
+          <input type="range" id="xSlider" min="-1" max="1" step="0.01" value="0" oninput="document.getElementById('x').value=this.value; updateQuatView();">
+        </div>
+        <div class="row">
+          <label>Y:</label>
+          <button onclick="decQuatField('y', 0.1)">-</button>
+          <input type="number" id="y" value="0" step="0.1" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('y', 0.1)">+</button>
+          <input type="range" id="ySlider" min="-1" max="1" step="0.01" value="0" oninput="document.getElementById('y').value=this.value; updateQuatView();">
+        </div>
+        <div class="row">
+          <label>Z:</label>
+          <button onclick="decQuatField('z', 0.1)">-</button>
+          <input type="number" id="z" value="0" step="0.1" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('z', 0.1)">+</button>
+          <input type="range" id="zSlider" min="-1" max="1" step="0.01" value="0" oninput="document.getElementById('z').value=this.value; updateQuatView();">
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Position &amp; Motion</h3>
+        <div class="row">
+          <label>Height (H):</label>
+          <button onclick="decQuatField('qH', 1)">-</button>
+          <input type="number" id="qH" value="0" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('qH', 1)">+</button>
+          <input type="range" id="qHSlider" min="0" max="70" value="0" oninput="document.getElementById('qH').value=this.value; updateQuatView();">
+        </div>
+        <div class="row">
+          <label>Speed (S):</label>
+          <button onclick="decQuatField('qS', 0.1)">-</button>
+          <input type="number" id="qS" value="1" step="0.1" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('qS', 0.1)">+</button>
+          <input type="range" id="qSSlider" min="0" max="10" step="0.1" value="1" oninput="document.getElementById('qS').value=this.value; updateQuatView();">
+        </div>
+        <div class="row">
+          <label>Acceleration (A):</label>
+          <button onclick="decQuatField('qA', 0.1)">-</button>
+          <input type="number" id="qA" value="1" step="0.1" onchange="updateQuatView()" style="width:80px;">
+          <button onclick="incQuatField('qA', 0.1)">+</button>
+          <input type="range" id="qASlider" min="0" max="10" step="0.1" value="1" oninput="document.getElementById('qA').value=this.value; updateQuatView();">
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Manual Command</h3>
+        <div class="row">
+          <input type="text" id="quatCmdInput" placeholder="e.g., Q:1,0,0,0,H50,S1,A1" style="flex:1;">
+          <button onclick="sendCommand(document.getElementById('quatCmdInput').value)" class="primary">Send</button>
+        </div>
+        <p style="margin:0.5rem 0 0 0;opacity:0.7;">Current: <span id="quatCurrentCmd" class="current-command"></span></p>
+      </div>
+    </section>
+
+    <section class="view" data-view="headstream">
+      <h2>Morphtarget</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Head Pose Command Stream</h3>
+        <p style="opacity:0.75;margin-top:0;">
+          Track your face and stream X/Y/Z/H/S/A/R/P commands to the adapter.
+        </p>
+
+        <div id="morphCanvasWrap"></div>
+
+        <div class="stream-grid">
+          <div class="stream-card">
+            <div class="stream-label">Stream Status</div>
+            <div id="streamStatus" class="stream-value">Initializing...</div>
+          </div>
+          <div class="stream-card">
+            <div class="stream-label">Last Command</div>
+            <div id="commandStream" class="stream-value">Waiting for head pose...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Morphtarget Tuneables</h3>
+        <p class="tuneables-note">These settings apply live while tracking.</p>
+
+        <div class="row" style="margin-bottom:0.5rem;">
+          <button id="streamToggleBtn" class="primary">Play Stream</button>
+          <button id="recenterPoseBtn">Recenter</button>
+          <button id="resetTuneablesBtn">Reset Tuneables</button>
+        </div>
+
+        <div class="row">
+          <label for="tuneLateralGain">Lateral Gain (Y):</label>
+          <input type="number" id="tuneLateralGain" min="0" max="20" step="0.1" value="1.8" style="width:90px;">
+          <input type="range" id="tuneLateralGainRange" min="0" max="20" step="0.1" value="1.8">
+        </div>
+        <div class="row">
+          <label for="tuneFrontBackGain">Front/Back Gain (Z):</label>
+          <input type="number" id="tuneFrontBackGain" min="0" max="20" step="0.1" value="1.6" style="width:90px;">
+          <input type="range" id="tuneFrontBackGainRange" min="0" max="20" step="0.1" value="1.6">
+        </div>
+        <div class="row">
+          <label for="tuneHeightGain">Height Gain (H):</label>
+          <input type="number" id="tuneHeightGain" min="0" max="30" step="0.1" value="2.5" style="width:90px;">
+          <input type="range" id="tuneHeightGainRange" min="0" max="30" step="0.1" value="2.5">
+        </div>
+        <div class="row">
+          <label for="tuneYawGain">Yaw Gain (X):</label>
+          <input type="number" id="tuneYawGain" min="0" max="40" step="0.1" value="4.8" style="width:90px;">
+          <input type="range" id="tuneYawGainRange" min="0" max="40" step="0.1" value="4.8">
+        </div>
+        <div class="row">
+          <label for="tunePitchGain">Pitch Gain (P):</label>
+          <input type="number" id="tunePitchGain" min="-60" max="0" step="0.1" value="-7" style="width:90px;">
+          <input type="range" id="tunePitchGainRange" min="-60" max="0" step="0.1" value="-7">
+        </div>
+        <div class="row">
+          <label for="tuneRollGain">Roll Gain (R):</label>
+          <input type="number" id="tuneRollGain" min="-60" max="0" step="0.1" value="-6" style="width:90px;">
+          <input type="range" id="tuneRollGainRange" min="-60" max="0" step="0.1" value="-6">
+        </div>
+        <div class="row">
+          <label for="tuneSmoothAlpha">Smoothing (alpha):</label>
+          <input type="number" id="tuneSmoothAlpha" min="0.1" max="0.95" step="0.01" value="0.45" style="width:90px;">
+          <input type="range" id="tuneSmoothAlphaRange" min="0.1" max="0.95" step="0.01" value="0.45">
+        </div>
+        <div class="row">
+          <label for="tuneIntervalMs">Send Interval (ms):</label>
+          <input type="number" id="tuneIntervalMs" min="20" max="200" step="1" value="90" style="width:90px;">
+          <input type="range" id="tuneIntervalMsRange" min="20" max="200" step="1" value="90">
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <footer id="console"></footer>
+</body>
+</html>

@@ -1,0 +1,349 @@
+@import url('https://fonts.googleapis.com/css2?family=Exo:ital,wght@0,100..900;1,100..900&family=Monomaniac+One&family=Oxanium:wght@200..800&family=Roboto+Mono:ital,wght@0,100..700;1,100..700&display=swap');
+
+:root {
+    --bg-primary: #222222;
+    --bg-secondary: #2a2a2a;
+    --bg-tertiary: #1a1a1a;
+    --text-primary: #ffffff;
+    --accent: #ffae00;
+    --border-light: #333333;
+    --border-dark: #111111;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: 'Roboto Mono', monospace;
+    margin: 0;
+    padding: 0;
+}
+
+.container {
+    width: min(1024px, calc(100% - 2rem));
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 1rem 0;
+}
+
+/* SPA views */
+.view {
+    display: none;
+}
+
+.view.active {
+    display: block;
+}
+
+/* Modal Styles */
+.modal {
+    display: none;
+    position: fixed;
+    z-index: 1000;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    align-items: center;
+    justify-content: center;
+}
+
+.modal.active {
+    display: flex;
+}
+
+.modal-content {
+    background: var(--bg-primary);
+    border: 2px solid var(--border-light);
+    border-radius: 0.5rem;
+    padding: 2rem;
+    max-width: 500px;
+    width: 90%;
+}
+
+.modal-header {
+    font-size: 1.5rem;
+    margin-bottom: 1rem;
+    color: var(--accent);
+}
+
+.modal-section {
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-dark);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+/* Metrics Display */
+.metrics-bar {
+    display: flex;
+    gap: 1rem;
+    padding: 0.75rem;
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-dark);
+    border-radius: 0.5rem;
+    margin-bottom: 0.5rem;
+    align-items: center;
+}
+
+.metric {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.metric-label {
+    font-size: 0.75rem;
+    opacity: 0.7;
+}
+
+.metric-value {
+    font-weight: bold;
+    color: var(--accent);
+}
+
+.metric-value.good {
+    color: #00ff88;
+}
+
+.metric-value.warning {
+    color: #ffae00;
+}
+
+.metric-value.error {
+    color: #ff4444;
+}
+
+/* Navigation styling */
+nav {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0;
+    margin: 0;
+}
+
+.nav-container {
+    display: flex;
+    flex-direction: row;
+    gap: 0.5rem;
+    align-items: center;
+    width: 100%;
+    flex-wrap: wrap;
+}
+
+.nav-link {
+    color: var(--text-primary);
+    text-decoration: none;
+    border: 2px solid var(--border-light);
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    transition: all 0.2s;
+}
+
+.nav-link:hover,
+.nav-link.active {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+}
+
+.nav-button {
+    background: var(--accent);
+    border: 2px solid var(--accent);
+    color: var(--bg-primary);
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    font-weight: bold;
+    transition: all 0.2s;
+}
+
+.nav-button:hover {
+    background: #ffcc00;
+    border-color: #ffcc00;
+}
+
+.row {
+    display: flex;
+    flex-direction: row;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.column {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.control-section {
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-dark);
+    border-radius: 0.5rem;
+    padding: 1rem;
+    margin-bottom: 0.5rem;
+}
+
+button {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-light);
+    color: var(--text-primary);
+    padding: 0.5rem 1rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+button:hover {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+}
+
+button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-primary);
+    font-weight: bold;
+}
+
+button.primary:hover {
+    background: #ffcc00;
+    border-color: #ffcc00;
+}
+
+input[type="number"],
+input[type="text"],
+input[type="password"],
+input[type="range"],
+select {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-light);
+    color: var(--text-primary);
+    padding: 0.5rem;
+    border-radius: 0.5rem;
+}
+
+input[type="number"]:focus,
+input[type="text"]:focus,
+input[type="password"]:focus,
+select:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+input[type="range"] {
+    flex: 1;
+}
+
+label {
+    min-width: 120px;
+}
+
+footer {
+    width: min(1024px, calc(100% - 2rem));
+    margin: 0 auto 1rem auto;
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-dark);
+    padding: 0.5rem;
+    font-size: 0.8rem;
+    overflow-y: auto;
+    max-height: 150px;
+    border-radius: 0.5rem;
+}
+
+h1,
+h2,
+h3 {
+    color: var(--accent);
+}
+
+.current-command {
+    color: var(--accent);
+}
+
+/* Headstream extras */
+#morphCanvasWrap {
+    width: 100%;
+    height: 420px;
+    border: 2px solid var(--border-light);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: #101010;
+}
+
+#morphCanvasWrap canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.stream-grid {
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+}
+
+.stream-card {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-light);
+    border-radius: 0.5rem;
+    padding: 0.65rem 0.75rem;
+}
+
+.stream-label {
+    font-size: 0.75rem;
+    opacity: 0.75;
+    margin-bottom: 0.35rem;
+}
+
+.stream-value {
+    font-family: 'Roboto Mono', monospace;
+    color: var(--accent);
+    word-break: break-word;
+}
+
+.tuneables-note {
+    opacity: 0.75;
+    margin-top: 0;
+}
+
+@media (max-width: 900px) {
+    .container {
+        width: calc(100% - 1rem);
+        padding: 0.5rem 0;
+    }
+
+    footer {
+        width: calc(100% - 1rem);
+    }
+
+    .metrics-bar {
+        flex-wrap: wrap;
+    }
+
+    .row {
+        flex-wrap: wrap;
+    }
+
+    label {
+        min-width: 100%;
+    }
+
+    #morphCanvasWrap {
+        height: 300px;
+    }
+
+    .stream-grid {
+        grid-template-columns: 1fr;
+    }
+}
