@@ -1369,19 +1369,33 @@ connect_page = """
   </div>
 
   <div class="container">
+    <!-- Metrics Bar -->
+    <div class="metrics-bar">
+      <div class="metric">
+        <div class="metric-label">Connection</div>
+        <div id="metricStatus" class="metric-value">Checking...</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Latency</div>
+        <div id="metricLatency" class="metric-value">--</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Data Rate</div>
+        <div id="metricRate" class="metric-value">0 cmd/s</div>
+      </div>
+      <div style="margin-left:auto;">
+        <button onclick="showConnectionModal()" style="padding:0.25rem 0.75rem;font-size:0.85rem;">
+          Settings
+        </button>
+      </div>
+    </div>
+
     <h1>Robotic Neck Control</h1>
     <p>Please configure your connection to the adapter in the modal above.</p>
     <p style="opacity:0.7;font-size:0.9rem;">
       The adapter must be running and accessible at the specified URL.
       Default password is "neck2025" unless changed in adapter config.
     </p>
-
-    <div class="control-section">
-      <h3>Connection Status</h3>
-      <div id="statusDisplay" style="padding:1rem;text-align:center;">
-        <span style="color:var(--accent);">Not Connected</span>
-      </div>
-    </div>
 
     <div style="margin-top:2rem;">
       <a href="/home"><button class="primary">Proceed to Controls -></button></a>
@@ -2112,6 +2126,11 @@ headstream_page = r"""
         word-break: break-word;
       }
 
+      .tuneables-note {
+        opacity: 0.75;
+        margin-top: 0;
+      }
+
       @media (max-width: 900px) {
         #morphCanvasWrap {
           height: 300px;
@@ -2204,6 +2223,57 @@ headstream_page = r"""
           </div>
         </div>
       </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Morphtarget Tuneables</h3>
+        <p class="tuneables-note">These settings apply live while tracking.</p>
+
+        <div class="row" style="margin-bottom:0.5rem;">
+          <button id="recenterPoseBtn" class="primary">Recenter</button>
+          <button id="resetTuneablesBtn">Reset Tuneables</button>
+        </div>
+
+        <div class="row">
+          <label for="tuneLateralGain">Lateral Gain (Y):</label>
+          <input type="number" id="tuneLateralGain" min="0" max="20" step="0.1" value="8" style="width:90px;">
+          <input type="range" id="tuneLateralGainRange" min="0" max="20" step="0.1" value="8">
+        </div>
+        <div class="row">
+          <label for="tuneFrontBackGain">Front/Back Gain (Z):</label>
+          <input type="number" id="tuneFrontBackGain" min="0" max="20" step="0.1" value="6" style="width:90px;">
+          <input type="range" id="tuneFrontBackGainRange" min="0" max="20" step="0.1" value="6">
+        </div>
+        <div class="row">
+          <label for="tuneHeightGain">Height Gain (H):</label>
+          <input type="number" id="tuneHeightGain" min="0" max="30" step="0.1" value="10" style="width:90px;">
+          <input type="range" id="tuneHeightGainRange" min="0" max="30" step="0.1" value="10">
+        </div>
+        <div class="row">
+          <label for="tuneYawGain">Yaw Gain (X):</label>
+          <input type="number" id="tuneYawGain" min="0" max="40" step="0.1" value="18" style="width:90px;">
+          <input type="range" id="tuneYawGainRange" min="0" max="40" step="0.1" value="18">
+        </div>
+        <div class="row">
+          <label for="tunePitchGain">Pitch Gain (P):</label>
+          <input type="number" id="tunePitchGain" min="-60" max="0" step="0.1" value="-30" style="width:90px;">
+          <input type="range" id="tunePitchGainRange" min="-60" max="0" step="0.1" value="-30">
+        </div>
+        <div class="row">
+          <label for="tuneRollGain">Roll Gain (R):</label>
+          <input type="number" id="tuneRollGain" min="-60" max="0" step="0.1" value="-25" style="width:90px;">
+          <input type="range" id="tuneRollGainRange" min="-60" max="0" step="0.1" value="-25">
+        </div>
+        <div class="row">
+          <label for="tuneSmoothAlpha">Smoothing (alpha):</label>
+          <input type="number" id="tuneSmoothAlpha" min="0.1" max="0.95" step="0.01" value="0.80" style="width:90px;">
+          <input type="range" id="tuneSmoothAlphaRange" min="0.1" max="0.95" step="0.01" value="0.80">
+        </div>
+        <div class="row">
+          <label for="tuneIntervalMs">Send Interval (ms):</label>
+          <input type="number" id="tuneIntervalMs" min="20" max="200" step="1" value="50" style="width:90px;">
+          <input type="range" id="tuneIntervalMsRange" min="20" max="200" step="1" value="50">
+        </div>
+      </div>
     </div>
 
     <footer id="console"></footer>
@@ -2227,6 +2297,20 @@ headstream_page = r"""
       let faceLandmarker = null;
       let videoReady = false;
       let smoothed = null;
+      let poseBaseline = null;
+      let lastTrackedPose = null;
+
+      const defaultTuneables = {
+        yawGain: 18,
+        pitchGain: -30,
+        rollGain: -25,
+        lateralGain: 8,
+        frontBackGain: 6,
+        heightGain: 10,
+        smoothAlpha: 0.8,
+        commandIntervalMs: COMMAND_INTERVAL_MS,
+      };
+      const tuneables = { ...defaultTuneables };
 
       function setStreamStatus(message, error = false) {
         streamStatusEl.textContent = message;
@@ -2235,6 +2319,117 @@ headstream_page = r"""
 
       function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
+      }
+
+      function normalizeAngleDelta(rad) {
+        let wrapped = rad;
+        while (wrapped > Math.PI) {
+          wrapped -= Math.PI * 2;
+        }
+        while (wrapped < -Math.PI) {
+          wrapped += Math.PI * 2;
+        }
+        return wrapped;
+      }
+
+      function setPoseBaselineFromPose(pose) {
+        poseBaseline = { ...pose };
+        smoothed = null;
+        setStreamStatus('Tracking active (centered)');
+        logToConsole('[CAL] Morphtarget centered at current pose');
+      }
+
+      function setPoseBaseline(transformObj, euler) {
+        setPoseBaselineFromPose({
+          x: transformObj.position.x,
+          y: transformObj.position.y,
+          z: transformObj.position.z,
+          yaw: euler.y,
+          pitch: euler.x,
+          roll: euler.z,
+        });
+      }
+
+      function bindTuneablePair(numberId, rangeId, key, integerValue = false) {
+        const numberEl = document.getElementById(numberId);
+        const rangeEl = document.getElementById(rangeId);
+        if (!numberEl || !rangeEl) {
+          return;
+        }
+
+        const applyRawValue = (rawValue) => {
+          const parsed = integerValue ? parseInt(rawValue, 10) : parseFloat(rawValue);
+          if (!Number.isFinite(parsed)) {
+            return;
+          }
+          tuneables[key] = parsed;
+          numberEl.value = String(parsed);
+          rangeEl.value = String(parsed);
+        };
+
+        numberEl.addEventListener('input', () => applyRawValue(numberEl.value));
+        rangeEl.addEventListener('input', () => applyRawValue(rangeEl.value));
+        applyRawValue(numberEl.value || rangeEl.value || String(defaultTuneables[key]));
+      }
+
+      function setTuneablesToDefaults() {
+        Object.assign(tuneables, defaultTuneables);
+
+        const tuneableInputs = [
+          ['tuneLateralGain', 'lateralGain'],
+          ['tuneLateralGainRange', 'lateralGain'],
+          ['tuneFrontBackGain', 'frontBackGain'],
+          ['tuneFrontBackGainRange', 'frontBackGain'],
+          ['tuneHeightGain', 'heightGain'],
+          ['tuneHeightGainRange', 'heightGain'],
+          ['tuneYawGain', 'yawGain'],
+          ['tuneYawGainRange', 'yawGain'],
+          ['tunePitchGain', 'pitchGain'],
+          ['tunePitchGainRange', 'pitchGain'],
+          ['tuneRollGain', 'rollGain'],
+          ['tuneRollGainRange', 'rollGain'],
+          ['tuneSmoothAlpha', 'smoothAlpha'],
+          ['tuneSmoothAlphaRange', 'smoothAlpha'],
+          ['tuneIntervalMs', 'commandIntervalMs'],
+          ['tuneIntervalMsRange', 'commandIntervalMs'],
+        ];
+
+        tuneableInputs.forEach(([id, key]) => {
+          const inputEl = document.getElementById(id);
+          if (inputEl) {
+            inputEl.value = String(tuneables[key]);
+          }
+        });
+      }
+
+      function setupTuneablesUi() {
+        bindTuneablePair('tuneLateralGain', 'tuneLateralGainRange', 'lateralGain');
+        bindTuneablePair('tuneFrontBackGain', 'tuneFrontBackGainRange', 'frontBackGain');
+        bindTuneablePair('tuneHeightGain', 'tuneHeightGainRange', 'heightGain');
+        bindTuneablePair('tuneYawGain', 'tuneYawGainRange', 'yawGain');
+        bindTuneablePair('tunePitchGain', 'tunePitchGainRange', 'pitchGain');
+        bindTuneablePair('tuneRollGain', 'tuneRollGainRange', 'rollGain');
+        bindTuneablePair('tuneSmoothAlpha', 'tuneSmoothAlphaRange', 'smoothAlpha');
+        bindTuneablePair('tuneIntervalMs', 'tuneIntervalMsRange', 'commandIntervalMs', true);
+
+        const recenterBtn = document.getElementById('recenterPoseBtn');
+        if (recenterBtn) {
+          recenterBtn.addEventListener('click', () => {
+            if (!lastTrackedPose) {
+              setStreamStatus('Cannot recenter until face is detected', true);
+              return;
+            }
+            setPoseBaselineFromPose(lastTrackedPose);
+          });
+        }
+
+        const resetBtn = document.getElementById('resetTuneablesBtn');
+        if (resetBtn) {
+          resetBtn.addEventListener('click', () => {
+            setTuneablesToDefaults();
+            logToConsole('[CAL] Morphtarget tuneables reset to defaults');
+          });
+        }
       }
 
       function sendCommandToNeck(commandStr) {
@@ -2246,18 +2441,31 @@ headstream_page = r"""
       }
 
       function buildPoseCommand(transformObj, euler) {
-        const rawLateral = -transformObj.position.x;
-        const rawHeight = transformObj.position.y + 30;
-        const rawFrontBack = (-transformObj.position.z - 50) * 1.5;
-        const rawYaw = THREE.MathUtils.radToDeg(euler.y);
-        const rawPitch = THREE.MathUtils.radToDeg(euler.x);
-        const rawRoll = THREE.MathUtils.radToDeg(euler.z);
+        if (!poseBaseline) {
+          setPoseBaseline(transformObj, euler);
+        }
 
-        const yawMRaw = rawYaw * 18;
-        const lateralMRaw = rawLateral * 15;
-        const frontBackMRaw = rawFrontBack * 10;
-        const rollMRaw = rawRoll * -25;
-        const pitchMRaw = rawPitch * -30;
+        const deltaX = transformObj.position.x - poseBaseline.x;
+        const deltaY = transformObj.position.y - poseBaseline.y;
+        const deltaZ = transformObj.position.z - poseBaseline.z;
+
+        const deltaYaw = normalizeAngleDelta(euler.y - poseBaseline.yaw);
+        const deltaPitch = normalizeAngleDelta(euler.x - poseBaseline.pitch);
+        const deltaRoll = normalizeAngleDelta(euler.z - poseBaseline.roll);
+
+        const rawLateral = -deltaX;
+        const rawHeight = deltaY;
+        const rawFrontBack = -deltaZ;
+        const rawYaw = THREE.MathUtils.radToDeg(deltaYaw);
+        const rawPitch = THREE.MathUtils.radToDeg(deltaPitch);
+        const rawRoll = THREE.MathUtils.radToDeg(deltaRoll);
+
+        const yawMRaw = rawYaw * tuneables.yawGain;
+        const lateralMRaw = rawLateral * tuneables.lateralGain;
+        const frontBackMRaw = rawFrontBack * tuneables.frontBackGain;
+        const rollMRaw = rawRoll * tuneables.rollGain;
+        const pitchMRaw = rawPitch * tuneables.pitchGain;
+        const heightRaw = rawHeight * tuneables.heightGain;
 
         if (!smoothed) {
           smoothed = {
@@ -2266,17 +2474,17 @@ headstream_page = r"""
             frontBack: frontBackMRaw,
             roll: rollMRaw,
             pitch: pitchMRaw,
-            height: rawHeight,
+            height: heightRaw,
           };
         }
 
-        const alpha = 0.8;
+        const alpha = clamp(tuneables.smoothAlpha, 0.1, 0.95);
         smoothed.yaw = alpha * yawMRaw + (1 - alpha) * smoothed.yaw;
         smoothed.lateral = alpha * lateralMRaw + (1 - alpha) * smoothed.lateral;
         smoothed.frontBack = alpha * frontBackMRaw + (1 - alpha) * smoothed.frontBack;
         smoothed.roll = alpha * rollMRaw + (1 - alpha) * smoothed.roll;
         smoothed.pitch = alpha * pitchMRaw + (1 - alpha) * smoothed.pitch;
-        smoothed.height = alpha * rawHeight + (1 - alpha) * smoothed.height;
+        smoothed.height = alpha * heightRaw + (1 - alpha) * smoothed.height;
 
         const magnitude = Math.max(
           Math.abs(smoothed.yaw),
@@ -2309,6 +2517,7 @@ headstream_page = r"""
 
       async function main() {
         setStreamStatus('Starting camera...');
+        setupTuneablesUi();
 
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setPixelRatio(window.devicePixelRatio);
@@ -2412,18 +2621,37 @@ headstream_page = r"""
               );
 
               const euler = new THREE.Euler().setFromQuaternion(transformObj.quaternion, 'YXZ');
-              grpTransform.position.x = transformObj.position.x / 10;
-              grpTransform.position.y = transformObj.position.y / 10;
-              grpTransform.position.z = -transformObj.position.z / -10 + 4;
-              grpTransform.rotation.x = euler.x;
-              grpTransform.rotation.y = euler.y;
-              grpTransform.rotation.z = euler.z;
+              lastTrackedPose = {
+                x: transformObj.position.x,
+                y: transformObj.position.y,
+                z: transformObj.position.z,
+                yaw: euler.y,
+                pitch: euler.x,
+                roll: euler.z,
+              };
+              if (!poseBaseline) {
+                setPoseBaselineFromPose(lastTrackedPose);
+              }
+
+              const deltaX = transformObj.position.x - poseBaseline.x;
+              const deltaY = transformObj.position.y - poseBaseline.y;
+              const deltaZ = transformObj.position.z - poseBaseline.z;
+              const deltaPitch = normalizeAngleDelta(euler.x - poseBaseline.pitch);
+              const deltaYaw = normalizeAngleDelta(euler.y - poseBaseline.yaw);
+              const deltaRoll = normalizeAngleDelta(euler.z - poseBaseline.roll);
+
+              grpTransform.position.x = deltaX / 10;
+              grpTransform.position.y = deltaY / 10;
+              grpTransform.position.z = -deltaZ / -10 + 4;
+              grpTransform.rotation.x = deltaPitch;
+              grpTransform.rotation.y = deltaYaw;
+              grpTransform.rotation.z = deltaRoll;
 
               const commandStr = buildPoseCommand(transformObj, euler);
               commandStreamEl.textContent = commandStr;
               setStreamStatus('Tracking active');
 
-              if (commandStr !== lastCommandSent && now - lastCommandSentAt >= COMMAND_INTERVAL_MS) {
+              if (commandStr !== lastCommandSent && now - lastCommandSentAt >= tuneables.commandIntervalMs) {
                 sendCommandToNeck(commandStr);
                 lastCommandSent = commandStr;
                 lastCommandSentAt = now;
