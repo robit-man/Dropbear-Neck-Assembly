@@ -2250,43 +2250,43 @@ headstream_page = r"""
 
         <div class="row">
           <label for="tuneLateralGain">Lateral Gain (Y):</label>
-          <input type="number" id="tuneLateralGain" min="0" max="20" step="0.1" value="8" style="width:90px;">
-          <input type="range" id="tuneLateralGainRange" min="0" max="20" step="0.1" value="8">
+          <input type="number" id="tuneLateralGain" min="0" max="20" step="0.1" value="1.8" style="width:90px;">
+          <input type="range" id="tuneLateralGainRange" min="0" max="20" step="0.1" value="1.8">
         </div>
         <div class="row">
           <label for="tuneFrontBackGain">Front/Back Gain (Z):</label>
-          <input type="number" id="tuneFrontBackGain" min="0" max="20" step="0.1" value="6" style="width:90px;">
-          <input type="range" id="tuneFrontBackGainRange" min="0" max="20" step="0.1" value="6">
+          <input type="number" id="tuneFrontBackGain" min="0" max="20" step="0.1" value="1.6" style="width:90px;">
+          <input type="range" id="tuneFrontBackGainRange" min="0" max="20" step="0.1" value="1.6">
         </div>
         <div class="row">
           <label for="tuneHeightGain">Height Gain (H):</label>
-          <input type="number" id="tuneHeightGain" min="0" max="30" step="0.1" value="10" style="width:90px;">
-          <input type="range" id="tuneHeightGainRange" min="0" max="30" step="0.1" value="10">
+          <input type="number" id="tuneHeightGain" min="0" max="30" step="0.1" value="2.5" style="width:90px;">
+          <input type="range" id="tuneHeightGainRange" min="0" max="30" step="0.1" value="2.5">
         </div>
         <div class="row">
           <label for="tuneYawGain">Yaw Gain (X):</label>
-          <input type="number" id="tuneYawGain" min="0" max="40" step="0.1" value="18" style="width:90px;">
-          <input type="range" id="tuneYawGainRange" min="0" max="40" step="0.1" value="18">
+          <input type="number" id="tuneYawGain" min="0" max="40" step="0.1" value="4.8" style="width:90px;">
+          <input type="range" id="tuneYawGainRange" min="0" max="40" step="0.1" value="4.8">
         </div>
         <div class="row">
           <label for="tunePitchGain">Pitch Gain (P):</label>
-          <input type="number" id="tunePitchGain" min="-60" max="0" step="0.1" value="-30" style="width:90px;">
-          <input type="range" id="tunePitchGainRange" min="-60" max="0" step="0.1" value="-30">
+          <input type="number" id="tunePitchGain" min="-60" max="0" step="0.1" value="-7" style="width:90px;">
+          <input type="range" id="tunePitchGainRange" min="-60" max="0" step="0.1" value="-7">
         </div>
         <div class="row">
           <label for="tuneRollGain">Roll Gain (R):</label>
-          <input type="number" id="tuneRollGain" min="-60" max="0" step="0.1" value="-25" style="width:90px;">
-          <input type="range" id="tuneRollGainRange" min="-60" max="0" step="0.1" value="-25">
+          <input type="number" id="tuneRollGain" min="-60" max="0" step="0.1" value="-6" style="width:90px;">
+          <input type="range" id="tuneRollGainRange" min="-60" max="0" step="0.1" value="-6">
         </div>
         <div class="row">
           <label for="tuneSmoothAlpha">Smoothing (alpha):</label>
-          <input type="number" id="tuneSmoothAlpha" min="0.1" max="0.95" step="0.01" value="0.80" style="width:90px;">
-          <input type="range" id="tuneSmoothAlphaRange" min="0.1" max="0.95" step="0.01" value="0.80">
+          <input type="number" id="tuneSmoothAlpha" min="0.1" max="0.95" step="0.01" value="0.45" style="width:90px;">
+          <input type="range" id="tuneSmoothAlphaRange" min="0.1" max="0.95" step="0.01" value="0.45">
         </div>
         <div class="row">
           <label for="tuneIntervalMs">Send Interval (ms):</label>
-          <input type="number" id="tuneIntervalMs" min="20" max="200" step="1" value="50" style="width:90px;">
-          <input type="range" id="tuneIntervalMsRange" min="20" max="200" step="1" value="50">
+          <input type="number" id="tuneIntervalMs" min="20" max="200" step="1" value="90" style="width:90px;">
+          <input type="range" id="tuneIntervalMsRange" min="20" max="200" step="1" value="90">
         </div>
       </div>
     </div>
@@ -2306,7 +2306,7 @@ headstream_page = r"""
       const commandStreamEl = document.getElementById('commandStream');
       const viewport = document.getElementById('morphCanvasWrap');
 
-      const COMMAND_INTERVAL_MS = 50;
+      const COMMAND_INTERVAL_MS = 90;
       let lastCommandSentAt = 0;
       let lastCommandSent = "";
       let faceLandmarker = null;
@@ -2318,13 +2318,13 @@ headstream_page = r"""
       let baselinePendingOnPlay = false;
 
       const defaultTuneables = {
-        yawGain: 18,
-        pitchGain: -30,
-        rollGain: -25,
-        lateralGain: 8,
-        frontBackGain: 6,
-        heightGain: 10,
-        smoothAlpha: 0.8,
+        yawGain: 4.8,
+        pitchGain: -7,
+        rollGain: -6,
+        lateralGain: 1.8,
+        frontBackGain: 1.6,
+        heightGain: 2.5,
+        smoothAlpha: 0.45,
         commandIntervalMs: COMMAND_INTERVAL_MS,
       };
       const tuneables = { ...defaultTuneables };
@@ -2562,7 +2562,7 @@ headstream_page = r"""
         );
 
         const sDynamic = clamp(2 - (magnitude / 600), 1, 2);
-        const aDynamic = clamp(5 - (3 * (magnitude / 600)), 2, 6);
+        const aDynamic = clamp(1.2 - (0.8 * (magnitude / 600)), 0.5, 1.2);
 
         const xVal = Math.round(clamp(smoothed.yaw, -700, 700));
         const yVal = Math.round(clamp(smoothed.lateral, -700, 700));
