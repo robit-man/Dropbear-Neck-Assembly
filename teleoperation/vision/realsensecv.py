@@ -32,7 +32,8 @@ class RealsenseCapture:
     MAX_DEPTH_CAP = 15.0      # never map beyond this
     GAMMA         = 1         # <1 boosts far-end contrast; set to 1.0 for linear
 
-    def __init__(self):
+    def __init__(self, stream_ir=True):
+        self.stream_ir = bool(stream_ir)
         self.config = rs.config()
         self.config.enable_stream(rs.stream.color,
                                   self.WIDTH_C, self.HEIGHT_C,
@@ -40,10 +41,11 @@ class RealsenseCapture:
         self.config.enable_stream(rs.stream.depth,
                                   self.WIDTH, self.HEIGHT,
                                   rs.format.z16, self.FPS)
-        for i in (1, 2):
-            self.config.enable_stream(rs.stream.infrared, i,
-                                      self.WIDTH, self.HEIGHT,
-                                      rs.format.y8, self.FPS)
+        if self.stream_ir:
+            for i in (1, 2):
+                self.config.enable_stream(rs.stream.infrared, i,
+                                          self.WIDTH, self.HEIGHT,
+                                          rs.format.y8, self.FPS)
 
         # --- enable IMU (accel + gyro) ---
         self.config.enable_stream(rs.stream.accel,
@@ -149,6 +151,8 @@ class RealsenseCapture:
         if gyro_f:
             m = gyro_f.as_motion_frame().get_motion_data()
             imu_data['gyro']  = (m.x, m.y, m.z, gyro_f.get_timestamp())
+
+        include_ir = bool(include_ir and self.stream_ir)
 
         color_f  = fs.get_color_frame()
         depth_f0 = fs.get_depth_frame()

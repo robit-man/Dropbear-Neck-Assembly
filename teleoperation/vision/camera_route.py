@@ -10,6 +10,7 @@ Capabilities:
 - Cloudflared tunnel support.
 - Efficient MJPEG streaming (single JPEG encode per frame, shared by all clients).
 - Health and listing endpoints.
+- Process supervisor to auto-restart after native crashes (e.g., RealSense aborts).
 """
 
 import datetime
@@ -19,6 +20,7 @@ import os
 import platform
 import re
 import secrets
+import signal
 import shutil
 import socket
 import subprocess
@@ -34,6 +36,30 @@ from threading import Lock
 # ---------------------------------------------------------------------------
 CAMERA_VENV_DIR_NAME = "camera_route_venv"
 CAMERA_CLOUDFLARED_BASENAME = "camera_route_cloudflared"
+SUPERVISOR_ENV_CHILD = "CAMERA_ROUTE_CHILD"
+SUPERVISOR_ENV_ENABLED = "CAMERA_ROUTE_SUPERVISE"
+SUPERVISOR_ENV_SAFE_MODE = "CAMERA_ROUTE_SAFE_MODE"
+SUPERVISOR_BACKOFF_MAX_SECONDS = 15.0
+SUPERVISOR_CRASH_WINDOW_SECONDS = 120.0
+SUPERVISOR_SAFE_MODE_AFTER_CRASHES = 3
+
+
+def env_truthy(var_name, default=False):
+    value = os.environ.get(var_name)
+    if value is None:
+        return bool(default)
+    normalized = str(value).strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    return bool(default)
+
+
+SAFE_MODE_ACTIVE = env_truthy(SUPERVISOR_ENV_SAFE_MODE, default=False)
+# RealSense CUDA conversion asserts can crash the interpreter; safe mode forces CPU path.
+if SAFE_MODE_ACTIVE:
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 
 def ensure_venv():
@@ -1333,32 +1359,51 @@ def realsense_worker(rs_ids):
         return
 
     publish_interval = 1.0 / float(max(1, int(stream_options["target_fps"])))
+    include_ir = bool(source_options["realsense_stream_ir"])
     while service_running.is_set():
-        cap = RealsenseCapture()
+        cap = RealsenseCapture(stream_ir=include_ir)
         try:
             cap.start()
-            log("[OK] RealSense capture started")
+            log(f"[OK] RealSense capture started (ir={'on' if include_ir else 'off'})")
         except Exception as exc:
             log(f"[WARN] RealSense start failed: {exc}")
+            for feed_id in rs_ids.values():
+                feed = get_feed(feed_id)
+                if feed:
+                    feed.mark_error(f"RealSense start failed: {exc}")
             time.sleep(1.0)
             continue
 
         next_emit = 0.0
+        read_failures = 0
         while service_running.is_set():
             try:
-                ok, payload = cap.read(include_ir=True)
+                ok, payload = cap.read(include_ir=include_ir)
             except Exception as exc:
                 log(f"[WARN] RealSense read error: {exc}")
                 ok, payload = False, None
             if not ok or payload is None:
+                read_failures += 1
+                if read_failures >= 20:
+                    for feed_id in rs_ids.values():
+                        feed = get_feed(feed_id)
+                        if feed:
+                            feed.mark_error("RealSense frame timeout; restarting pipeline")
+                    log("[WARN] RealSense capture stalled; restarting pipeline")
+                    break
                 time.sleep(0.05)
                 continue
+            read_failures = 0
             now = time.time()
             if now < next_emit:
                 continue
             next_emit = now + publish_interval
 
-            color, depth_vis, ir_left, ir_right, imu_data = payload
+            if include_ir:
+                color, depth_vis, ir_left, ir_right, imu_data = payload
+            else:
+                color, depth_vis, imu_data = payload
+                ir_left = ir_right = None
             with imu_lock:
                 imu_state.clear()
                 imu_state.update(imu_data or {})
@@ -1372,7 +1417,7 @@ def realsense_worker(rs_ids):
                 if feed:
                     feed.publish(depth_vis, stream_options)
 
-            if source_options["realsense_stream_ir"]:
+            if include_ir and source_options["realsense_stream_ir"]:
                 feed = get_feed(rs_ids["ir_left"])
                 if feed:
                     feed.publish(ir_left, stream_options)
@@ -1802,6 +1847,7 @@ def health():
             "sessions_active": sessions_active,
             "requests_served": request_count["value"],
             "realsense_available": REALSENSE_AVAILABLE,
+            "safe_mode": SAFE_MODE_ACTIVE,
             "tunnel_url": current_tunnel,
         }
     )
@@ -2220,6 +2266,10 @@ def main():
         }
     )
 
+    if SAFE_MODE_ACTIVE and source_options["realsense_stream_ir"]:
+        source_options["realsense_stream_ir"] = False
+        log("[SAFE-MODE] Disabled RealSense IR streams after repeated crash recovery")
+
     listen_host = settings["listen_host"]
     listen_port = settings["listen_port"]
     enable_tunnel = settings["enable_tunnel"]
@@ -2257,6 +2307,7 @@ def main():
     if ui:
         ui.update_metric("Local URL", local_url)
         ui.update_metric("LAN URL", lan_url)
+        ui.update_metric("Mode", "Safe" if SAFE_MODE_ACTIVE else "Normal")
         ui.update_metric("Feeds", f"0/{len(all_feed_statuses())}")
         ui.update_metric("Clients", "0")
         ui.update_metric("Sessions", "0")
@@ -2307,5 +2358,106 @@ def main():
                     pass
 
 
+def terminate_process_tree(process):
+    if process is None:
+        return
+    pid = getattr(process, "pid", None)
+    if not pid:
+        return
+
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+        return
+
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except Exception:
+        return
+
+    deadline = time.time() + 1.0
+    while time.time() < deadline:
+        if process.poll() is not None:
+            return
+        time.sleep(0.05)
+
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def run_with_supervisor():
+    if env_truthy(SUPERVISOR_ENV_CHILD, default=False):
+        main()
+        return
+    if not env_truthy(SUPERVISOR_ENV_ENABLED, default=True):
+        main()
+        return
+
+    crash_times = []
+    backoff = 1.0
+    safe_mode_next = False
+
+    while True:
+        child_env = os.environ.copy()
+        child_env[SUPERVISOR_ENV_CHILD] = "1"
+        if safe_mode_next:
+            child_env[SUPERVISOR_ENV_SAFE_MODE] = "1"
+        else:
+            child_env.pop(SUPERVISOR_ENV_SAFE_MODE, None)
+
+        popen_kwargs = {"env": child_env}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        child = subprocess.Popen([sys.executable] + sys.argv, **popen_kwargs)
+        try:
+            exit_code = child.wait()
+        except KeyboardInterrupt:
+            terminate_process_tree(child)
+            return
+
+        # Ensure lingering child processes (e.g., cloudflared) are torn down.
+        terminate_process_tree(child)
+
+        # Clean exits should not be restarted.
+        if exit_code in (0, 130, -signal.SIGINT, -signal.SIGTERM):
+            return
+
+        now = time.time()
+        crash_times = [ts for ts in crash_times if (now - ts) <= SUPERVISOR_CRASH_WINDOW_SECONDS]
+        crash_times.append(now)
+
+        if len(crash_times) >= SUPERVISOR_SAFE_MODE_AFTER_CRASHES and not safe_mode_next:
+            safe_mode_next = True
+            print(
+                f"[WATCHDOG] Enabling safe mode after {len(crash_times)} crashes in "
+                f"{SUPERVISOR_CRASH_WINDOW_SECONDS:.0f}s. "
+                "RealSense IR will be disabled and CUDA device visibility masked."
+            )
+
+        print(
+            f"[WATCHDOG] camera_route child exited with code {exit_code}; "
+            f"restarting in {backoff:.1f}s..."
+        )
+        time.sleep(backoff)
+        if len(crash_times) <= 1:
+            backoff = 1.0
+        else:
+            backoff = min(SUPERVISOR_BACKOFF_MAX_SECONDS, backoff * 2.0)
+
+
 if __name__ == "__main__":
-    main()
+    run_with_supervisor()
