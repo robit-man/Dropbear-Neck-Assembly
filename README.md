@@ -26,6 +26,11 @@ This repository is focused on the development of a robot head and neck assembly,
 - Power Supply for the Motors and ESP32
 - Linux or Other serial or bluetooth control source, we use an AGX Xavier, but a raspberry pi or laptop will suffice!
 
+## Assumptions
+
+- [VSCode](https://code.visualstudio.com/) installed
+- [Platformio Extension](https://marketplace.visualstudio.com/items?itemName=platformio.platformio-ide) Added
+
 ## Update to signaling / Remote control August 7 2025
 
 [Visit this repository](https://github.com/robit-man/neck-signal) for all components needed to remote control the neck via signaling server
