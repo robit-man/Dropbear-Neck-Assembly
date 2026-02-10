@@ -32,14 +32,14 @@ This repository is focused on the development of a robot head and neck assembly,
 
 ## Added Control Software in /interface
 
-Just run [this script](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/interface/app.py) via 
+Just run [this script](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/frontend/app.py) via 
 ```bash
 python3 app.py
 ```
 
 and it will automatically generate a venv and start the application via flask.
 
-[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/interface/app.py)
+[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/interface/app.py)
 
 
 ## Software Requirements
