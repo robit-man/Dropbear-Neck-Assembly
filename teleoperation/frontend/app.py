@@ -783,6 +783,7 @@ let PASSWORD = localStorage.getItem('password') || "";
 let socket = null;
 let useWS = false;
 let authenticated = false;
+let suppressCommandDispatch = false;
 
 // Metrics tracking
 let metrics = {
@@ -850,24 +851,33 @@ const DEFAULTS = {
 };
 
 // Reset sliders/inputs back to defaults and clear the command display.
-function resetSliders() {
-    document.querySelectorAll("input[type='number'], input[type='range']").forEach(input => {
-        for (let k in DEFAULTS) {
-            if (input.id.startsWith(k)) {
-                input.value = DEFAULTS[k];
-                input.dispatchEvent(new Event('change'));
-                break;
+function resetSliders(options = {}) {
+    const silent = !!options.silent;
+    const previousSuppress = suppressCommandDispatch;
+    if (silent) {
+        suppressCommandDispatch = true;
+    }
+    try {
+        document.querySelectorAll("input[type='number'], input[type='range']").forEach(input => {
+            for (let k in DEFAULTS) {
+                if (input.id.startsWith(k)) {
+                    input.value = DEFAULTS[k];
+                    input.dispatchEvent(new Event('change'));
+                    break;
+                }
             }
-        }
-    });
-    const cur = document.getElementById('currentCmd');
-    if (cur) cur.textContent = "";
+        });
+        const cur = document.getElementById('currentCmd');
+        if (cur) cur.textContent = "";
+    } finally {
+        suppressCommandDispatch = previousSuppress;
+    }
 }
 
 // Send HOME command and then reset UI.
 function sendHomeCommand() {
     sendCommand("HOME");
-    resetSliders();
+    resetSliders({silent: true});
     logToConsole("Sent HOME command");
 }
 
@@ -917,6 +927,10 @@ async function authenticate(password, wsUrl, httpUrl) {
 
 // Centralized sendCommand: whichever path is currently active.
 function sendCommand(command) {
+    if (suppressCommandDispatch) {
+        return;
+    }
+
     const startTime = Date.now();
     metrics.commandsSent++;
 
@@ -2229,7 +2243,8 @@ headstream_page = r"""
         <p class="tuneables-note">These settings apply live while tracking.</p>
 
         <div class="row" style="margin-bottom:0.5rem;">
-          <button id="recenterPoseBtn" class="primary">Recenter</button>
+          <button id="streamToggleBtn" class="primary">Play Stream</button>
+          <button id="recenterPoseBtn">Recenter</button>
           <button id="resetTuneablesBtn">Reset Tuneables</button>
         </div>
 
@@ -2299,6 +2314,8 @@ headstream_page = r"""
       let smoothed = null;
       let poseBaseline = null;
       let lastTrackedPose = null;
+      let streamPlaybackEnabled = false;
+      let baselinePendingOnPlay = false;
 
       const defaultTuneables = {
         yawGain: 18,
@@ -2348,6 +2365,46 @@ headstream_page = r"""
           pitch: euler.x,
           roll: euler.z,
         });
+      }
+
+      function updateStreamToggleUi() {
+        const toggleBtn = document.getElementById('streamToggleBtn');
+        if (!toggleBtn) {
+          return;
+        }
+        toggleBtn.textContent = streamPlaybackEnabled ? 'Pause Stream' : 'Play Stream';
+        toggleBtn.className = streamPlaybackEnabled ? '' : 'primary';
+      }
+
+      function setStreamPlaybackEnabled(enabled) {
+        streamPlaybackEnabled = !!enabled;
+
+        if (streamPlaybackEnabled) {
+          baselinePendingOnPlay = true;
+          poseBaseline = null;
+          smoothed = null;
+          lastCommandSent = "";
+          lastCommandSentAt = 0;
+
+          if (lastTrackedPose) {
+            setPoseBaselineFromPose(lastTrackedPose);
+            baselinePendingOnPlay = false;
+            commandStreamEl.textContent = "Centered at Play position";
+          } else {
+            setStreamStatus('Play requested - waiting for face...');
+            commandStreamEl.textContent = "Waiting for face to set Play baseline...";
+          }
+          logToConsole('[STREAM] Morphtarget play');
+        } else {
+          baselinePendingOnPlay = false;
+          poseBaseline = null;
+          smoothed = null;
+          commandStreamEl.textContent = "Paused - press Play Stream";
+          setStreamStatus('Tracking paused');
+          logToConsole('[STREAM] Morphtarget paused');
+        }
+
+        updateStreamToggleUi();
       }
 
       function bindTuneablePair(numberId, rangeId, key, integerValue = false) {
@@ -2412,6 +2469,13 @@ headstream_page = r"""
         bindTuneablePair('tuneSmoothAlpha', 'tuneSmoothAlphaRange', 'smoothAlpha');
         bindTuneablePair('tuneIntervalMs', 'tuneIntervalMsRange', 'commandIntervalMs', true);
 
+        const streamToggleBtn = document.getElementById('streamToggleBtn');
+        if (streamToggleBtn) {
+          streamToggleBtn.addEventListener('click', () => {
+            setStreamPlaybackEnabled(!streamPlaybackEnabled);
+          });
+        }
+
         const recenterBtn = document.getElementById('recenterPoseBtn');
         if (recenterBtn) {
           recenterBtn.addEventListener('click', () => {
@@ -2430,6 +2494,9 @@ headstream_page = r"""
             logToConsole('[CAL] Morphtarget tuneables reset to defaults');
           });
         }
+
+        // Morphtarget starts disconnected from command streaming.
+        setStreamPlaybackEnabled(false);
       }
 
       function sendCommandToNeck(commandStr) {
@@ -2442,7 +2509,7 @@ headstream_page = r"""
 
       function buildPoseCommand(transformObj, euler) {
         if (!poseBaseline) {
-          setPoseBaseline(transformObj, euler);
+          return null;
         }
 
         const deltaX = transformObj.position.x - poseBaseline.x;
@@ -2629,35 +2696,39 @@ headstream_page = r"""
                 pitch: euler.x,
                 roll: euler.z,
               };
-              if (!poseBaseline) {
+
+              // Keep the rendered model in camera-space using absolute pose
+              // while command generation remains baseline-relative.
+              grpTransform.position.x = transformObj.position.x / 10;
+              grpTransform.position.y = transformObj.position.y / 10;
+              grpTransform.position.z = -transformObj.position.z / -10 + 4;
+              grpTransform.rotation.x = euler.x;
+              grpTransform.rotation.y = euler.y;
+              grpTransform.rotation.z = euler.z;
+
+              if (streamPlaybackEnabled && baselinePendingOnPlay) {
                 setPoseBaselineFromPose(lastTrackedPose);
+                baselinePendingOnPlay = false;
+                commandStreamEl.textContent = "Centered at Play position";
               }
 
-              const deltaX = transformObj.position.x - poseBaseline.x;
-              const deltaY = transformObj.position.y - poseBaseline.y;
-              const deltaZ = transformObj.position.z - poseBaseline.z;
-              const deltaPitch = normalizeAngleDelta(euler.x - poseBaseline.pitch);
-              const deltaYaw = normalizeAngleDelta(euler.y - poseBaseline.yaw);
-              const deltaRoll = normalizeAngleDelta(euler.z - poseBaseline.roll);
+              if (streamPlaybackEnabled) {
+                const commandStr = buildPoseCommand(transformObj, euler);
+                if (commandStr) {
+                  commandStreamEl.textContent = commandStr;
+                  setStreamStatus('Tracking active');
 
-              grpTransform.position.x = deltaX / 10;
-              grpTransform.position.y = deltaY / 10;
-              grpTransform.position.z = -deltaZ / -10 + 4;
-              grpTransform.rotation.x = deltaPitch;
-              grpTransform.rotation.y = deltaYaw;
-              grpTransform.rotation.z = deltaRoll;
-
-              const commandStr = buildPoseCommand(transformObj, euler);
-              commandStreamEl.textContent = commandStr;
-              setStreamStatus('Tracking active');
-
-              if (commandStr !== lastCommandSent && now - lastCommandSentAt >= tuneables.commandIntervalMs) {
-                sendCommandToNeck(commandStr);
-                lastCommandSent = commandStr;
-                lastCommandSentAt = now;
+                  if (commandStr !== lastCommandSent && now - lastCommandSentAt >= tuneables.commandIntervalMs) {
+                    sendCommandToNeck(commandStr);
+                    lastCommandSent = commandStr;
+                    lastCommandSentAt = now;
+                  }
+                }
               }
             } else {
-              setStreamStatus('Face not detected');
+              if (streamPlaybackEnabled) {
+                setStreamStatus('Face not detected');
+              }
             }
           }
 
