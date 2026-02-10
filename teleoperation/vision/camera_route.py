@@ -173,13 +173,19 @@ if not UI_AVAILABLE:
 # Optional RealSense support
 # ---------------------------------------------------------------------------
 REALSENSE_AVAILABLE = False
+REALSENSE_IMPORT_ERROR = ""
 RealsenseCapture = None
 try:
     from realsensecv import RealsenseCapture
 
     REALSENSE_AVAILABLE = True
 except Exception as exc:
-    print(f"Warning: RealSense unavailable: {exc}")
+    REALSENSE_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+    # Under supervisor mode the parent process only starts the child; avoid duplicate warnings.
+    if env_truthy(SUPERVISOR_ENV_CHILD, default=False) or not env_truthy(
+        SUPERVISOR_ENV_ENABLED, default=True
+    ):
+        print(f"Warning: RealSense unavailable: {REALSENSE_IMPORT_ERROR}")
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +255,17 @@ network_runtime = {
     "listen_host": DEFAULT_LISTEN_HOST,
     "listen_port": DEFAULT_LISTEN_PORT,
 }
+
+
+def should_enable_default_camera_fallback():
+    """Enable default /dev/video fallback when no usable RealSense path exists."""
+    if source_options["default_cameras_enabled"]:
+        return False
+    if os.name == "nt":
+        return False
+    if source_options["realsense_enabled"] and REALSENSE_AVAILABLE:
+        return False
+    return True
 
 camera_feeds = {}
 camera_feeds_lock = Lock()
@@ -1325,31 +1342,15 @@ def _is_realsense_video_node(device_path):
     return "realsense" in label
 
 
-def _is_capture_capable_linux_video(device_path):
-    if os.name == "nt":
-        return True
-
-    sysfs_dir = _video_sysfs_dir(device_path)
-    if not sysfs_dir:
+def _video_device_index(device_path):
+    base = os.path.basename(str(device_path))
+    match = re.fullmatch(r"video(\d+)", base)
+    if not match:
         return None
-
-    cap_bits = 0
-    for relative in ("device/capabilities", "capabilities"):
-        raw = _read_text(os.path.join(sysfs_dir, relative))
-        if not raw:
-            continue
-        try:
-            cap_bits = int(raw, 16)
-            break
-        except ValueError:
-            continue
-
-    if cap_bits == 0:
+    try:
+        return int(match.group(1))
+    except ValueError:
         return None
-
-    # V4L2_CAP_VIDEO_CAPTURE and V4L2_CAP_VIDEO_CAPTURE_MPLANE.
-    capture_mask = 0x00000001 | 0x00001000
-    return (cap_bits & capture_mask) != 0
 
 
 def discover_default_devices(device_glob):
@@ -1359,40 +1360,78 @@ def discover_default_devices(device_glob):
     candidates = sorted(glob.glob(device_glob))
     filtered = []
     skipped_realsense = 0
-    skipped_not_capture = 0
 
     for device in candidates:
         if not os.path.exists(device):
             continue
 
-        if _is_realsense_video_node(device):
+        # When RealSense is enabled through pyrealsense2, leave its V4L2 nodes to that worker.
+        # Otherwise keep nodes in the list and let runtime open-probing decide.
+        if source_options["realsense_enabled"] and REALSENSE_AVAILABLE and _is_realsense_video_node(device):
             skipped_realsense += 1
-            continue
-
-        capture_capable = _is_capture_capable_linux_video(device)
-        if capture_capable is not True:
-            skipped_not_capture += 1
             continue
 
         filtered.append(device)
 
     if skipped_realsense:
         log(f"[INFO] Ignored {skipped_realsense} RealSense V4L2 node(s) for default camera workers")
-    if skipped_not_capture:
-        log(f"[INFO] Ignored {skipped_not_capture} non-capture V4L2 node(s)")
 
     return filtered
 
 
+def _build_gstreamer_capture_pipelines(device_path, width, height, fps):
+    width = max(1, int(width))
+    height = max(1, int(height))
+    fps = max(1, int(fps))
+    return [
+        (
+            "nvv4l2camerasrc "
+            f"device={device_path} ! "
+            "video/x-raw(memory:NVMM),format=(string)UYVY,"
+            f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1 ! "
+            "nvvidconv ! video/x-raw,format=(string)BGRx ! "
+            "videoconvert ! appsink drop=1 max-buffers=1 sync=false"
+        ),
+        (
+            "v4l2src "
+            f"device={device_path} io-mode=2 ! "
+            "video/x-raw,"
+            f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1 ! "
+            "videoconvert ! appsink drop=1 max-buffers=1 sync=false"
+        ),
+        (
+            "v4l2src "
+            f"device={device_path} io-mode=2 ! "
+            "image/jpeg,"
+            f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1 ! "
+            "jpegdec ! videoconvert ! appsink drop=1 max-buffers=1 sync=false"
+        ),
+    ]
+
+
 def open_default_camera(device_path, width, height, fps):
     if os.name == "nt":
-        backends = [cv2.CAP_DSHOW, cv2.CAP_ANY]
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
     else:
         backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
 
+    attempts = []
     for backend in backends:
+        attempts.append(("path", device_path, backend))
+
+    device_index = _video_device_index(device_path)
+    if device_index is not None:
+        for backend in backends:
+            attempts.append(("index", device_index, backend))
+
+    cap_gstreamer = getattr(cv2, "CAP_GSTREAMER", None)
+    if os.name != "nt" and cap_gstreamer is not None:
+        for pipeline in _build_gstreamer_capture_pipelines(device_path, width, height, fps):
+            attempts.append(("gstreamer", pipeline, cap_gstreamer))
+
+    for attempt_kind, source, backend in attempts:
         try:
-            cap = cv2.VideoCapture(device_path, backend)
+            cap = cv2.VideoCapture(source, backend)
         except Exception:
             cap = None
         if cap is None or not cap.isOpened():
@@ -1400,34 +1439,29 @@ def open_default_camera(device_path, width, height, fps):
                 cap.release()
             continue
 
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-        cap.set(cv2.CAP_PROP_FPS, int(fps))
+        # GStreamer pipelines encode desired stream params in the pipeline string.
+        if attempt_kind != "gstreamer":
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+            cap.set(cv2.CAP_PROP_FPS, int(fps))
+
+        # Some camera stacks report opened before frames are actually available.
+        # Hold a short warm-up window and only accept a capture that can read frames.
+        healthy = False
+        for _ in range(18):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                healthy = True
+                break
+            time.sleep(0.03)
+        if not healthy:
+            cap.release()
+            continue
+
         return cap
 
     return None
-
-
-def probe_default_camera(device_path):
-    cap = open_default_camera(
-        device_path,
-        source_options["camera_capture_width"],
-        source_options["camera_capture_height"],
-        source_options["camera_capture_fps"],
-    )
-    if cap is None:
-        return False
-
-    try:
-        for _ in range(6):
-            ok, frame = cap.read()
-            if ok and frame is not None:
-                return True
-            time.sleep(0.05)
-        return False
-    finally:
-        cap.release()
 
 
 def default_camera_worker(feed, device_path):
@@ -1594,23 +1628,20 @@ def realsense_worker(rs_ids):
 
 def initialize_camera_workers():
     service_running.set()
+    default_worker_started = False
+
     if source_options["default_cameras_enabled"]:
         devices = discover_default_devices(source_options["camera_device_glob"])
-        available_devices = []
-        for device in devices:
-            if probe_default_camera(device):
-                available_devices.append(device)
-            else:
-                log(f"[INFO] Skipping default camera {device}: failed probe open/read")
-        if not available_devices:
-            log("[INFO] No default V4L2 camera devices passed probing")
-
-        for index, device in enumerate(available_devices):
+        for index, device in enumerate(devices):
             cam_id = f"default_{index}"
             feed = register_feed(cam_id, f"Default Camera ({device})")
             thread = threading.Thread(target=default_camera_worker, args=(feed, device), daemon=True)
             thread.start()
             capture_threads.append(thread)
+            default_worker_started = True
+
+        if not devices:
+            log("[WARN] Default camera mode enabled but no usable /dev/video feeds were found")
 
     if source_options["realsense_enabled"] and REALSENSE_AVAILABLE:
         rs_ids = {
@@ -1628,6 +1659,14 @@ def initialize_camera_workers():
         thread = threading.Thread(target=realsense_worker, args=(rs_ids,), daemon=True)
         thread.start()
         capture_threads.append(thread)
+    elif source_options["realsense_enabled"] and not REALSENSE_AVAILABLE:
+        if REALSENSE_IMPORT_ERROR:
+            log(f"[INFO] RealSense source disabled at runtime: {REALSENSE_IMPORT_ERROR}")
+        else:
+            log("[INFO] RealSense source disabled at runtime: dependencies unavailable")
+
+    if not default_worker_started and not (source_options["realsense_enabled"] and REALSENSE_AVAILABLE):
+        log("[WARN] No active camera workers started. Check /dev/video devices or RealSense availability.")
 
 
 def stop_camera_workers():
@@ -2011,6 +2050,9 @@ def health():
             "sessions_active": sessions_active,
             "requests_served": request_count["value"],
             "realsense_available": REALSENSE_AVAILABLE,
+            "realsense_import_error": REALSENSE_IMPORT_ERROR,
+            "realsense_enabled": bool(source_options["realsense_enabled"]),
+            "default_cameras_enabled": bool(source_options["default_cameras_enabled"]),
             "safe_mode": SAFE_MODE_ACTIVE,
             "tunnel_url": current_tunnel,
         }
@@ -2471,6 +2513,24 @@ def main():
             "realsense_stream_ir": settings["realsense_stream_ir"],
         }
     )
+
+    if source_options["realsense_enabled"] and not REALSENSE_AVAILABLE:
+        source_options["realsense_enabled"] = False
+        if REALSENSE_IMPORT_ERROR:
+            log(f"[INFO] RealSense disabled: {REALSENSE_IMPORT_ERROR}")
+        else:
+            log("[INFO] RealSense disabled: module unavailable")
+
+    if should_enable_default_camera_fallback():
+        fallback_candidates = discover_default_devices(source_options["camera_device_glob"])
+        if fallback_candidates:
+            source_options["default_cameras_enabled"] = True
+            log(
+                f"[INFO] Auto-enabling default camera fallback "
+                f"({len(fallback_candidates)} /dev/video candidate(s) discovered)"
+            )
+        else:
+            log("[WARN] No /dev/video candidates found for fallback camera mode")
 
     if SAFE_MODE_ACTIVE and source_options["realsense_stream_ir"]:
         source_options["realsense_stream_ir"] = False
