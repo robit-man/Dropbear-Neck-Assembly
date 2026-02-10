@@ -39,7 +39,7 @@ python3 app.py
 
 and it will automatically generate a venv and start the application via flask.
 
-[![image](https://github.com/user-attachments/assets/01263283-5a82-4957-b464-39c6f7d5e6b1)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/interface/app.py)
+[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/interface/app.py)
 
 
 ## Software Requirements
