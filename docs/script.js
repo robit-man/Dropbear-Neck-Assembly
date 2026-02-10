@@ -631,6 +631,18 @@ function parseConnectionFromQuery() {
 }
 
 const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
+const STREAM_MODE_MJPEG = "mjpeg";
+const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
+const MIN_PINNED_PREVIEW_WIDTH = 180;
+const MIN_PINNED_PREVIEW_HEIGHT = 105;
+const DEFAULT_PINNED_PREVIEW_STATE = {
+  visible: false,
+  cameraId: "",
+  left: 16,
+  top: 80,
+  width: 300,
+  height: 168,
+};
 let cameraRouterBaseUrl = CAMERA_ROUTER_DEFAULT_BASE;
 let cameraRouterPassword = localStorage.getItem("cameraRouterPassword") || "";
 let cameraRouterSessionKey = localStorage.getItem("cameraRouterSessionKey") || "";
@@ -644,8 +656,26 @@ let cameraRouterProtocols = {
 const cameraPreview = {
   jpegTimer: null,
   peerConnection: null,
+  activeCameraId: "",
+  activeMode: STREAM_MODE_MJPEG,
 };
 let streamUiInitialized = false;
+let pinnedPreviewUiInitialized = false;
+let pinnedPreviewState = {
+  ...DEFAULT_PINNED_PREVIEW_STATE,
+  ...loadPinnedPreviewStateFromStorage(),
+};
+const pinnedPreviewInteraction = {
+  dragging: false,
+  resizing: false,
+  pointerId: null,
+  startX: 0,
+  startY: 0,
+  startLeft: 0,
+  startTop: 0,
+  startWidth: 0,
+  startHeight: 0,
+};
 
 function normalizeOrigin(rawInput) {
   const trimmed = (rawInput || "").trim();
@@ -680,6 +710,266 @@ function setStreamStatus(message, error = false) {
   }
   statusEl.textContent = message;
   statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function loadPinnedPreviewStateFromStorage() {
+  try {
+    const rawState = localStorage.getItem(PINNED_PREVIEW_STORAGE_KEY);
+    if (!rawState) {
+      return {};
+    }
+    const parsed = JSON.parse(rawState);
+    if (!parsed || typeof parsed !== "object") {
+      return {};
+    }
+
+    const restored = {};
+    if (typeof parsed.visible === "boolean") {
+      restored.visible = parsed.visible;
+    }
+    if (typeof parsed.cameraId === "string") {
+      restored.cameraId = parsed.cameraId;
+    }
+
+    ["left", "top", "width", "height"].forEach((key) => {
+      const value = Number(parsed[key]);
+      if (Number.isFinite(value)) {
+        restored[key] = value;
+      }
+    });
+    return restored;
+  } catch (err) {
+    return {};
+  }
+}
+
+function persistPinnedPreviewState() {
+  try {
+    localStorage.setItem(PINNED_PREVIEW_STORAGE_KEY, JSON.stringify(pinnedPreviewState));
+  } catch (err) {}
+}
+
+function getPinnedPreviewElements() {
+  return {
+    pane: document.getElementById("pinnedStreamPane"),
+    image: document.getElementById("pinnedStreamImage"),
+    closeBtn: document.getElementById("pinnedStreamCloseBtn"),
+    resizeHandle: document.getElementById("pinnedStreamResizeHandle"),
+    pinBtn: document.getElementById("cameraPreviewPinBtn"),
+  };
+}
+
+function clampPinnedPreviewState() {
+  const viewportWidth = Math.max(window.innerWidth || 0, MIN_PINNED_PREVIEW_WIDTH + 16);
+  const viewportHeight = Math.max(window.innerHeight || 0, MIN_PINNED_PREVIEW_HEIGHT + 16);
+
+  const maxWidth = Math.max(MIN_PINNED_PREVIEW_WIDTH, viewportWidth - 16);
+  const maxHeight = Math.max(MIN_PINNED_PREVIEW_HEIGHT, viewportHeight - 16);
+  pinnedPreviewState.width = Math.min(Math.max(pinnedPreviewState.width, MIN_PINNED_PREVIEW_WIDTH), maxWidth);
+  pinnedPreviewState.height = Math.min(Math.max(pinnedPreviewState.height, MIN_PINNED_PREVIEW_HEIGHT), maxHeight);
+
+  const maxLeft = Math.max(8, viewportWidth - pinnedPreviewState.width - 8);
+  const maxTop = Math.max(8, viewportHeight - pinnedPreviewState.height - 8);
+  pinnedPreviewState.left = Math.min(Math.max(pinnedPreviewState.left, 8), maxLeft);
+  pinnedPreviewState.top = Math.min(Math.max(pinnedPreviewState.top, 8), maxTop);
+}
+
+function applyPinnedPreviewLayout(shouldPersist = false) {
+  const { pane } = getPinnedPreviewElements();
+  if (!pane) {
+    return;
+  }
+
+  clampPinnedPreviewState();
+  pane.style.left = `${Math.round(pinnedPreviewState.left)}px`;
+  pane.style.top = `${Math.round(pinnedPreviewState.top)}px`;
+  pane.style.width = `${Math.round(pinnedPreviewState.width)}px`;
+  pane.style.height = `${Math.round(pinnedPreviewState.height)}px`;
+  pane.classList.toggle("active", !!pinnedPreviewState.visible);
+
+  if (shouldPersist) {
+    persistPinnedPreviewState();
+  }
+}
+
+function buildMjpegPreviewUrl(cameraId) {
+  if (!cameraId) {
+    return "";
+  }
+  return cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
+}
+
+function syncPinnedPreviewSource() {
+  const { image } = getPinnedPreviewElements();
+  if (!image) {
+    return;
+  }
+  if (!pinnedPreviewState.visible || !pinnedPreviewState.cameraId || !cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    image.src = "";
+    image.dataset.sourceKey = "";
+    return;
+  }
+
+  const sourceUrl = buildMjpegPreviewUrl(pinnedPreviewState.cameraId);
+  const sourceKey = `${cameraRouterBaseUrl}|${cameraRouterSessionKey}|${pinnedPreviewState.cameraId}`;
+  if (image.dataset.sourceKey !== sourceKey) {
+    image.src = sourceUrl;
+    image.dataset.sourceKey = sourceKey;
+  }
+}
+
+function setPinButtonState() {
+  const { pinBtn } = getPinnedPreviewElements();
+  if (!pinBtn) {
+    return;
+  }
+  pinBtn.disabled = !cameraPreview.activeCameraId;
+}
+
+function closePinnedPreview() {
+  const { image } = getPinnedPreviewElements();
+  pinnedPreviewState.visible = false;
+  if (image) {
+    image.src = "";
+    image.dataset.sourceKey = "";
+  }
+  applyPinnedPreviewLayout(true);
+}
+
+function pinCurrentPreview() {
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const cameraId = cameraPreview.activeCameraId || (feedSelect ? feedSelect.value : "");
+  if (!cameraId) {
+    setStreamStatus("Start a preview first, then pin it", true);
+    return;
+  }
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    setStreamStatus("Authenticate with camera router before pinning", true);
+    return;
+  }
+
+  pinnedPreviewState.visible = true;
+  pinnedPreviewState.cameraId = cameraId;
+  applyPinnedPreviewLayout(true);
+  syncPinnedPreviewSource();
+  setStreamStatus(`Pinned preview active for ${cameraId}`);
+}
+
+function onPinnedPanePointerDown(event) {
+  if (event.button !== 0) {
+    return;
+  }
+  if (event.target.closest("#pinnedStreamCloseBtn") || event.target.closest("#pinnedStreamResizeHandle")) {
+    return;
+  }
+  if (!pinnedPreviewState.visible) {
+    return;
+  }
+
+  pinnedPreviewInteraction.dragging = true;
+  pinnedPreviewInteraction.resizing = false;
+  pinnedPreviewInteraction.pointerId = event.pointerId;
+  pinnedPreviewInteraction.startX = event.clientX;
+  pinnedPreviewInteraction.startY = event.clientY;
+  pinnedPreviewInteraction.startLeft = pinnedPreviewState.left;
+  pinnedPreviewInteraction.startTop = pinnedPreviewState.top;
+  event.preventDefault();
+}
+
+function onPinnedResizePointerDown(event) {
+  if (event.button !== 0) {
+    return;
+  }
+  event.stopPropagation();
+  if (!pinnedPreviewState.visible) {
+    return;
+  }
+
+  pinnedPreviewInteraction.dragging = false;
+  pinnedPreviewInteraction.resizing = true;
+  pinnedPreviewInteraction.pointerId = event.pointerId;
+  pinnedPreviewInteraction.startX = event.clientX;
+  pinnedPreviewInteraction.startY = event.clientY;
+  pinnedPreviewInteraction.startWidth = pinnedPreviewState.width;
+  pinnedPreviewInteraction.startHeight = pinnedPreviewState.height;
+  event.preventDefault();
+}
+
+function onPinnedPointerMove(event) {
+  if (!pinnedPreviewInteraction.dragging && !pinnedPreviewInteraction.resizing) {
+    return;
+  }
+  if (pinnedPreviewInteraction.pointerId !== null && event.pointerId !== pinnedPreviewInteraction.pointerId) {
+    return;
+  }
+
+  const deltaX = event.clientX - pinnedPreviewInteraction.startX;
+  const deltaY = event.clientY - pinnedPreviewInteraction.startY;
+
+  if (pinnedPreviewInteraction.resizing) {
+    pinnedPreviewState.width = pinnedPreviewInteraction.startWidth + deltaX;
+    pinnedPreviewState.height = pinnedPreviewInteraction.startHeight + deltaY;
+  } else {
+    pinnedPreviewState.left = pinnedPreviewInteraction.startLeft + deltaX;
+    pinnedPreviewState.top = pinnedPreviewInteraction.startTop + deltaY;
+  }
+  applyPinnedPreviewLayout(false);
+  event.preventDefault();
+}
+
+function clearPinnedPreviewInteraction() {
+  pinnedPreviewInteraction.dragging = false;
+  pinnedPreviewInteraction.resizing = false;
+  pinnedPreviewInteraction.pointerId = null;
+}
+
+function onPinnedPointerUp(event) {
+  if (!pinnedPreviewInteraction.dragging && !pinnedPreviewInteraction.resizing) {
+    return;
+  }
+  if (pinnedPreviewInteraction.pointerId !== null && event.pointerId !== pinnedPreviewInteraction.pointerId) {
+    return;
+  }
+
+  clearPinnedPreviewInteraction();
+  applyPinnedPreviewLayout(true);
+}
+
+function initializePinnedPreviewUi() {
+  if (pinnedPreviewUiInitialized) {
+    return;
+  }
+  pinnedPreviewUiInitialized = true;
+
+  const { pane, closeBtn, resizeHandle, pinBtn } = getPinnedPreviewElements();
+  if (!pane) {
+    return;
+  }
+
+  if (pinBtn) {
+    pinBtn.addEventListener("click", pinCurrentPreview);
+  }
+  if (closeBtn) {
+    closeBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closePinnedPreview();
+    });
+  }
+  if (resizeHandle) {
+    resizeHandle.addEventListener("pointerdown", onPinnedResizePointerDown);
+  }
+
+  pane.addEventListener("pointerdown", onPinnedPanePointerDown);
+  window.addEventListener("pointermove", onPinnedPointerMove);
+  window.addEventListener("pointerup", onPinnedPointerUp);
+  window.addEventListener("pointercancel", onPinnedPointerUp);
+  window.addEventListener("resize", () => {
+    applyPinnedPreviewLayout(true);
+  });
+
+  applyPinnedPreviewLayout(false);
+  syncPinnedPreviewSource();
+  setPinButtonState();
 }
 
 function stopCameraPreview() {
@@ -718,6 +1008,10 @@ function stopCameraPreview() {
     videoEl.load();
     videoEl.style.display = "none";
   }
+
+  cameraPreview.activeCameraId = "";
+  cameraPreview.activeMode = STREAM_MODE_MJPEG;
+  setPinButtonState();
 }
 
 function activatePreviewMode(mode) {
@@ -782,6 +1076,7 @@ async function authenticateCameraRouter() {
 
     setStreamStatus(`Authenticated. Session timeout ${data.timeout}s`);
     await refreshCameraFeeds();
+    syncPinnedPreviewSource();
   } catch (err) {
     setStreamStatus(`Auth error: ${err}`, true);
   }
@@ -833,6 +1128,7 @@ async function refreshCameraFeeds() {
       if (response.status === 401) {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
+        syncPinnedPreviewSource();
       }
       setStreamStatus(`List failed: ${data.message || response.status}`, true);
       return;
@@ -841,6 +1137,7 @@ async function refreshCameraFeeds() {
     cameraRouterFeeds = Array.isArray(data.cameras) ? data.cameras : [];
     cameraRouterProtocols = data.protocols || cameraRouterProtocols;
     renderCameraFeedOptions();
+    syncPinnedPreviewSource();
     setStreamStatus(`Loaded ${cameraRouterFeeds.length} feeds`);
   } catch (err) {
     setStreamStatus(`List error: ${err}`, true);
@@ -869,6 +1166,9 @@ async function startMjpegPreview(cameraId) {
     return;
   }
   imageEl.src = cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
+  cameraPreview.activeCameraId = cameraId;
+  cameraPreview.activeMode = STREAM_MODE_MJPEG;
+  setPinButtonState();
 }
 
 async function startMpegTsPreview(cameraId) {
@@ -941,7 +1241,11 @@ async function startCameraPreview() {
     return;
   }
   const cameraId = feedSelect.value;
-  const mode = modeSelect.value;
+  let mode = modeSelect.value || STREAM_MODE_MJPEG;
+  if (mode !== STREAM_MODE_MJPEG) {
+    mode = STREAM_MODE_MJPEG;
+    modeSelect.value = STREAM_MODE_MJPEG;
+  }
   if (!cameraId) {
     setStreamStatus("Select a feed first", true);
     return;
@@ -951,22 +1255,11 @@ async function startCameraPreview() {
   localStorage.setItem("cameraRouterSelectedMode", mode);
 
   stopCameraPreview();
-  setStreamStatus(`Starting ${mode} preview for ${cameraId}...`);
+  setStreamStatus(`Starting ${STREAM_MODE_MJPEG} preview for ${cameraId}...`);
 
   try {
-    if (mode === "webrtc") {
-      await startWebRtcPreview(cameraId);
-    } else if (mode === "mjpeg") {
-      await startMjpegPreview(cameraId);
-      setStreamStatus("MJPEG preview started");
-    } else if (mode === "jpeg") {
-      await startJpegPreview(cameraId);
-      setStreamStatus("JPEG polling preview started");
-    } else if (mode === "mpegts") {
-      await startMpegTsPreview(cameraId);
-    } else {
-      throw new Error(`Unknown mode: ${mode}`);
-    }
+    await startMjpegPreview(cameraId);
+    setStreamStatus("MJPEG preview started");
   } catch (err) {
     setStreamStatus(`Preview failed: ${err}`, true);
   }
@@ -986,12 +1279,14 @@ function setupStreamConfigUi() {
   const stopBtn = document.getElementById("cameraPreviewStopBtn");
   const modeSelect = document.getElementById("cameraModeSelect");
   const feedSelect = document.getElementById("cameraFeedSelect");
+  initializePinnedPreviewUi();
 
   if (baseInput) {
     baseInput.value = cameraRouterBaseUrl;
     baseInput.addEventListener("change", () => {
       try {
         cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
+        syncPinnedPreviewSource();
       } catch (err) {}
     });
   }
@@ -999,8 +1294,8 @@ function setupStreamConfigUi() {
     passInput.value = cameraRouterPassword;
   }
   if (modeSelect) {
-    const savedMode = localStorage.getItem("cameraRouterSelectedMode") || "webrtc";
-    modeSelect.value = savedMode;
+    modeSelect.value = STREAM_MODE_MJPEG;
+    localStorage.setItem("cameraRouterSelectedMode", STREAM_MODE_MJPEG);
   }
 
   if (authBtn) {
@@ -1025,7 +1320,8 @@ function setupStreamConfigUi() {
   }
   if (modeSelect) {
     modeSelect.addEventListener("change", () => {
-      localStorage.setItem("cameraRouterSelectedMode", modeSelect.value || "webrtc");
+      modeSelect.value = STREAM_MODE_MJPEG;
+      localStorage.setItem("cameraRouterSelectedMode", STREAM_MODE_MJPEG);
     });
   }
 

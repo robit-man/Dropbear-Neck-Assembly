@@ -474,10 +474,10 @@
         <div class="row">
           <label for="cameraModeSelect">Protocol:</label>
           <select id="cameraModeSelect" style="flex:1;">
-            <option value="webrtc">WebRTC (lowest latency)</option>
-            <option value="mjpeg">MJPEG stream</option>
-            <option value="jpeg">JPEG polling</option>
-            <option value="mpegts">MPEG-TS stream</option>
+            <option value="webrtc" disabled>WebRTC (disabled)</option>
+            <option value="mjpeg" selected>MJPEG stream (default)</option>
+            <option value="jpeg" disabled>JPEG polling (disabled)</option>
+            <option value="mpegts" disabled>MPEG-TS stream (disabled)</option>
           </select>
         </div>
         <div class="row">
@@ -489,6 +489,11 @@
       <div class="control-section">
         <h3 style="margin-top:0;">Preview</h3>
         <div class="stream-preview-wrap">
+          <button id="cameraPreviewPinBtn" class="stream-pin-btn" type="button" aria-label="Pin stream preview" title="Pin stream preview">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M7 3h10l-2 6v3l3 3v2h-5v4l-2-1-2 1v-4H4v-2l3-3V9L7 3z"></path>
+            </svg>
+          </button>
           <img id="cameraPreviewImage" alt="Camera Preview" style="display:none;">
           <video id="cameraPreviewVideo" autoplay muted playsinline controls style="display:none;"></video>
         </div>
@@ -499,6 +504,12 @@
         <div id="cameraFeedList" class="stream-feed-list"></div>
       </div>
     </section>
+  </div>
+
+  <div id="pinnedStreamPane" class="pinned-stream-pane" aria-label="Pinned stream preview">
+    <img id="pinnedStreamImage" alt="Pinned stream preview">
+    <button id="pinnedStreamCloseBtn" class="pinned-stream-close" type="button" aria-label="Close pinned preview" title="Close">x</button>
+    <div id="pinnedStreamResizeHandle" class="pinned-stream-resize" aria-hidden="true"></div>
   </div>
 
   <footer id="console"></footer>
