@@ -179,8 +179,15 @@ def log(message):
         print(f"[{datetime.datetime.now()}] {message}")
 
 # --- Command Validation ---
+def _normalized_home_command(cmd):
+    normalized = cmd.strip().lower()
+    if normalized in ("home", "home_soft", "home_brute"):
+        return normalized
+    return None
+
+
 def validate_command(cmd):
-    if cmd.strip().lower() == "home":
+    if _normalized_home_command(cmd):
         return True
     seen = set()
     for token in cmd.split(","):
@@ -199,7 +206,7 @@ def validate_command(cmd):
 
 # --- Merge Partial into State ---
 def merge_into_state(cmd):
-    if cmd.strip().lower() == "home":
+    if _normalized_home_command(cmd):
         for k in current_state:
             current_state[k] = 1.0 if k in ("S","A") else 0
         return
@@ -704,6 +711,18 @@ def process_command(cmd, ser):
     if not validate_command(cmd):
         return {"status":"error","message":"Invalid command"}
     merge_into_state(cmd)
+
+    home_cmd = _normalized_home_command(cmd)
+    if home_cmd:
+        outbound = home_cmd.upper()
+        try:
+            ser.write((outbound + "\n").encode("utf-8"))
+            log(f"Sent command: {outbound}")
+            return {"status":"success","command":outbound}
+        except Exception as e:
+            log(f"Serial write error: {e}")
+            return {"status":"error","message":str(e)}
+
     full = assemble_full_command()
     try:
         ser.write((full + "\n").encode("utf-8"))
