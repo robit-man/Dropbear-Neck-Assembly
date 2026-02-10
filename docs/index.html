@@ -56,16 +56,19 @@
   <div class="container">
     <div class="metrics-bar">
       <div class="metric">
-        <div class="metric-label">Connection</div>
+        <div class="metric-label">Control Transport</div>
         <div id="metricStatus" class="metric-value">Checking...</div>
+        <div id="metricLatency" class="metric-meta">Latency --</div>
       </div>
       <div class="metric">
-        <div class="metric-label">Latency</div>
-        <div id="metricLatency" class="metric-value">--</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">Data Rate</div>
+        <div class="metric-label">Control Datastream</div>
         <div id="metricRate" class="metric-value">0 cmd/s</div>
+        <div id="metricCommands" class="metric-meta">0 commands</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Video Datastream</div>
+        <div id="metricVideoState" class="metric-value">Idle</div>
+        <div id="metricVideoStats" class="metric-meta">-- fps | -- kbps | -- clients</div>
       </div>
       <div style="margin-left:auto;">
         <button onclick="showConnectionModal()" style="padding:0.25rem 0.75rem;font-size:0.85rem;">

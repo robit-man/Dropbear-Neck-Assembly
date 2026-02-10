@@ -84,7 +84,7 @@ body {
 /* Metrics Display */
 .metrics-bar {
     display: flex;
-    gap: 1rem;
+    gap: 0.6rem;
     padding: 0.75rem;
     background: var(--bg-tertiary);
     border: 2px solid var(--border-dark);
@@ -96,17 +96,31 @@ body {
 .metric {
     display: flex;
     flex-direction: column;
-    gap: 0.25rem;
+    gap: 0.2rem;
+    min-width: 170px;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--border-light);
+    border-radius: 0.45rem;
+    background: var(--bg-secondary);
 }
 
 .metric-label {
-    font-size: 0.75rem;
-    opacity: 0.7;
+    font-size: 0.68rem;
+    opacity: 0.72;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
 }
 
 .metric-value {
     font-weight: bold;
     color: var(--accent);
+    line-height: 1.1;
+}
+
+.metric-meta {
+    font-size: 0.72rem;
+    opacity: 0.78;
+    white-space: nowrap;
 }
 
 .metric-value.good {

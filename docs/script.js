@@ -30,8 +30,70 @@ let metrics = {
     latency: 0,
     commandsSent: 0,
     dataRate: 0,
-    lastCommandTime: 0
+    lastCommandTime: 0,
+    video: {
+        state: "Idle",
+        stats: "-- fps | -- kbps | -- clients",
+        quality: "neutral"
+    }
 };
+
+function getSelectedFeedStatus() {
+    const feedSelect = document.getElementById("cameraFeedSelect");
+    const preferredId = cameraPreview.activeCameraId || (feedSelect ? feedSelect.value : "");
+    if (!preferredId) {
+        return null;
+    }
+    return cameraRouterFeeds.find((feed) => feed.id === preferredId) || null;
+}
+
+function updateVideoMetrics() {
+  const feed = getSelectedFeedStatus();
+  if (!cameraPreview.desired) {
+    metrics.video.state = "Idle";
+    metrics.video.stats = "-- fps | -- kbps | -- clients";
+    metrics.video.quality = "neutral";
+    return;
+  }
+
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    metrics.video.state = "Auth required";
+    metrics.video.stats = "-- fps | -- kbps | -- clients";
+    metrics.video.quality = "error";
+    return;
+  }
+
+  const feedId = cameraPreview.activeCameraId || (feed ? feed.id : "");
+    if (cameraPreview.restartTimer) {
+        metrics.video.state = feedId ? `Reconnecting ${feedId}` : "Reconnecting";
+        metrics.video.stats = "-- fps | -- kbps | -- clients";
+        metrics.video.quality = "warning";
+        return;
+    }
+
+    if (!feed) {
+        metrics.video.state = feedId ? `Unavailable ${feedId}` : "Awaiting feed";
+        metrics.video.stats = "-- fps | -- kbps | -- clients";
+        metrics.video.quality = "warning";
+        return;
+    }
+
+    const fps = Number(feed.fps) || 0;
+    const kbps = Number(feed.kbps) || 0;
+    const clients = Number(feed.clients) || 0;
+    metrics.video.stats = `${fps.toFixed(1)} fps | ${Math.round(kbps)} kbps | ${clients} clients`;
+
+    if (!feed.online) {
+        metrics.video.state = `Offline ${feed.id}`;
+        metrics.video.quality = "error";
+    } else if (fps > 1 && clients > 0) {
+        metrics.video.state = `Live ${feed.id}`;
+        metrics.video.quality = "good";
+    } else {
+        metrics.video.state = `Degraded ${feed.id}`;
+        metrics.video.quality = "warning";
+    }
+}
 
 // Common logger for the footer console.
 function logToConsole(msg) {
@@ -49,6 +111,9 @@ function updateMetrics() {
     const statusEl = document.getElementById('metricStatus');
     const latencyEl = document.getElementById('metricLatency');
     const rateEl = document.getElementById('metricRate');
+    const commandsEl = document.getElementById('metricCommands');
+    const videoStateEl = document.getElementById('metricVideoState');
+    const videoStatsEl = document.getElementById('metricVideoStats');
 
     if (statusEl) {
         if (metrics.connected) {
@@ -61,13 +126,35 @@ function updateMetrics() {
     }
 
     if (latencyEl) {
-        latencyEl.textContent = metrics.latency + 'ms';
-        latencyEl.className = 'metric-value ' + (metrics.latency < 100 ? 'good' : metrics.latency < 300 ? 'warning' : 'error');
+        latencyEl.textContent = 'Latency ' + metrics.latency + 'ms';
+        latencyEl.className = 'metric-meta';
     }
 
     if (rateEl) {
         rateEl.textContent = metrics.dataRate.toFixed(1) + ' cmd/s';
         rateEl.className = 'metric-value';
+    }
+
+    if (commandsEl) {
+        commandsEl.textContent = metrics.commandsSent + ' commands';
+        commandsEl.className = 'metric-meta';
+    }
+
+    updateVideoMetrics();
+    if (videoStateEl) {
+        videoStateEl.textContent = metrics.video.state;
+        videoStateEl.className = 'metric-value';
+        if (metrics.video.quality === "good") {
+            videoStateEl.classList.add("good");
+        } else if (metrics.video.quality === "warning") {
+            videoStateEl.classList.add("warning");
+        } else if (metrics.video.quality === "error") {
+            videoStateEl.classList.add("error");
+        }
+    }
+    if (videoStatsEl) {
+        videoStatsEl.textContent = metrics.video.stats;
+        videoStatsEl.className = 'metric-meta';
     }
 }
 
@@ -658,6 +745,13 @@ const cameraPreview = {
   peerConnection: null,
   activeCameraId: "",
   activeMode: STREAM_MODE_MJPEG,
+  desired: false,
+  restartTimer: null,
+  restartAttempts: 0,
+  monitorTimer: null,
+  healthFailStreak: 0,
+  zeroClientStreak: 0,
+  monitorInFlight: false,
 };
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
@@ -972,7 +1066,93 @@ function initializePinnedPreviewUi() {
   setPinButtonState();
 }
 
-function stopCameraPreview() {
+function clearCameraPreviewRestartTimer() {
+  if (cameraPreview.restartTimer) {
+    clearTimeout(cameraPreview.restartTimer);
+    cameraPreview.restartTimer = null;
+  }
+}
+
+function stopCameraPreviewMonitor() {
+  if (cameraPreview.monitorTimer) {
+    clearInterval(cameraPreview.monitorTimer);
+    cameraPreview.monitorTimer = null;
+  }
+}
+
+async function monitorCameraPreviewHealth() {
+  if (!cameraPreview.desired || !cameraPreview.activeCameraId || !cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    return;
+  }
+  if (cameraPreview.monitorInFlight) {
+    return;
+  }
+  cameraPreview.monitorInFlight = true;
+
+  try {
+    const ok = await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    if (!ok) {
+      cameraPreview.healthFailStreak += 1;
+      if (cameraPreview.healthFailStreak >= 2) {
+        scheduleCameraPreviewRestart("router unreachable");
+      }
+      return;
+    }
+
+    cameraPreview.healthFailStreak = 0;
+    const selected = cameraRouterFeeds.find((feed) => feed.id === cameraPreview.activeCameraId) || null;
+    if (!selected || !selected.online) {
+      cameraPreview.zeroClientStreak += 1;
+      if (cameraPreview.zeroClientStreak >= 2) {
+        scheduleCameraPreviewRestart("feed offline");
+      }
+      return;
+    }
+
+    const clients = Number(selected.clients) || 0;
+    const fps = Number(selected.fps) || 0;
+    if (clients <= 0 || fps <= 0.2) {
+      cameraPreview.zeroClientStreak += 1;
+      if (cameraPreview.zeroClientStreak >= 3) {
+        scheduleCameraPreviewRestart("stream stalled");
+      }
+    } else {
+      cameraPreview.zeroClientStreak = 0;
+    }
+  } finally {
+    cameraPreview.monitorInFlight = false;
+  }
+}
+
+function startCameraPreviewMonitor() {
+  if (cameraPreview.monitorTimer) {
+    return;
+  }
+  cameraPreview.monitorTimer = setInterval(() => {
+    monitorCameraPreviewHealth().catch(() => {});
+  }, 3000);
+}
+
+function scheduleCameraPreviewRestart(reason = "stream error") {
+  if (!cameraPreview.desired || cameraPreview.restartTimer) {
+    return;
+  }
+  cameraPreview.restartAttempts += 1;
+  const delayMs = Math.min(10000, 700 * Math.pow(2, Math.max(0, cameraPreview.restartAttempts - 1)));
+  const secs = (delayMs / 1000).toFixed(1);
+  setStreamStatus(`Preview interrupted (${reason}). Reconnecting in ${secs}s...`, true);
+  updateMetrics();
+  cameraPreview.restartTimer = setTimeout(() => {
+    cameraPreview.restartTimer = null;
+    if (!cameraPreview.desired) {
+      return;
+    }
+    startCameraPreview({ autoRestart: true, reason }).catch(() => {});
+  }, delayMs);
+}
+
+function stopCameraPreview(options = {}) {
+  const keepDesired = !!options.keepDesired;
   if (cameraPreview.jpegTimer) {
     clearInterval(cameraPreview.jpegTimer);
     cameraPreview.jpegTimer = null;
@@ -991,6 +1171,9 @@ function stopCameraPreview() {
 
   const mjpegImg = document.getElementById("cameraPreviewImage");
   if (mjpegImg) {
+    mjpegImg.onload = null;
+    mjpegImg.onerror = null;
+    mjpegImg.onabort = null;
     mjpegImg.src = "";
     mjpegImg.style.display = "none";
   }
@@ -1011,7 +1194,17 @@ function stopCameraPreview() {
 
   cameraPreview.activeCameraId = "";
   cameraPreview.activeMode = STREAM_MODE_MJPEG;
+  cameraPreview.healthFailStreak = 0;
+  cameraPreview.zeroClientStreak = 0;
+  cameraPreview.monitorInFlight = false;
+  if (!keepDesired) {
+    cameraPreview.desired = false;
+    cameraPreview.restartAttempts = 0;
+    clearCameraPreviewRestartTimer();
+    stopCameraPreviewMonitor();
+  }
   setPinButtonState();
+  updateMetrics();
 }
 
 function activatePreviewMode(mode) {
@@ -1077,6 +1270,9 @@ async function authenticateCameraRouter() {
     setStreamStatus(`Authenticated. Session timeout ${data.timeout}s`);
     await refreshCameraFeeds();
     syncPinnedPreviewSource();
+    if (cameraPreview.desired) {
+      await startCameraPreview({ autoRestart: true, reason: "session refresh" });
+    }
   } catch (err) {
     setStreamStatus(`Auth error: ${err}`, true);
   }
@@ -1116,10 +1312,14 @@ function renderCameraFeedOptions() {
   });
 }
 
-async function refreshCameraFeeds() {
+async function refreshCameraFeeds(options = {}) {
+  const silent = !!options.silent;
+  const suppressErrors = !!options.suppressErrors;
   if (!cameraRouterBaseUrl) {
-    setStreamStatus("Set camera router URL first", true);
-    return;
+    if (!suppressErrors) {
+      setStreamStatus("Set camera router URL first", true);
+    }
+    return false;
   }
   try {
     const response = await cameraRouterFetch("/list", {}, true);
@@ -1129,18 +1329,31 @@ async function refreshCameraFeeds() {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
         syncPinnedPreviewSource();
+        if (cameraPreview.desired) {
+          stopCameraPreview();
+          setStreamStatus("Camera session expired. Re-authenticate to resume preview.", true);
+        }
       }
-      setStreamStatus(`List failed: ${data.message || response.status}`, true);
-      return;
+      if (!suppressErrors) {
+        setStreamStatus(`List failed: ${data.message || response.status}`, true);
+      }
+      return false;
     }
 
     cameraRouterFeeds = Array.isArray(data.cameras) ? data.cameras : [];
     cameraRouterProtocols = data.protocols || cameraRouterProtocols;
     renderCameraFeedOptions();
     syncPinnedPreviewSource();
-    setStreamStatus(`Loaded ${cameraRouterFeeds.length} feeds`);
+    if (!silent) {
+      setStreamStatus(`Loaded ${cameraRouterFeeds.length} feeds`);
+    }
+    updateMetrics();
+    return true;
   } catch (err) {
-    setStreamStatus(`List error: ${err}`, true);
+    if (!suppressErrors) {
+      setStreamStatus(`List error: ${err}`, true);
+    }
+    return false;
   }
 }
 
@@ -1165,10 +1378,22 @@ async function startMjpegPreview(cameraId) {
   if (!imageEl) {
     return;
   }
+  imageEl.onload = () => {
+    cameraPreview.healthFailStreak = 0;
+    cameraPreview.zeroClientStreak = 0;
+    updateMetrics();
+  };
+  imageEl.onerror = () => {
+    if (cameraPreview.desired && cameraPreview.activeCameraId === cameraId) {
+      scheduleCameraPreviewRestart("image stream error");
+    }
+  };
+  imageEl.onabort = imageEl.onerror;
   imageEl.src = cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
   cameraPreview.activeCameraId = cameraId;
   cameraPreview.activeMode = STREAM_MODE_MJPEG;
   setPinButtonState();
+  updateMetrics();
 }
 
 async function startMpegTsPreview(cameraId) {
@@ -1234,13 +1459,18 @@ async function startWebRtcPreview(cameraId) {
   setStreamStatus("WebRTC preview started");
 }
 
-async function startCameraPreview() {
+async function startCameraPreview(options = {}) {
+  const autoRestart = !!options.autoRestart;
+  const requestedCameraId = typeof options.cameraId === "string" ? options.cameraId.trim() : "";
   const feedSelect = document.getElementById("cameraFeedSelect");
   const modeSelect = document.getElementById("cameraModeSelect");
   if (!feedSelect || !modeSelect) {
     return;
   }
-  const cameraId = feedSelect.value;
+  const cameraId = requestedCameraId || feedSelect.value || cameraPreview.activeCameraId;
+  if (requestedCameraId && feedSelect.value !== requestedCameraId) {
+    feedSelect.value = requestedCameraId;
+  }
   let mode = modeSelect.value || STREAM_MODE_MJPEG;
   if (mode !== STREAM_MODE_MJPEG) {
     mode = STREAM_MODE_MJPEG;
@@ -1248,20 +1478,34 @@ async function startCameraPreview() {
   }
   if (!cameraId) {
     setStreamStatus("Select a feed first", true);
+    if (!autoRestart) {
+      cameraPreview.desired = false;
+      clearCameraPreviewRestartTimer();
+      stopCameraPreviewMonitor();
+      updateMetrics();
+    }
     return;
   }
 
   localStorage.setItem("cameraRouterSelectedFeed", cameraId);
   localStorage.setItem("cameraRouterSelectedMode", mode);
 
-  stopCameraPreview();
-  setStreamStatus(`Starting ${STREAM_MODE_MJPEG} preview for ${cameraId}...`);
+  cameraPreview.desired = true;
+  clearCameraPreviewRestartTimer();
+  stopCameraPreview({ keepDesired: true });
+  setStreamStatus(`${autoRestart ? "Restarting" : "Starting"} ${STREAM_MODE_MJPEG} preview for ${cameraId}...`);
 
   try {
     await startMjpegPreview(cameraId);
+    cameraPreview.restartAttempts = 0;
+    cameraPreview.healthFailStreak = 0;
+    cameraPreview.zeroClientStreak = 0;
+    startCameraPreviewMonitor();
+    monitorCameraPreviewHealth().catch(() => {});
     setStreamStatus("MJPEG preview started");
   } catch (err) {
     setStreamStatus(`Preview failed: ${err}`, true);
+    scheduleCameraPreviewRestart("startup failure");
   }
 }
 
@@ -1315,7 +1559,13 @@ function setupStreamConfigUi() {
   }
   if (feedSelect) {
     feedSelect.addEventListener("change", () => {
-      localStorage.setItem("cameraRouterSelectedFeed", feedSelect.value || "");
+      const nextFeed = feedSelect.value || "";
+      localStorage.setItem("cameraRouterSelectedFeed", nextFeed);
+      if (cameraPreview.desired && nextFeed) {
+        startCameraPreview({ autoRestart: true, cameraId: nextFeed, reason: "feed change" }).catch(() => {});
+      } else {
+        updateMetrics();
+      }
     });
   }
   if (modeSelect) {
