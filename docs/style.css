@@ -334,6 +334,24 @@ h3 {
     margin-top: 0;
 }
 
+.orientation-embed-wrap {
+    position: relative;
+    width: 100%;
+    min-height: 460px;
+    border: 2px solid var(--border-light);
+    border-radius: 0.5rem;
+    overflow: hidden;
+    background: #050505;
+}
+
+.orientation-embed-wrap iframe {
+    display: block;
+    width: 100%;
+    min-height: 460px;
+    border: 0;
+    background: #000;
+}
+
 .stream-preview-wrap {
     position: relative;
     width: 100%;
@@ -496,6 +514,11 @@ h3 {
 
     .stream-preview-wrap {
         min-height: 220px;
+    }
+
+    .orientation-embed-wrap,
+    .orientation-embed-wrap iframe {
+        min-height: 320px;
     }
 
     .pinned-stream-pane {

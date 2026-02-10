@@ -16,6 +16,7 @@
   </script>
   <script src="./script.js" defer></script>
   <script type="module" src="./headstream-module.js"></script>
+  <script type="module" src="./orientation-module.js"></script>
 </head>
 <body>
   <div id="connectionModal" class="modal active">
@@ -70,8 +71,8 @@
         <div id="metricVideoState" class="metric-value">Idle</div>
         <div id="metricVideoStats" class="metric-meta">-- fps | -- kbps | -- clients</div>
       </div>
-      <div style="margin-left:auto;">
-        <button onclick="showConnectionModal()" style="padding:0.25rem 0.75rem;font-size:0.85rem;">
+      <div style="margin-left:auto;align-self: flex-start;">
+        <button onclick="showConnectionModal()" style="font-weight:bold;text-transform:uppercase;padding:0.25rem 0.75rem;font-size:0.85rem;">
           Settings
         </button>
       </div>
@@ -86,6 +87,7 @@
         <a href="#head" class="nav-link" data-route="head">Full Head</a>
         <a href="#quaternion" class="nav-link" data-route="quaternion">Quaternion</a>
         <a href="#headstream" class="nav-link" data-route="headstream">Morphtarget</a>
+        <a href="#orientation" class="nav-link" data-route="orientation">Orientation</a>
         <a href="#streams" class="nav-link" data-route="streams">Streams</a>
       </div>
       <div class="row">
@@ -119,6 +121,7 @@
           <li><strong>Full Head:</strong> Complete head control with speed/acceleration</li>
           <li><strong>Quaternion:</strong> Quaternion-based orientation control</li>
           <li><strong>Morphtarget:</strong> Real-time face tracking control</li>
+          <li><strong>Orientation:</strong> Device orientation stream control with planet/planar mapping</li>
         </ul>
       </div>
     </section>
@@ -444,6 +447,220 @@
           <label for="tuneIntervalMs">Send Interval (ms):</label>
           <input type="number" id="tuneIntervalMs" min="20" max="200" step="1" value="90" style="width:90px;">
           <input type="range" id="tuneIntervalMsRange" min="20" max="200" step="1" value="90">
+        </div>
+        <div class="row">
+          <label for="tuneStreamSpeed">Speed (S):</label>
+          <input type="number" id="tuneStreamSpeed" min="0" max="10" step="0.1" value="0.8" style="width:90px;">
+          <input type="range" id="tuneStreamSpeedRange" min="0" max="10" step="0.1" value="0.8">
+        </div>
+        <div class="row">
+          <label for="tuneStreamAccel">Acceleration (A):</label>
+          <input type="number" id="tuneStreamAccel" min="0" max="10" step="0.1" value="0.6" style="width:90px;">
+          <input type="range" id="tuneStreamAccelRange" min="0" max="10" step="0.1" value="0.6">
+        </div>
+        <div class="row">
+          <label for="tuneOffsetX">Offset X:</label>
+          <input type="number" id="tuneOffsetX" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="tuneOffsetXRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="tuneOffsetY">Offset Y:</label>
+          <input type="number" id="tuneOffsetY" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="tuneOffsetYRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="tuneOffsetZ">Offset Z:</label>
+          <input type="number" id="tuneOffsetZ" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="tuneOffsetZRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="tuneOffsetH">Offset H:</label>
+          <input type="number" id="tuneOffsetH" min="0" max="70" step="1" value="30" style="width:90px;">
+          <input type="range" id="tuneOffsetHRange" min="0" max="70" step="1" value="30">
+        </div>
+        <div class="row">
+          <label for="tuneOffsetR">Offset R:</label>
+          <input type="number" id="tuneOffsetR" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="tuneOffsetRRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="tuneOffsetP">Offset P:</label>
+          <input type="number" id="tuneOffsetP" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="tuneOffsetPRange" min="-800" max="800" step="1" value="0">
+        </div>
+      </div>
+    </section>
+
+    <section class="view" data-view="orientation">
+      <h2>Orientation</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Orientation Hub</h3>
+        <p style="opacity:0.75;margin-top:0;">
+          Connect to your <code>wss_state_share</code> service, select a phone/device source, then stream mapped commands to the neck.
+        </p>
+        <div class="row">
+          <label for="orientationHubUrlInput">Hub URL:</label>
+          <input type="text" id="orientationHubUrlInput" placeholder="http://127.0.0.1:8080" style="flex:1;">
+        </div>
+        <div class="row">
+          <label for="orientationHubWsInput">Hub WS:</label>
+          <input type="text" id="orientationHubWsInput" placeholder="ws://127.0.0.1:8080" style="flex:1;">
+        </div>
+        <div class="row">
+          <button id="orientationLoadEmbedBtn">Load Embedded Hub</button>
+          <button id="orientationConnectBtn" class="primary">Connect Hub Feed</button>
+          <button id="orientationDisconnectBtn">Disconnect</button>
+        </div>
+        <div class="row">
+          <label for="orientationPeerSelect">Source Device:</label>
+          <select id="orientationPeerSelect" style="flex:1;">
+            <option value="">Auto (latest active)</option>
+          </select>
+        </div>
+        <p id="orientationStatus" style="margin:0.5rem 0 0 0;opacity:0.85;">Idle</p>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Embedded Orientation Scene</h3>
+        <div class="orientation-embed-wrap">
+          <iframe
+            id="orientationEmbedFrame"
+            title="Orientation Hub"
+            referrerpolicy="no-referrer"
+            allow="accelerometer; gyroscope; magnetometer; geolocation; fullscreen"
+          ></iframe>
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Orientation Stream</h3>
+        <div class="stream-grid">
+          <div class="stream-card">
+            <div class="stream-label">Hub State</div>
+            <div id="orientationHubState" class="stream-value">Disconnected</div>
+          </div>
+          <div class="stream-card">
+            <div class="stream-label">Source Telemetry</div>
+            <div id="orientationSourceMeta" class="stream-value">No source selected</div>
+          </div>
+          <div class="stream-card">
+            <div class="stream-label">Command Stream</div>
+            <div id="orientationStreamState" class="stream-value">Paused</div>
+          </div>
+          <div class="stream-card">
+            <div class="stream-label">Last Command</div>
+            <div id="orientationCommandStream" class="stream-value">Waiting for source data...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Orientation Tuneables</h3>
+        <p class="tuneables-note">These settings apply live while orientation streaming is playing.</p>
+
+        <div class="row" style="margin-bottom:0.5rem;">
+          <button id="orientationStreamToggleBtn" class="primary">Play Stream</button>
+          <button id="orientationRecenterBtn">Recenter</button>
+          <button id="orientationResetTuneablesBtn">Reset Tuneables</button>
+        </div>
+
+        <div class="row">
+          <label for="orientationProjectionSelect">Projection Mode:</label>
+          <select id="orientationProjectionSelect" style="flex:1;">
+            <option value="plane" selected>Planar</option>
+            <option value="sphere">Unit Sphere</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="orientationSensitivity">Orientation Sensitivity:</label>
+          <input type="number" id="orientationSensitivity" min="0" max="20" step="0.1" value="1.0" style="width:90px;">
+          <input type="range" id="orientationSensitivityRange" min="0" max="20" step="0.1" value="1.0">
+        </div>
+        <div class="row">
+          <label for="orientationHeadingGain">Heading Gain:</label>
+          <input type="number" id="orientationHeadingGain" min="0" max="20" step="0.1" value="0.3" style="width:90px;">
+          <input type="range" id="orientationHeadingGainRange" min="0" max="20" step="0.1" value="0.3">
+        </div>
+        <div class="row">
+          <label for="orientationYawGain">Yaw Gain (X):</label>
+          <input type="number" id="orientationYawGain" min="0" max="30" step="0.1" value="4.4" style="width:90px;">
+          <input type="range" id="orientationYawGainRange" min="0" max="30" step="0.1" value="4.4">
+        </div>
+        <div class="row">
+          <label for="orientationPitchGain">Pitch Gain (P):</label>
+          <input type="number" id="orientationPitchGain" min="-30" max="30" step="0.1" value="-5.8" style="width:90px;">
+          <input type="range" id="orientationPitchGainRange" min="-30" max="30" step="0.1" value="-5.8">
+        </div>
+        <div class="row">
+          <label for="orientationRollGain">Roll Gain (R):</label>
+          <input type="number" id="orientationRollGain" min="-30" max="30" step="0.1" value="-4.6" style="width:90px;">
+          <input type="range" id="orientationRollGainRange" min="-30" max="30" step="0.1" value="-4.6">
+        </div>
+        <div class="row">
+          <label for="orientationAccelYGain">Lateral Accel Gain (Y):</label>
+          <input type="number" id="orientationAccelYGain" min="0" max="120" step="0.5" value="16.0" style="width:90px;">
+          <input type="range" id="orientationAccelYGainRange" min="0" max="120" step="0.5" value="16.0">
+        </div>
+        <div class="row">
+          <label for="orientationAccelZGain">Forward Accel Gain (Z):</label>
+          <input type="number" id="orientationAccelZGain" min="0" max="120" step="0.5" value="14.0" style="width:90px;">
+          <input type="range" id="orientationAccelZGainRange" min="0" max="120" step="0.5" value="14.0">
+        </div>
+        <div class="row">
+          <label for="orientationAccelHGain">Height Accel Gain (H):</label>
+          <input type="number" id="orientationAccelHGain" min="0" max="120" step="0.5" value="11.0" style="width:90px;">
+          <input type="range" id="orientationAccelHGainRange" min="0" max="120" step="0.5" value="11.0">
+        </div>
+        <div class="row">
+          <label for="orientationSmoothAlpha">Smoothing (alpha):</label>
+          <input type="number" id="orientationSmoothAlpha" min="0.1" max="0.95" step="0.01" value="0.42" style="width:90px;">
+          <input type="range" id="orientationSmoothAlphaRange" min="0.1" max="0.95" step="0.01" value="0.42">
+        </div>
+        <div class="row">
+          <label for="orientationIntervalMs">Send Interval (ms):</label>
+          <input type="number" id="orientationIntervalMs" min="20" max="200" step="1" value="85" style="width:90px;">
+          <input type="range" id="orientationIntervalMsRange" min="20" max="200" step="1" value="85">
+        </div>
+        <div class="row">
+          <label for="orientationSpeed">Speed (S):</label>
+          <input type="number" id="orientationSpeed" min="0" max="10" step="0.1" value="0.8" style="width:90px;">
+          <input type="range" id="orientationSpeedRange" min="0" max="10" step="0.1" value="0.8">
+        </div>
+        <div class="row">
+          <label for="orientationAccel">Acceleration (A):</label>
+          <input type="number" id="orientationAccel" min="0" max="10" step="0.1" value="0.6" style="width:90px;">
+          <input type="range" id="orientationAccelRange" min="0" max="10" step="0.1" value="0.6">
+        </div>
+        <div class="row">
+          <label for="orientationOffsetX">Offset X:</label>
+          <input type="number" id="orientationOffsetX" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="orientationOffsetXRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="orientationOffsetY">Offset Y:</label>
+          <input type="number" id="orientationOffsetY" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="orientationOffsetYRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="orientationOffsetZ">Offset Z:</label>
+          <input type="number" id="orientationOffsetZ" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="orientationOffsetZRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="orientationOffsetH">Offset H:</label>
+          <input type="number" id="orientationOffsetH" min="0" max="70" step="1" value="30" style="width:90px;">
+          <input type="range" id="orientationOffsetHRange" min="0" max="70" step="1" value="30">
+        </div>
+        <div class="row">
+          <label for="orientationOffsetR">Offset R:</label>
+          <input type="number" id="orientationOffsetR" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="orientationOffsetRRange" min="-800" max="800" step="1" value="0">
+        </div>
+        <div class="row">
+          <label for="orientationOffsetP">Offset P:</label>
+          <input type="number" id="orientationOffsetP" min="-800" max="800" step="1" value="0" style="width:90px;">
+          <input type="range" id="orientationOffsetPRange" min="-800" max="800" step="1" value="0">
         </div>
       </div>
     </section>

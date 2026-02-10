@@ -30,6 +30,14 @@ const defaultTuneables = {
   heightGain: 2.5,
   smoothAlpha: 0.45,
   commandIntervalMs: COMMAND_INTERVAL_MS,
+  speed: 0.8,
+  acceleration: 0.6,
+  offsetX: 0,
+  offsetY: 0,
+  offsetZ: 0,
+  offsetH: 30,
+  offsetR: 0,
+  offsetP: 0,
 };
 const tuneables = { ...defaultTuneables };
 
@@ -153,6 +161,22 @@ function setTuneablesToDefaults() {
     ['tuneSmoothAlphaRange', 'smoothAlpha'],
     ['tuneIntervalMs', 'commandIntervalMs'],
     ['tuneIntervalMsRange', 'commandIntervalMs'],
+    ['tuneStreamSpeed', 'speed'],
+    ['tuneStreamSpeedRange', 'speed'],
+    ['tuneStreamAccel', 'acceleration'],
+    ['tuneStreamAccelRange', 'acceleration'],
+    ['tuneOffsetX', 'offsetX'],
+    ['tuneOffsetXRange', 'offsetX'],
+    ['tuneOffsetY', 'offsetY'],
+    ['tuneOffsetYRange', 'offsetY'],
+    ['tuneOffsetZ', 'offsetZ'],
+    ['tuneOffsetZRange', 'offsetZ'],
+    ['tuneOffsetH', 'offsetH'],
+    ['tuneOffsetHRange', 'offsetH'],
+    ['tuneOffsetR', 'offsetR'],
+    ['tuneOffsetRRange', 'offsetR'],
+    ['tuneOffsetP', 'offsetP'],
+    ['tuneOffsetPRange', 'offsetP'],
   ];
 
   tuneableInputs.forEach(([id, key]) => {
@@ -172,6 +196,14 @@ function setupTuneablesUi() {
   bindTuneablePair('tuneRollGain', 'tuneRollGainRange', 'rollGain');
   bindTuneablePair('tuneSmoothAlpha', 'tuneSmoothAlphaRange', 'smoothAlpha');
   bindTuneablePair('tuneIntervalMs', 'tuneIntervalMsRange', 'commandIntervalMs', true);
+  bindTuneablePair('tuneStreamSpeed', 'tuneStreamSpeedRange', 'speed');
+  bindTuneablePair('tuneStreamAccel', 'tuneStreamAccelRange', 'acceleration');
+  bindTuneablePair('tuneOffsetX', 'tuneOffsetXRange', 'offsetX');
+  bindTuneablePair('tuneOffsetY', 'tuneOffsetYRange', 'offsetY');
+  bindTuneablePair('tuneOffsetZ', 'tuneOffsetZRange', 'offsetZ');
+  bindTuneablePair('tuneOffsetH', 'tuneOffsetHRange', 'offsetH', true);
+  bindTuneablePair('tuneOffsetR', 'tuneOffsetRRange', 'offsetR');
+  bindTuneablePair('tuneOffsetP', 'tuneOffsetPRange', 'offsetP');
 
   const streamToggleBtn = document.getElementById('streamToggleBtn');
   if (streamToggleBtn) {
@@ -257,25 +289,16 @@ function buildPoseCommand(transformObj, euler) {
   smoothed.pitch = alpha * pitchMRaw + (1 - alpha) * smoothed.pitch;
   smoothed.height = alpha * heightRaw + (1 - alpha) * smoothed.height;
 
-  const magnitude = Math.max(
-    Math.abs(smoothed.yaw),
-    Math.abs(smoothed.pitch),
-    Math.abs(smoothed.roll),
-    Math.abs(smoothed.lateral),
-    Math.abs(smoothed.frontBack)
-  );
+  const xVal = Math.round(clamp(smoothed.yaw + tuneables.offsetX, -700, 700));
+  const yVal = Math.round(clamp(smoothed.lateral + tuneables.offsetY, -700, 700));
+  const zVal = Math.round(clamp(smoothed.frontBack + tuneables.offsetZ, -700, 700));
+  const hVal = Math.round(clamp(smoothed.height + tuneables.offsetH, 0, 70));
+  const rVal = Math.round(clamp(smoothed.roll + tuneables.offsetR, -700, 700));
+  const pVal = Math.round(clamp(smoothed.pitch + tuneables.offsetP, -700, 700));
+  const sVal = clamp(tuneables.speed, 0, 10);
+  const aVal = clamp(tuneables.acceleration, 0, 10);
 
-  const sDynamic = clamp(2 - (magnitude / 600), 1, 2);
-  const aDynamic = clamp(1.2 - (0.8 * (magnitude / 600)), 0.5, 1.2);
-
-  const xVal = Math.round(clamp(smoothed.yaw, -700, 700));
-  const yVal = Math.round(clamp(smoothed.lateral, -700, 700));
-  const zVal = Math.round(clamp(smoothed.frontBack, -700, 700));
-  const hVal = Math.round(clamp(smoothed.height, 0, 70));
-  const rVal = Math.round(clamp(smoothed.roll, -700, 700));
-  const pVal = Math.round(clamp(smoothed.pitch, -700, 700));
-
-  return `X${xVal},Y${yVal},Z${zVal},H${hVal},S${sDynamic.toFixed(1)},A${aDynamic.toFixed(1)},R${rVal},P${pVal}`;
+  return `X${xVal},Y${yVal},Z${zVal},H${hVal},S${sVal.toFixed(1)},A${aVal.toFixed(1)},R${rVal},P${pVal}`;
 }
 
 function resizeViewport(renderer, camera) {

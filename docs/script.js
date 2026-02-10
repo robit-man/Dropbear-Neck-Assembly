@@ -20,8 +20,9 @@ let socket = null;
 let useWS = false;
 let authenticated = false;
 let suppressCommandDispatch = false;
-const ROUTES = new Set(["connect", "home", "direct", "euler", "head", "quaternion", "headstream", "streams"]);
+const ROUTES = new Set(["connect", "home", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
 let headstreamInitTriggered = false;
+let orientationInitTriggered = false;
 
 // Metrics tracking
 let metrics = {
@@ -234,8 +235,16 @@ function applyRoute(route) {
         headstreamInitTriggered = true;
     }
 
+    if (route === "orientation" && !orientationInitTriggered && typeof window.initOrientationApp === "function") {
+        window.initOrientationApp();
+        orientationInitTriggered = true;
+    }
+
     if (route === "streams") {
         setupStreamConfigUi();
+        hideConnectionModal();
+    }
+    if (route === "orientation") {
         hideConnectionModal();
     }
 }
@@ -1873,14 +1882,14 @@ window.addEventListener('load', async () => {
   } else if (queryConnection.adapterConfigured) {
     // We have adapter URL but no session - show connection modal
     logToConsole("[CONNECT] Adapter URL configured, please authenticate...");
-    if (initialRoute !== "streams") {
+    if (initialRoute !== "streams" && initialRoute !== "orientation") {
       showConnectionModal();
     } else {
       hideConnectionModal();
     }
   } else {
     // Show connection modal on first load
-    if (initialRoute !== "streams") {
+    if (initialRoute !== "streams" && initialRoute !== "orientation") {
       showConnectionModal();
     } else {
       hideConnectionModal();
