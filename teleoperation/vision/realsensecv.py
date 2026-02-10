@@ -67,18 +67,31 @@ class RealsenseCapture:
         self.depth_scale = None
 
     # --------- lifecycle ---------
-    def start(self):
+    def start(self, max_retries=None, initial_backoff=1.0, max_backoff=30.0):
         self.pipeline = rs.pipeline()
-        backoff = 1.0
-        # retry indefinitely with exponential backoff
+        backoff = max(0.1, float(initial_backoff))
+        max_backoff = max(backoff, float(max_backoff))
+        attempts = 0
+
+        # Retry with exponential backoff. If max_retries is set, raise after limit.
         while True:
+            attempts += 1
             try:
                 prof = self.pipeline.start(self.config)
                 break
             except Exception as e:
+                try:
+                    self.pipeline.stop()
+                except Exception:
+                    pass
+                self.pipeline = rs.pipeline()
+                if max_retries is not None and attempts >= int(max_retries):
+                    raise RuntimeError(
+                        f"RealSense start() failed after {attempts} attempts: {e!r}"
+                    ) from e
                 print(f"[RealSense] start() failed: {e!r}, retrying in {backoff:.1f}s...")
                 time.sleep(backoff)
-                backoff = min(backoff * 2, 30.0)
+                backoff = min(backoff * 2, max_backoff)
 
         sensor = prof.get_device().first_depth_sensor()
         self.depth_scale = sensor.get_depth_scale()

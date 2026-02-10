@@ -197,15 +197,19 @@ DEFAULT_REQUIRE_AUTH = True
 DEFAULT_ENABLE_TUNNEL = True
 DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
 
-DEFAULT_DEFAULT_CAMERAS_ENABLED = True
+DEFAULT_DEFAULT_CAMERAS_ENABLED = False
 DEFAULT_CAMERA_DEVICE_GLOB = "/dev/video*"
 DEFAULT_CAMERA_CAPTURE_WIDTH = 1280
 DEFAULT_CAMERA_CAPTURE_HEIGHT = 720
 DEFAULT_CAMERA_CAPTURE_FPS = 30
+DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS = 2.0
+DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_MAX_SECONDS = 20.0
+DEFAULT_DEFAULT_CAMERA_DISCONNECT_RETRY_SECONDS = 0.5
 
 DEFAULT_REALSENSE_ENABLED = True
 DEFAULT_REALSENSE_STREAM_DEPTH = True
 DEFAULT_REALSENSE_STREAM_IR = True
+DEFAULT_REALSENSE_START_ATTEMPTS = 4
 
 DEFAULT_STREAM_MAX_WIDTH = 960
 DEFAULT_STREAM_MAX_HEIGHT = 540
@@ -1288,10 +1292,92 @@ def camera_mode_urls(camera_id):
     }
 
 
+def _video_sysfs_dir(device_path):
+    if os.name == "nt":
+        return None
+    base = os.path.basename(str(device_path))
+    if not re.fullmatch(r"video\d+", base):
+        return None
+    return os.path.join("/sys/class/video4linux", base)
+
+
+def _read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            return fp.read().strip()
+    except OSError:
+        return ""
+
+
+def _video_device_label(device_path):
+    sysfs_dir = _video_sysfs_dir(device_path)
+    if not sysfs_dir:
+        return ""
+    return _read_text(os.path.join(sysfs_dir, "name"))
+
+
+def _is_realsense_video_node(device_path):
+    label = _video_device_label(device_path).lower()
+    return "realsense" in label
+
+
+def _is_capture_capable_linux_video(device_path):
+    if os.name == "nt":
+        return True
+
+    sysfs_dir = _video_sysfs_dir(device_path)
+    if not sysfs_dir:
+        return None
+
+    cap_bits = 0
+    for relative in ("device/capabilities", "capabilities"):
+        raw = _read_text(os.path.join(sysfs_dir, relative))
+        if not raw:
+            continue
+        try:
+            cap_bits = int(raw, 16)
+            break
+        except ValueError:
+            continue
+
+    if cap_bits == 0:
+        return None
+
+    # V4L2_CAP_VIDEO_CAPTURE and V4L2_CAP_VIDEO_CAPTURE_MPLANE.
+    capture_mask = 0x00000001 | 0x00001000
+    return (cap_bits & capture_mask) != 0
+
+
 def discover_default_devices(device_glob):
     if os.name == "nt":
         return []
-    return sorted(glob.glob(device_glob))
+
+    candidates = sorted(glob.glob(device_glob))
+    filtered = []
+    skipped_realsense = 0
+    skipped_not_capture = 0
+
+    for device in candidates:
+        if not os.path.exists(device):
+            continue
+
+        if _is_realsense_video_node(device):
+            skipped_realsense += 1
+            continue
+
+        capture_capable = _is_capture_capable_linux_video(device)
+        if capture_capable is not True:
+            skipped_not_capture += 1
+            continue
+
+        filtered.append(device)
+
+    if skipped_realsense:
+        log(f"[INFO] Ignored {skipped_realsense} RealSense V4L2 node(s) for default camera workers")
+    if skipped_not_capture:
+        log(f"[INFO] Ignored {skipped_not_capture} non-capture V4L2 node(s)")
+
+    return filtered
 
 
 def open_default_camera(device_path, width, height, fps):
@@ -1319,8 +1405,32 @@ def open_default_camera(device_path, width, height, fps):
     return None
 
 
+def probe_default_camera(device_path):
+    cap = open_default_camera(
+        device_path,
+        source_options["camera_capture_width"],
+        source_options["camera_capture_height"],
+        source_options["camera_capture_fps"],
+    )
+    if cap is None:
+        return False
+
+    try:
+        for _ in range(6):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return True
+            time.sleep(0.05)
+        return False
+    finally:
+        cap.release()
+
+
 def default_camera_worker(feed, device_path):
     publish_interval = 1.0 / float(max(1, int(stream_options["target_fps"])))
+    open_failures = 0
+    open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
+
     while service_running.is_set():
         cap = open_default_camera(
             device_path,
@@ -1329,19 +1439,36 @@ def default_camera_worker(feed, device_path):
             source_options["camera_capture_fps"],
         )
         if cap is None:
+            open_failures += 1
             feed.mark_error(f"Unable to open {device_path}")
-            log(f"[WARN] Failed to open camera {device_path}; retrying...")
-            time.sleep(1.0)
+            if open_failures in (1, 3) or open_failures % 10 == 0:
+                log(
+                    f"[WARN] Failed to open camera {device_path}; "
+                    f"retrying in {open_retry_delay:.1f}s (failure {open_failures})"
+                )
+            time.sleep(open_retry_delay)
+            open_retry_delay = min(
+                DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_MAX_SECONDS,
+                open_retry_delay * 1.6,
+            )
             continue
 
+        open_failures = 0
+        open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
         log(f"[OK] Camera worker started: {device_path}")
         next_emit = 0.0
+        read_failures = 0
         while service_running.is_set():
             ok, frame = cap.read()
             if not ok or frame is None:
+                read_failures += 1
+                if read_failures < 3:
+                    time.sleep(0.05)
+                    continue
                 feed.mark_error(f"Read failure on {device_path}")
                 log(f"[WARN] Camera read failed on {device_path}; reconnecting")
                 break
+            read_failures = 0
             now = time.time()
             if now < next_emit:
                 continue
@@ -1349,9 +1476,18 @@ def default_camera_worker(feed, device_path):
             feed.publish(frame, stream_options)
 
         cap.release()
-        time.sleep(0.15)
+        time.sleep(DEFAULT_DEFAULT_CAMERA_DISCONNECT_RETRY_SECONDS)
 
     feed.mark_offline()
+
+
+def _is_realsense_ir_profile_error(exc):
+    text = str(exc).lower()
+    return (
+        "failed to resolve the request" in text
+        or ("y8i" in text and "y8" in text)
+        or ("infrared" in text and "format" in text)
+    )
 
 
 def realsense_worker(rs_ids):
@@ -1360,18 +1496,33 @@ def realsense_worker(rs_ids):
 
     publish_interval = 1.0 / float(max(1, int(stream_options["target_fps"])))
     include_ir = bool(source_options["realsense_stream_ir"])
+    start_retry_delay = 1.0
+
     while service_running.is_set():
         cap = RealsenseCapture(stream_ir=include_ir)
         try:
-            cap.start()
+            cap.start(max_retries=DEFAULT_REALSENSE_START_ATTEMPTS)
             log(f"[OK] RealSense capture started (ir={'on' if include_ir else 'off'})")
+            start_retry_delay = 1.0
         except Exception as exc:
-            log(f"[WARN] RealSense start failed: {exc}")
+            if include_ir and _is_realsense_ir_profile_error(exc):
+                include_ir = False
+                source_options["realsense_stream_ir"] = False
+                log("[WARN] RealSense IR profile unsupported; continuing with color/depth only")
+                for feed_id in (rs_ids.get("ir_left"), rs_ids.get("ir_right")):
+                    feed = get_feed(feed_id) if feed_id else None
+                    if feed:
+                        feed.mark_error("IR disabled: unsupported stream profile")
+                time.sleep(0.25)
+                continue
+
+            log(f"[WARN] RealSense start failed: {exc}; retrying in {start_retry_delay:.1f}s")
             for feed_id in rs_ids.values():
                 feed = get_feed(feed_id)
                 if feed:
                     feed.mark_error(f"RealSense start failed: {exc}")
-            time.sleep(1.0)
+            time.sleep(start_retry_delay)
+            start_retry_delay = min(10.0, start_retry_delay * 1.8)
             continue
 
         next_emit = 0.0
@@ -1429,7 +1580,7 @@ def realsense_worker(rs_ids):
             cap.release()
         except Exception:
             pass
-        time.sleep(0.15)
+        time.sleep(0.25)
 
     for feed_id in rs_ids.values():
         feed = get_feed(feed_id)
@@ -1441,7 +1592,16 @@ def initialize_camera_workers():
     service_running.set()
     if source_options["default_cameras_enabled"]:
         devices = discover_default_devices(source_options["camera_device_glob"])
-        for index, device in enumerate(devices):
+        available_devices = []
+        for device in devices:
+            if probe_default_camera(device):
+                available_devices.append(device)
+            else:
+                log(f"[INFO] Skipping default camera {device}: failed probe open/read")
+        if not available_devices:
+            log("[INFO] No default V4L2 camera devices passed probing")
+
+        for index, device in enumerate(available_devices):
             cam_id = f"default_{index}"
             feed = register_feed(cam_id, f"Default Camera ({device})")
             thread = threading.Thread(target=default_camera_worker, args=(feed, device), daemon=True)
