@@ -765,6 +765,7 @@ const cameraPreview = {
   monitorInFlight: false,
 };
 let cameraFeedPollTimer = null;
+let cameraFeedRefreshInFlight = false;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
 let pinnedPreviewState = {
@@ -1092,8 +1093,24 @@ function stopCameraPreviewMonitor() {
   }
 }
 
+function stopCameraFeedPolling() {
+  if (cameraFeedPollTimer) {
+    clearInterval(cameraFeedPollTimer);
+    cameraFeedPollTimer = null;
+  }
+}
+
+function startCameraFeedPolling() {
+  if (cameraFeedPollTimer) {
+    return;
+  }
+  cameraFeedPollTimer = setInterval(() => {
+    refreshCameraFeeds({ silent: true, suppressErrors: true }).catch(() => {});
+  }, CAMERA_FEED_POLL_INTERVAL_MS);
+}
+
 async function monitorCameraPreviewHealth() {
-  if (!cameraPreview.desired || !cameraPreview.activeCameraId || !cameraRouterBaseUrl || !cameraRouterSessionKey) {
+  if (!cameraPreview.desired || !cameraRouterBaseUrl || !cameraRouterSessionKey) {
     return;
   }
   if (cameraPreview.monitorInFlight) {
@@ -1112,7 +1129,12 @@ async function monitorCameraPreviewHealth() {
     }
 
     cameraPreview.healthFailStreak = 0;
-    const selected = cameraRouterFeeds.find((feed) => feed.id === cameraPreview.activeCameraId) || null;
+    const watchFeedId =
+      cameraPreview.targetCameraId ||
+      cameraPreview.activeCameraId ||
+      localStorage.getItem("cameraRouterSelectedFeed") ||
+      "";
+    const selected = cameraRouterFeeds.find((feed) => feed.id === watchFeedId) || null;
     if (!selected || !selected.online) {
       cameraPreview.zeroClientStreak += 1;
       if (cameraPreview.zeroClientStreak >= 2) {
@@ -1149,22 +1171,32 @@ function scheduleCameraPreviewRestart(reason = "stream error") {
   if (!cameraPreview.desired || cameraPreview.restartTimer) {
     return;
   }
+  const restartFeedId =
+    cameraPreview.targetCameraId ||
+    cameraPreview.activeCameraId ||
+    localStorage.getItem("cameraRouterSelectedFeed") ||
+    "";
   cameraPreview.restartAttempts += 1;
   const delayMs = Math.min(10000, 700 * Math.pow(2, Math.max(0, cameraPreview.restartAttempts - 1)));
   const secs = (delayMs / 1000).toFixed(1);
-  setStreamStatus(`Preview interrupted (${reason}). Reconnecting in ${secs}s...`, true);
+  setStreamStatus(`Preview interrupted (${reason}). Reconnecting ${restartFeedId || "feed"} in ${secs}s...`, true);
   updateMetrics();
   cameraPreview.restartTimer = setTimeout(() => {
     cameraPreview.restartTimer = null;
     if (!cameraPreview.desired) {
       return;
     }
-    startCameraPreview({ autoRestart: true, reason }).catch(() => {});
+    startCameraPreview({ autoRestart: true, reason, cameraId: restartFeedId }).catch(() => {});
   }, delayMs);
 }
 
 function stopCameraPreview(options = {}) {
   const keepDesired = !!options.keepDesired;
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const selectedFeed = feedSelect ? (feedSelect.value || "") : "";
+  if (selectedFeed) {
+    cameraPreview.targetCameraId = selectedFeed;
+  }
   if (cameraPreview.jpegTimer) {
     clearInterval(cameraPreview.jpegTimer);
     cameraPreview.jpegTimer = null;
@@ -1297,6 +1329,11 @@ function renderCameraFeedOptions() {
     return;
   }
 
+  const previousValue =
+    feedSelect.value ||
+    cameraPreview.targetCameraId ||
+    localStorage.getItem("cameraRouterSelectedFeed") ||
+    "";
   feedSelect.innerHTML = "";
   cameraRouterFeeds.forEach((feed) => {
     const opt = document.createElement("option");
@@ -1306,13 +1343,13 @@ function renderCameraFeedOptions() {
   });
 
   if (cameraRouterFeeds.length > 0) {
-    const savedFeed = localStorage.getItem("cameraRouterSelectedFeed") || "";
-    if (savedFeed && cameraRouterFeeds.some((feed) => feed.id === savedFeed)) {
-      feedSelect.value = savedFeed;
+    if (previousValue && cameraRouterFeeds.some((feed) => feed.id === previousValue)) {
+      feedSelect.value = previousValue;
     } else if (!feedSelect.value) {
       feedSelect.value = cameraRouterFeeds[0].id;
     }
     localStorage.setItem("cameraRouterSelectedFeed", feedSelect.value);
+    cameraPreview.targetCameraId = feedSelect.value || cameraPreview.targetCameraId;
   }
 
   feedList.innerHTML = "";
@@ -1327,12 +1364,17 @@ function renderCameraFeedOptions() {
 async function refreshCameraFeeds(options = {}) {
   const silent = !!options.silent;
   const suppressErrors = !!options.suppressErrors;
+  if (cameraFeedRefreshInFlight) {
+    updateMetrics();
+    return cameraRouterFeeds.length > 0;
+  }
   if (!cameraRouterBaseUrl) {
     if (!suppressErrors) {
       setStreamStatus("Set camera router URL first", true);
     }
     return false;
   }
+  cameraFeedRefreshInFlight = true;
   try {
     const response = await cameraRouterFetch("/list", {}, true);
     const data = await response.json();
@@ -1366,6 +1408,8 @@ async function refreshCameraFeeds(options = {}) {
       setStreamStatus(`List error: ${err}`, true);
     }
     return false;
+  } finally {
+    cameraFeedRefreshInFlight = false;
   }
 }
 
@@ -1403,6 +1447,7 @@ async function startMjpegPreview(cameraId) {
   imageEl.onabort = imageEl.onerror;
   imageEl.src = cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
   cameraPreview.activeCameraId = cameraId;
+  cameraPreview.targetCameraId = cameraId;
   cameraPreview.activeMode = STREAM_MODE_MJPEG;
   setPinButtonState();
   updateMetrics();
@@ -1479,7 +1524,13 @@ async function startCameraPreview(options = {}) {
   if (!feedSelect || !modeSelect) {
     return;
   }
-  const cameraId = requestedCameraId || feedSelect.value || cameraPreview.activeCameraId;
+  const cameraId =
+    requestedCameraId ||
+    cameraPreview.targetCameraId ||
+    feedSelect.value ||
+    cameraPreview.activeCameraId ||
+    localStorage.getItem("cameraRouterSelectedFeed") ||
+    "";
   if (requestedCameraId && feedSelect.value !== requestedCameraId) {
     feedSelect.value = requestedCameraId;
   }
@@ -1490,7 +1541,9 @@ async function startCameraPreview(options = {}) {
   }
   if (!cameraId) {
     setStreamStatus("Select a feed first", true);
-    if (!autoRestart) {
+    if (autoRestart) {
+      scheduleCameraPreviewRestart("waiting for feed selection");
+    } else {
       cameraPreview.desired = false;
       clearCameraPreviewRestartTimer();
       stopCameraPreviewMonitor();
@@ -1501,6 +1554,7 @@ async function startCameraPreview(options = {}) {
 
   localStorage.setItem("cameraRouterSelectedFeed", cameraId);
   localStorage.setItem("cameraRouterSelectedMode", mode);
+  cameraPreview.targetCameraId = cameraId;
 
   cameraPreview.desired = true;
   clearCameraPreviewRestartTimer();
@@ -1536,6 +1590,7 @@ function setupStreamConfigUi() {
   const modeSelect = document.getElementById("cameraModeSelect");
   const feedSelect = document.getElementById("cameraFeedSelect");
   initializePinnedPreviewUi();
+  startCameraFeedPolling();
 
   if (baseInput) {
     baseInput.value = cameraRouterBaseUrl;
@@ -1548,6 +1603,9 @@ function setupStreamConfigUi() {
   }
   if (passInput) {
     passInput.value = cameraRouterPassword;
+  }
+  if (!cameraPreview.targetCameraId) {
+    cameraPreview.targetCameraId = localStorage.getItem("cameraRouterSelectedFeed") || "";
   }
   if (modeSelect) {
     modeSelect.value = STREAM_MODE_MJPEG;
@@ -1573,6 +1631,7 @@ function setupStreamConfigUi() {
     feedSelect.addEventListener("change", () => {
       const nextFeed = feedSelect.value || "";
       localStorage.setItem("cameraRouterSelectedFeed", nextFeed);
+      cameraPreview.targetCameraId = nextFeed;
       if (cameraPreview.desired && nextFeed) {
         startCameraPreview({ autoRestart: true, cameraId: nextFeed, reason: "feed change" }).catch(() => {});
       } else {
