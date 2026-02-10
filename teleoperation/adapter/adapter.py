@@ -180,14 +180,46 @@ def log(message):
         print(f"[{datetime.datetime.now()}] {message}")
 
 # --- Command Validation ---
+def _normalize_command_token(cmd):
+    raw = str(cmd).strip().lower()
+    if not raw:
+        return ""
+    normalized = re.sub(r"[^a-z0-9]+", "_", raw)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
 def _normalized_home_command(cmd):
-    normalized = cmd.strip().lower()
-    if normalized in ("home", "home_soft", "home_brute"):
-        return normalized
+    normalized = _normalize_command_token(cmd)
+    if not normalized:
+        return None
+
+    # Keep "home" mapped to the brute sequence for backward compatibility.
+    brute_aliases = {
+        "home",
+        "home_brute",
+        "homebrute",
+        "brute_home",
+        "brutehome",
+    }
+    soft_aliases = {
+        "home_soft",
+        "homesoft",
+        "soft_home",
+        "softhome",
+    }
+
+    if normalized in brute_aliases:
+        return "home_brute"
+    if normalized in soft_aliases:
+        return "home_soft"
     return None
 
 
 def validate_command(cmd):
+    cmd = str(cmd).strip()
+    if not cmd:
+        return False
     if _normalized_home_command(cmd):
         return True
     seen = set()
@@ -714,6 +746,7 @@ def _build_adapter_config_spec():
 def process_command(cmd, ser):
     log(f"Received command: {cmd}")
     if not validate_command(cmd):
+        log(f"Rejected invalid command: {repr(cmd)}")
         return {"status":"error","message":"Invalid command"}
     merge_into_state(cmd)
 

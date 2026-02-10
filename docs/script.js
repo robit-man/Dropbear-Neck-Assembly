@@ -40,7 +40,10 @@ let metrics = {
 
 function getSelectedFeedStatus() {
     const feedSelect = document.getElementById("cameraFeedSelect");
-    const preferredId = cameraPreview.activeCameraId || (feedSelect ? feedSelect.value : "");
+    const preferredId =
+      cameraPreview.targetCameraId ||
+      cameraPreview.activeCameraId ||
+      (feedSelect ? feedSelect.value : "");
     if (!preferredId) {
         return null;
     }
@@ -49,7 +52,7 @@ function getSelectedFeedStatus() {
 
 function updateVideoMetrics() {
   const feed = getSelectedFeedStatus();
-  if (!cameraPreview.desired) {
+  if (!cameraPreview.desired && !feed) {
     metrics.video.state = "Idle";
     metrics.video.stats = "-- fps | -- kbps | -- clients";
     metrics.video.quality = "neutral";
@@ -63,7 +66,10 @@ function updateVideoMetrics() {
     return;
   }
 
-  const feedId = cameraPreview.activeCameraId || (feed ? feed.id : "");
+  const feedId =
+    cameraPreview.targetCameraId ||
+    cameraPreview.activeCameraId ||
+    (feed ? feed.id : "");
     if (cameraPreview.restartTimer) {
         metrics.video.state = feedId ? `Reconnecting ${feedId}` : "Reconnecting";
         metrics.video.stats = "-- fps | -- kbps | -- clients";
@@ -86,9 +92,12 @@ function updateVideoMetrics() {
     if (!feed.online) {
         metrics.video.state = `Offline ${feed.id}`;
         metrics.video.quality = "error";
-    } else if (fps > 1 && clients > 0) {
+    } else if (fps > 1 && clients > 0 && cameraPreview.desired) {
         metrics.video.state = `Live ${feed.id}`;
         metrics.video.quality = "good";
+    } else if (!cameraPreview.desired) {
+        metrics.video.state = `Selected ${feed.id}`;
+        metrics.video.quality = "neutral";
     } else {
         metrics.video.state = `Degraded ${feed.id}`;
         metrics.video.quality = "warning";
@@ -720,6 +729,7 @@ function parseConnectionFromQuery() {
 const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
 const STREAM_MODE_MJPEG = "mjpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
+const CAMERA_FEED_POLL_INTERVAL_MS = 1500;
 const MIN_PINNED_PREVIEW_WIDTH = 180;
 const MIN_PINNED_PREVIEW_HEIGHT = 105;
 const DEFAULT_PINNED_PREVIEW_STATE = {
@@ -744,6 +754,7 @@ const cameraPreview = {
   jpegTimer: null,
   peerConnection: null,
   activeCameraId: "",
+  targetCameraId: localStorage.getItem("cameraRouterSelectedFeed") || "",
   activeMode: STREAM_MODE_MJPEG,
   desired: false,
   restartTimer: null,
@@ -753,6 +764,7 @@ const cameraPreview = {
   zeroClientStreak: 0,
   monitorInFlight: false,
 };
+let cameraFeedPollTimer = null;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
 let pinnedPreviewState = {
