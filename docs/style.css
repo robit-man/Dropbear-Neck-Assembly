@@ -461,7 +461,6 @@ h3 {
     border-right: 2px solid var(--accent);
     border-bottom: 2px solid var(--accent);
     border-bottom-right-radius: 8px;
-    background: rgba(0, 0, 0, 0.45);
     cursor: nwse-resize;
 }
 
