@@ -2064,50 +2064,64 @@ headstream_page = r"""
 <!DOCTYPE html>
 <html lang="en">
   <head>
-    <title>Head Pose Command Stream</title>
+    <title>Morphtarget Stream</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
-    <!-- Import fonts and basic styles -->
     %%CSS%%
     %%JS%%
     <style>
-      @import url('https://fonts.googleapis.com/css2?family=Roboto+Mono&display=swap');
-      body {
-        background: #111;
-        color: #FFFAFA;
-        font-family: 'Roboto Mono', monospace;
-        margin: 0;
-        padding: 0;
-      }
-      .container {
-        width: 1024px;
-        margin: 0 auto;
-        padding: 1rem;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-      }
-      #commandStream {
-        border: 1px solid #FFFAFA;
-        padding: 0.5rem;
-      }
-      #canvasContainer {
-        position: fixed;
-        left: 0;
-        top: 0;
+      #morphCanvasWrap {
         width: 100%;
-        height: 480px;
-        z-index: -2;
+        height: 420px;
+        border: 2px solid var(--border-light);
+        border-radius: 0.5rem;
+        overflow: hidden;
+        background: #101010;
       }
-      canvas {
+
+      #morphCanvasWrap canvas {
         width: 100%;
         height: 100%;
         display: block;
-        filter: saturate(0) brightness(0.8) contrast(1) invert(0);
+      }
+
+      .stream-grid {
+        display: grid;
+        grid-template-columns: 220px 1fr;
+        gap: 0.75rem;
+        margin-top: 0.75rem;
+      }
+
+      .stream-card {
+        background: var(--bg-secondary);
+        border: 2px solid var(--border-light);
+        border-radius: 0.5rem;
+        padding: 0.65rem 0.75rem;
+      }
+
+      .stream-label {
+        font-size: 0.75rem;
+        opacity: 0.75;
+        margin-bottom: 0.35rem;
+      }
+
+      .stream-value {
+        font-family: 'Roboto Mono', monospace;
+        color: var(--accent);
+        word-break: break-word;
+      }
+
+      @media (max-width: 900px) {
+        #morphCanvasWrap {
+          height: 300px;
+        }
+
+        .stream-grid {
+          grid-template-columns: 1fr;
+        }
       }
     </style>
-    <!-- Importmap for three.js and its addons from CDN -->
     <script type="importmap">
     {
       "imports": {
@@ -2118,248 +2132,315 @@ headstream_page = r"""
     </script>
   </head>
   <body>
-    <div class="container">
-      %%NAV%%
-      <h1>Head Pose Command Stream</h1>
-      <div id="commandStream">Waiting for head pose...</div>
-      <div id="canvasContainer"></div>
+    <div id="connectionModal" class="modal">
+      <div class="modal-content">
+        <div class="modal-header">Reconnect to Adapter</div>
+        <div class="modal-section">
+          <h3 style="margin-top:0;">Authentication</h3>
+          <div class="column">
+            <label for="passwordInput">Password:</label>
+            <input type="password" id="passwordInput" placeholder="Enter adapter password">
+          </div>
+        </div>
+        <div class="modal-section">
+          <h3 style="margin-top:0;">Adapter Endpoints</h3>
+          <div class="column">
+            <label for="httpUrlInput">HTTP URL:</label>
+            <input type="text" id="httpUrlInput">
+
+            <label for="wsUrlInput">WebSocket URL (optional):</label>
+            <input type="text" id="wsUrlInput">
+          </div>
+          <button onclick="fetchTunnelUrl()" style="width:100%;margin-top:0.5rem;">
+            Fill Endpoints From Tunnel URL
+          </button>
+        </div>
+        <button onclick="connectToAdapter()" class="primary" style="width:100%;padding:1rem;">
+          Connect
+        </button>
+      </div>
     </div>
+
+    <div class="container">
+      <div class="metrics-bar">
+        <div class="metric">
+          <div class="metric-label">Connection</div>
+          <div id="metricStatus" class="metric-value">Checking...</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Latency</div>
+          <div id="metricLatency" class="metric-value">--</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Data Rate</div>
+          <div id="metricRate" class="metric-value">0 cmd/s</div>
+        </div>
+        <div style="margin-left:auto;">
+          <button onclick="showConnectionModal()" style="padding:0.25rem 0.75rem;font-size:0.85rem;">
+            Settings
+          </button>
+        </div>
+      </div>
+
+      %%NAV%%
+      <h2>Morphtarget</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Head Pose Command Stream</h3>
+        <p style="opacity:0.75;margin-top:0;">
+          Track your face and stream X/Y/Z/H/S/A/R/P commands to the adapter.
+        </p>
+
+        <div id="morphCanvasWrap"></div>
+
+        <div class="stream-grid">
+          <div class="stream-card">
+            <div class="stream-label">Stream Status</div>
+            <div id="streamStatus" class="stream-value">Initializing...</div>
+          </div>
+          <div class="stream-card">
+            <div class="stream-label">Last Command</div>
+            <div id="commandStream" class="stream-value">Waiting for head pose...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <footer id="console"></footer>
+
     <script type="module">
       import * as THREE from 'three';
       import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
       import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
       import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
       import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
-      
-      // Import MediaPipe tasks-vision from CDN
       import vision from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0';
-      const { FaceLandmarker, FilesetResolver } = vision;
-      
-      // Setup renderer, scene, and camera (matching the example)
-      const renderer = new THREE.WebGLRenderer({ antialias: true });
-      renderer.setPixelRatio(window.devicePixelRatio);
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      document.getElementById('canvasContainer').appendChild(renderer.domElement);
-      
-      // Do not flip the entire sceneonly mirror the video texture.
-      const scene = new THREE.Scene();
-      
-      // Camera: 60 fov, near=1, far=100, positioned at z=3.8 (per your settings)
-      const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 100);
-      camera.position.z = 3.8;
-      
-      const controls = new OrbitControls(camera, renderer.domElement);
-      controls.enableZoom = false;
-      controls.enableRotate = false;
-      controls.enablePan = false;
-      
-      // Create a group to hold the face model and receive transformation updates from MediaPipe
-      const grpTransform = new THREE.Group();
-      grpTransform.name = 'grp_transform';
-      scene.add(grpTransform);
-      
-      // Create a video element for the webcam stream
-      const video = document.createElement('video');
-      video.autoplay = true;
-      video.playsInline = true;
 
-      // Check if getUserMedia is available
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
-          .then(stream => {
-            video.srcObject = stream;
-            video.play();
-          })
-          .catch(err => {
-            console.error('Camera error:', err);
-            alert('Camera access denied or not available. Please allow camera access and refresh.');
-          });
-      } else {
-        console.error('getUserMedia not supported');
-        alert('Your browser does not support camera access. Please use a modern browser like Chrome, Firefox, or Edge.');
+      const { FaceLandmarker, FilesetResolver } = vision;
+      const streamStatusEl = document.getElementById('streamStatus');
+      const commandStreamEl = document.getElementById('commandStream');
+      const viewport = document.getElementById('morphCanvasWrap');
+
+      const COMMAND_INTERVAL_MS = 50;
+      let lastCommandSentAt = 0;
+      let lastCommandSent = "";
+      let faceLandmarker = null;
+      let videoReady = false;
+      let smoothed = null;
+
+      function setStreamStatus(message, error = false) {
+        streamStatusEl.textContent = message;
+        streamStatusEl.style.color = error ? '#ff4444' : 'var(--accent)';
       }
-      
-      // Create a video texture from the webcam and add it as a plane.
-      // The plane is defined as 11 and will be scaled each frame to preserve the aspect ratio.
-      const videoTexture = new THREE.VideoTexture(video);
-      const videoMaterial = new THREE.MeshBasicMaterial({ map: videoTexture, depthWrite: false });
-      const videoGeometry = new THREE.PlaneGeometry(1, 1);
-      const videoMesh = new THREE.Mesh(videoGeometry, videoMaterial);
-      // Mirror the video texture by flipping its X scale
-      videoMesh.scale.x = -1;
-      // (If you want the video to be visible, you can add it to the scene; otherwise, it can remain hidden.)
-      // scene.add(videoMesh);
-      
-      // Load the Face Cap model (facecap.glb) from the official three.js examples CDN.
-      // In the original example, the face mesh is the first child,
-      // and the head (named "mesh_2") along with the eyes ("eyeLeft" and "eyeRight") are extracted.
-      let face = null, eyeL = null, eyeR = null;
-      const gltfLoader = new GLTFLoader();
-      const ktx2Loader = new KTX2Loader()
-          .setTranscoderPath('https://unpkg.com/three@0.152.2/examples/jsm/libs/basis/')
-          .detectSupport(renderer);
-      gltfLoader.setKTX2Loader(ktx2Loader);
-      gltfLoader.setMeshoptDecoder(MeshoptDecoder);
-      gltfLoader.load(
-        'https://threejs.org/examples/models/gltf/facecap.glb',
-        (gltf) => {
-          const mesh = gltf.scene.children[0];
-          // Attach the loaded mesh to our transformation group.
-          grpTransform.add(mesh);
-          const headMesh = mesh.getObjectByName('mesh_2');
-          headMesh.material = new THREE.MeshNormalMaterial();
-          face = headMesh;
-          eyeL = mesh.getObjectByName('eyeLeft');
-          eyeR = mesh.getObjectByName('eyeRight');
-        },
-        undefined,
-        (error) => { console.error('Error loading facecap model:', error); }
-      );
-      
-      // Setup MediaPipe FaceLandmarker
-      const filesetResolver = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
-      );
-      const faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
-          delegate: 'GPU'
-        },
-        runningMode: 'VIDEO',
-        numFaces: 1,
-        outputFaceBlendshapes: true,
-        outputFacialTransformationMatrixes: true
-      });
-      
-      // Function to send head-pose commands using the connection system
-      function sendCommandToNeck(commandStr) {
-        // Use the sendCommand function from base_js which handles adapter connection
-        if (typeof sendCommand === 'function') {
-          sendCommand(commandStr);
-        } else {
-          console.warn('sendCommand not available, command not sent:', commandStr);
-        }
-      }
-      
-      // Helper function to clamp a value between min and max
+
       function clamp(value, min, max) {
         return Math.max(min, Math.min(max, value));
       }
-      
-      // Create an Object3D to hold the MediaPipe transform
-      const transformObj = new THREE.Object3D();
-      
-      function animate() {
-        requestAnimationFrame(animate);
-        
-        if (video.readyState >= video.HAVE_ENOUGH_DATA) {
-          const now = Date.now();
-          const results = faceLandmarker.detectForVideo(video, now);
-          if (results.facialTransformationMatrixes.length > 0) {
-            const matrixArray = results.facialTransformationMatrixes[0].data;
-            transformObj.matrix.fromArray(matrixArray);
-            transformObj.matrix.decompose(transformObj.position, transformObj.quaternion, transformObj.scale);
-            // Convert the quaternion to Euler angles (using YXZ order)
-            const euler = new THREE.Euler().setFromQuaternion(transformObj.quaternion, 'YXZ');
-            const grp = scene.getObjectByName('grp_transform');
-            // Swap the front/back and up/down translations:
-            // Up/down now comes from transformObj.position.z and front/back from transformObj.position.y.
-            grp.position.x = transformObj.position.x / 10;
-            grp.position.y = transformObj.position.y / 10;  // Up/down now comes from position.y
-            grp.position.z = - transformObj.position.z / -10 + 4;     // Front/back now comes from position.z
-           
-            grp.rotation.x = euler.x;
-            grp.rotation.y = euler.y;
-            grp.rotation.z = euler.z;
-                   // Generate and send the head-pose command string using smoothing and dynamic S/A adjustments.
 
-            // 1. Compute raw values.
-            const rawLateral = -transformObj.position.x;
-            const rawHeight = transformObj.position.y + 30;
-            const rawFrontBack = (-transformObj.position.z - 50) * 1.5;
-            const rawYaw = THREE.MathUtils.radToDeg(euler.y);
-            const rawPitch = THREE.MathUtils.radToDeg(euler.x);
-            const rawRoll = THREE.MathUtils.radToDeg(euler.z);
-            
-            const yawM_raw = rawYaw * 18;
-            const lateralM_raw = rawLateral * 15;
-            const frontBackM_raw = rawFrontBack * 10;
-            const rollM_raw = rawRoll * -25;
-            const pitchM_raw = rawPitch * -30;
-            
-            // 2. Smooth the values using an exponential moving average.
-            // Use static variables (declared globally or as properties) to retain previous smoothed values.
-            if (typeof smoothedYawM === 'undefined') {
-                var smoothedYawM = yawM_raw;
-                var smoothedLateralM = lateralM_raw;
-                var smoothedFrontBackM = frontBackM_raw;
-                var smoothedRollM = rollM_raw;
-                var smoothedPitchM = pitchM_raw;
-                var smoothedHeight = rawHeight;
-            }
-            const alpha = 0.8; // Smoothing factor
-            smoothedYawM = alpha * yawM_raw + (1 - alpha) * smoothedYawM;
-            smoothedLateralM = alpha * lateralM_raw + (1 - alpha) * smoothedLateralM;
-            smoothedFrontBackM = alpha * frontBackM_raw + (1 - alpha) * smoothedFrontBackM;
-            smoothedRollM = alpha * rollM_raw + (1 - alpha) * smoothedRollM;
-            smoothedPitchM = alpha * pitchM_raw + (1 - alpha) * smoothedPitchM;
-            smoothedHeight = alpha * rawHeight + (1 - alpha) * smoothedHeight;
-            
-            // 3. Clamp the angular values.
-            const yawM_clamped = clamp(smoothedYawM, -550, 550);
-            const pitchM_clamped = clamp(smoothedPitchM, -600, 600);
-            const rollM_clamped = clamp(smoothedRollM, -700, 700);
-            
-            // Use the smoothed lateral, front/back, and height without extra clamping.
-            const lateralM_smoothed = smoothedLateralM;
-            const frontBackM_smoothed = smoothedFrontBackM;
-            const height_smoothed = smoothedHeight;
-            
-            // 4. Dynamically compute S and A multipliers based on the magnitude of the control values.
-            // Compute a magnitude from the smoothed values.
-            const mag = Math.max(
-              Math.abs(smoothedYawM),
-              Math.abs(smoothedPitchM),
-              Math.abs(smoothedRollM),
-              Math.abs(smoothedLateralM),
-              Math.abs(smoothedFrontBackM)
-            );
-            // When mag is 0: S=2, A=5; when mag is 600: S=0.5, A=1 (linear interpolation).
-            const S_dynamic = 2 - (1 * (mag / 600));
-            const A_dynamic = 5 - (3 * (mag / 600));
-            const S_final = clamp(S_dynamic, 1, 2);
-            const A_final = clamp(A_dynamic, 2, 6);
-            
-            // 5. Form the command string with the computed values.
-            const commandStr = "X" + yawM_clamped.toFixed(1) +
-                               ",Y" + lateralM_smoothed.toFixed(1) +
-                               ",Z" + frontBackM_smoothed.toFixed(1) +
-                               ",H" + height_smoothed.toFixed(1) +
-                               ",S" + S_final.toFixed(1) + ",A" + A_final.toFixed(1) +
-                               ",R" + rollM_clamped.toFixed(1) +
-                               ",P" + pitchM_clamped.toFixed(1);
-            document.getElementById('commandStream').textContent = commandStr;
-            sendCommandToNeck(commandStr);  
-            }
-          // Update the video mesh scale based on the actual video dimensions (to preserve aspect ratio)
-          if (video.videoWidth && video.videoHeight) {
-            // Ensure the X scale remains negative to keep the video mirrored.
-            videoMesh.scale.x = - (video.videoWidth / 100);
-            videoMesh.scale.y = video.videoHeight / 100;
-          }
+      function sendCommandToNeck(commandStr) {
+        if (typeof window.sendCommand === 'function') {
+          window.sendCommand(commandStr);
+          return;
         }
-        
-        controls.update();
-        renderer.render(scene, camera);
+        console.warn('sendCommand not available, command not sent:', commandStr);
       }
-      
-      animate();
-      
-      window.addEventListener('resize', () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
+
+      function buildPoseCommand(transformObj, euler) {
+        const rawLateral = -transformObj.position.x;
+        const rawHeight = transformObj.position.y + 30;
+        const rawFrontBack = (-transformObj.position.z - 50) * 1.5;
+        const rawYaw = THREE.MathUtils.radToDeg(euler.y);
+        const rawPitch = THREE.MathUtils.radToDeg(euler.x);
+        const rawRoll = THREE.MathUtils.radToDeg(euler.z);
+
+        const yawMRaw = rawYaw * 18;
+        const lateralMRaw = rawLateral * 15;
+        const frontBackMRaw = rawFrontBack * 10;
+        const rollMRaw = rawRoll * -25;
+        const pitchMRaw = rawPitch * -30;
+
+        if (!smoothed) {
+          smoothed = {
+            yaw: yawMRaw,
+            lateral: lateralMRaw,
+            frontBack: frontBackMRaw,
+            roll: rollMRaw,
+            pitch: pitchMRaw,
+            height: rawHeight,
+          };
+        }
+
+        const alpha = 0.8;
+        smoothed.yaw = alpha * yawMRaw + (1 - alpha) * smoothed.yaw;
+        smoothed.lateral = alpha * lateralMRaw + (1 - alpha) * smoothed.lateral;
+        smoothed.frontBack = alpha * frontBackMRaw + (1 - alpha) * smoothed.frontBack;
+        smoothed.roll = alpha * rollMRaw + (1 - alpha) * smoothed.roll;
+        smoothed.pitch = alpha * pitchMRaw + (1 - alpha) * smoothed.pitch;
+        smoothed.height = alpha * rawHeight + (1 - alpha) * smoothed.height;
+
+        const magnitude = Math.max(
+          Math.abs(smoothed.yaw),
+          Math.abs(smoothed.pitch),
+          Math.abs(smoothed.roll),
+          Math.abs(smoothed.lateral),
+          Math.abs(smoothed.frontBack)
+        );
+
+        const sDynamic = clamp(2 - (magnitude / 600), 1, 2);
+        const aDynamic = clamp(5 - (3 * (magnitude / 600)), 2, 6);
+
+        const xVal = Math.round(clamp(smoothed.yaw, -700, 700));
+        const yVal = Math.round(clamp(smoothed.lateral, -700, 700));
+        const zVal = Math.round(clamp(smoothed.frontBack, -700, 700));
+        const hVal = Math.round(clamp(smoothed.height, 0, 70));
+        const rVal = Math.round(clamp(smoothed.roll, -700, 700));
+        const pVal = Math.round(clamp(smoothed.pitch, -700, 700));
+
+        return `X${xVal},Y${yVal},Z${zVal},H${hVal},S${sDynamic.toFixed(1)},A${aDynamic.toFixed(1)},R${rVal},P${pVal}`;
+      }
+
+      function resizeViewport(renderer, camera) {
+        const width = Math.max(320, viewport.clientWidth || 960);
+        const height = Math.max(220, viewport.clientHeight || 420);
+        renderer.setSize(width, height, false);
+        camera.aspect = width / height;
         camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-      });
+      }
+
+      async function main() {
+        setStreamStatus('Starting camera...');
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(window.devicePixelRatio);
+        viewport.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111111);
+
+        const camera = new THREE.PerspectiveCamera(60, 1, 1, 100);
+        camera.position.z = 3.8;
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableZoom = false;
+        controls.enableRotate = false;
+        controls.enablePan = false;
+
+        resizeViewport(renderer, camera);
+        window.addEventListener('resize', () => resizeViewport(renderer, camera));
+
+        const grpTransform = new THREE.Group();
+        grpTransform.name = 'grp_transform';
+        scene.add(grpTransform);
+
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'user' }
+          });
+          video.srcObject = stream;
+          await video.play();
+          videoReady = true;
+          setStreamStatus('Camera ready');
+        } catch (err) {
+          console.error('Camera error:', err);
+          setStreamStatus('Camera unavailable', true);
+          return;
+        }
+
+        const gltfLoader = new GLTFLoader();
+        const ktx2Loader = new KTX2Loader()
+          .setTranscoderPath('https://unpkg.com/three@0.152.2/examples/jsm/libs/basis/')
+          .detectSupport(renderer);
+        gltfLoader.setKTX2Loader(ktx2Loader);
+        gltfLoader.setMeshoptDecoder(MeshoptDecoder);
+        gltfLoader.load(
+          'https://threejs.org/examples/models/gltf/facecap.glb',
+          (gltf) => {
+            const mesh = gltf.scene.children[0];
+            grpTransform.add(mesh);
+            const headMesh = mesh.getObjectByName('mesh_2');
+            if (headMesh) {
+              headMesh.material = new THREE.MeshNormalMaterial();
+            }
+          },
+          undefined,
+          (error) => {
+            console.error('Error loading facecap model:', error);
+          }
+        );
+
+        try {
+          const filesetResolver = await FilesetResolver.forVisionTasks(
+            'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm'
+          );
+          faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task',
+              delegate: 'GPU'
+            },
+            runningMode: 'VIDEO',
+            numFaces: 1,
+            outputFaceBlendshapes: true,
+            outputFacialTransformationMatrixes: true
+          });
+          setStreamStatus('Tracking active');
+        } catch (err) {
+          console.error('MediaPipe init error:', err);
+          setStreamStatus('Tracking init failed', true);
+          return;
+        }
+
+        const transformObj = new THREE.Object3D();
+
+        function animate() {
+          requestAnimationFrame(animate);
+
+          if (videoReady && faceLandmarker && video.readyState >= video.HAVE_ENOUGH_DATA) {
+            const now = Date.now();
+            const results = faceLandmarker.detectForVideo(video, now);
+
+            if (results.facialTransformationMatrixes.length > 0) {
+              const matrixArray = results.facialTransformationMatrixes[0].data;
+              transformObj.matrix.fromArray(matrixArray);
+              transformObj.matrix.decompose(
+                transformObj.position,
+                transformObj.quaternion,
+                transformObj.scale
+              );
+
+              const euler = new THREE.Euler().setFromQuaternion(transformObj.quaternion, 'YXZ');
+              grpTransform.position.x = transformObj.position.x / 10;
+              grpTransform.position.y = transformObj.position.y / 10;
+              grpTransform.position.z = -transformObj.position.z / -10 + 4;
+              grpTransform.rotation.x = euler.x;
+              grpTransform.rotation.y = euler.y;
+              grpTransform.rotation.z = euler.z;
+
+              const commandStr = buildPoseCommand(transformObj, euler);
+              commandStreamEl.textContent = commandStr;
+              setStreamStatus('Tracking active');
+
+              if (commandStr !== lastCommandSent && now - lastCommandSentAt >= COMMAND_INTERVAL_MS) {
+                sendCommandToNeck(commandStr);
+                lastCommandSent = commandStr;
+                lastCommandSentAt = now;
+              }
+            } else {
+              setStreamStatus('Face not detected');
+            }
+          }
+
+          controls.update();
+          renderer.render(scene, camera);
+        }
+
+        animate();
+      }
+
+      main();
     </script>
   </body>
 </html>
