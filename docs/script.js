@@ -705,8 +705,21 @@ async function connectToAdapter() {
 // Parse query parameters for adapter URL
 function parseConnectionFromQuery() {
   const urlParams = new URLSearchParams(window.location.search);
-  const adapterParam = (urlParams.get('adapter') || "").trim();
-  const passwordParam = (urlParams.get('password') || "").trim();
+  const getFirstParam = (keys) => {
+    for (const key of keys) {
+      const value = (urlParams.get(key) || "").trim();
+      if (value) {
+        return value;
+      }
+    }
+    return "";
+  };
+
+  // Accept both legacy and shorthand aliases:
+  // ?adapter=<url> or ?server=<url>
+  // &password=<secret> or &pass=<secret>
+  const adapterParam = getFirstParam(["adapter", "server"]);
+  const passwordParam = getFirstParam(["password", "pass"]);
 
   let adapterConfigured = false;
   let passwordProvided = false;
