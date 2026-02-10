@@ -1151,9 +1151,11 @@ def start_cloudflared_tunnel(local_port):
 # Camera feed abstraction
 # ---------------------------------------------------------------------------
 class FrameFeed:
-    def __init__(self, camera_id, label):
+    def __init__(self, camera_id, label, source_type="generic", device_path=""):
         self.camera_id = camera_id
         self.label = label
+        self.source_type = str(source_type or "generic")
+        self.device_path = str(device_path or "")
         self.lock = Lock()
         self.cond = threading.Condition(self.lock)
 
@@ -1171,6 +1173,22 @@ class FrameFeed:
 
         self.online = False
         self.last_error = ""
+        self.available_profiles = []
+        self.profile_query_error = ""
+        self.capture_profile = {
+            "pixel_format": "",
+            "width": int(source_options.get("camera_capture_width", DEFAULT_CAMERA_CAPTURE_WIDTH)),
+            "height": int(source_options.get("camera_capture_height", DEFAULT_CAMERA_CAPTURE_HEIGHT)),
+            "fps": int(source_options.get("camera_capture_fps", DEFAULT_CAMERA_CAPTURE_FPS)),
+        }
+        self.capture_revision = 0
+        self.active_capture = {
+            "backend": "",
+            "pixel_format": "",
+            "width": 0,
+            "height": 0,
+            "fps": 0,
+        }
 
     def publish(self, frame, options):
         prepared = prepare_frame(frame, options)
@@ -1214,6 +1232,85 @@ class FrameFeed:
             self.online = False
             self.last_error = message
 
+    def set_available_profiles(self, profiles, error_message=""):
+        with self.lock:
+            clean = []
+            seen = set()
+            for profile in profiles or []:
+                pix = str(profile.get("pixel_format", "")).strip().upper()
+                width = _as_int(profile.get("width"), 0, minimum=1, maximum=7680)
+                height = _as_int(profile.get("height"), 0, minimum=1, maximum=4320)
+                fps_value = float(profile.get("fps", 0.0) or 0.0)
+                if width <= 0 or height <= 0 or fps_value <= 0:
+                    continue
+                key = (pix, width, height, round(fps_value, 3))
+                if key in seen:
+                    continue
+                seen.add(key)
+                clean.append(
+                    {
+                        "pixel_format": pix,
+                        "width": width,
+                        "height": height,
+                        "fps": round(fps_value, 3),
+                    }
+                )
+            clean.sort(key=lambda item: (item["pixel_format"], item["width"], item["height"], item["fps"]))
+            self.available_profiles = clean
+            self.profile_query_error = str(error_message or "").strip()
+
+    def get_available_profiles(self):
+        with self.lock:
+            return [dict(item) for item in self.available_profiles], self.profile_query_error
+
+    def get_capture_profile(self):
+        with self.lock:
+            return dict(self.capture_profile), int(self.capture_revision)
+
+    def set_capture_profile(self, profile):
+        requested = profile or {}
+        next_profile = {
+            "pixel_format": str(requested.get("pixel_format", "")).strip().upper(),
+            "width": _as_int(
+                requested.get("width"),
+                self.capture_profile.get("width", DEFAULT_CAMERA_CAPTURE_WIDTH),
+                minimum=1,
+                maximum=7680,
+            ),
+            "height": _as_int(
+                requested.get("height"),
+                self.capture_profile.get("height", DEFAULT_CAMERA_CAPTURE_HEIGHT),
+                minimum=1,
+                maximum=4320,
+            ),
+            "fps": float(
+                _as_int(
+                    requested.get("fps"),
+                    int(round(float(self.capture_profile.get("fps", DEFAULT_CAMERA_CAPTURE_FPS)))),
+                    minimum=1,
+                    maximum=240,
+                )
+            ),
+        }
+
+        with self.lock:
+            changed = next_profile != self.capture_profile
+            if changed:
+                self.capture_profile = next_profile
+                self.capture_revision += 1
+            return changed, dict(self.capture_profile), int(self.capture_revision)
+
+    def set_active_capture(self, backend, profile):
+        profile_data = profile or {}
+        with self.lock:
+            self.active_capture = {
+                "backend": str(backend or ""),
+                "pixel_format": str(profile_data.get("pixel_format", "")).strip().upper(),
+                "width": _as_int(profile_data.get("width"), 0, minimum=0, maximum=7680),
+                "height": _as_int(profile_data.get("height"), 0, minimum=0, maximum=4320),
+                "fps": float(profile_data.get("fps", 0.0) or 0.0),
+            }
+
     def mark_offline(self):
         with self.cond:
             self.online = False
@@ -1241,6 +1338,8 @@ class FrameFeed:
             return {
                 "id": self.camera_id,
                 "label": self.label,
+                "source_type": self.source_type,
+                "device_path": self.device_path,
                 "online": self.online,
                 "has_frame": self.latest_jpeg is not None,
                 "frame_size": {"width": self.width, "height": self.height},
@@ -1249,6 +1348,10 @@ class FrameFeed:
                 "clients": self.client_count,
                 "total_frames": self.total_frames,
                 "last_error": self.last_error,
+                "capture_profile": dict(self.capture_profile),
+                "active_capture": dict(self.active_capture),
+                "available_profiles": [dict(item) for item in self.available_profiles],
+                "profile_query_error": self.profile_query_error,
             }
 
 
@@ -1274,9 +1377,14 @@ def prepare_frame(frame, options):
     return out
 
 
-def register_feed(camera_id, label):
+def register_feed(camera_id, label, source_type="generic", device_path=""):
     with camera_feeds_lock:
-        feed = FrameFeed(camera_id, label)
+        feed = FrameFeed(
+            camera_id,
+            label,
+            source_type=source_type,
+            device_path=device_path,
+        )
         camera_feeds[camera_id] = feed
     return feed
 
@@ -1379,15 +1487,181 @@ def discover_default_devices(device_glob):
     return filtered
 
 
-def _build_gstreamer_capture_pipelines(device_path, width, height, fps):
+def _normalize_pixel_format_code(value):
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+    aliases = {
+        "JPEG": "MJPG",
+        "JPG": "MJPG",
+    }
+    return aliases.get(raw, raw)
+
+
+def query_default_camera_profiles(device_path):
+    if os.name == "nt":
+        return [], "v4l2 profile discovery is only supported on Linux"
+
+    v4l2_ctl = shutil.which("v4l2-ctl")
+    if not v4l2_ctl:
+        return [], "v4l2-ctl not found"
+
+    try:
+        result = subprocess.run(
+            [v4l2_ctl, "-d", device_path, "--list-formats-ext"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+    except Exception as exc:
+        return [], f"v4l2-ctl error: {exc}"
+
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or f"exit {result.returncode}").strip()
+        return [], detail
+
+    current_pixfmt = ""
+    current_desc = ""
+    current_size = None
+    profiles = []
+    seen = set()
+
+    for raw_line in (result.stdout or "").splitlines():
+        line = raw_line.strip()
+        fmt_match = re.match(r"^\[\d+\]:\s+'([^']+)'\s+\(([^)]*)\)", line)
+        if fmt_match:
+            current_pixfmt = _normalize_pixel_format_code(fmt_match.group(1))
+            current_desc = fmt_match.group(2).strip()
+            current_size = None
+            continue
+
+        size_match = re.match(r"^Size:\s+Discrete\s+(\d+)x(\d+)", line)
+        if size_match and current_pixfmt:
+            current_size = (int(size_match.group(1)), int(size_match.group(2)))
+            continue
+
+        interval_match = re.match(r"^Interval:\s+Discrete\s+[0-9.]+s\s+\(([0-9.]+)\s+fps\)", line)
+        if interval_match and current_pixfmt and current_size:
+            fps_value = float(interval_match.group(1))
+            width, height = current_size
+            key = (current_pixfmt, width, height, round(fps_value, 3))
+            if key in seen:
+                continue
+            seen.add(key)
+            profiles.append(
+                {
+                    "pixel_format": current_pixfmt,
+                    "description": current_desc,
+                    "width": width,
+                    "height": height,
+                    "fps": round(fps_value, 3),
+                }
+            )
+
+    profiles.sort(key=lambda item: (item["pixel_format"], item["width"], item["height"], item["fps"]))
+    if profiles:
+        return profiles, ""
+
+    # Fallback entry if format parsing produced no discrete combinations.
+    return (
+        [
+            {
+                "pixel_format": "",
+                "description": "default",
+                "width": int(source_options["camera_capture_width"]),
+                "height": int(source_options["camera_capture_height"]),
+                "fps": float(source_options["camera_capture_fps"]),
+            }
+        ],
+        "No discrete format list from v4l2-ctl; using configured defaults",
+    )
+
+
+def select_initial_default_profile(profiles):
+    if not profiles:
+        return {
+            "pixel_format": "",
+            "width": int(source_options["camera_capture_width"]),
+            "height": int(source_options["camera_capture_height"]),
+            "fps": float(source_options["camera_capture_fps"]),
+        }
+
+    target_width = int(source_options["camera_capture_width"])
+    target_height = int(source_options["camera_capture_height"])
+    target_fps = float(source_options["camera_capture_fps"])
+
+    def score(profile):
+        return (
+            abs(int(profile.get("width", 0)) - target_width)
+            + abs(int(profile.get("height", 0)) - target_height)
+            + abs(float(profile.get("fps", 0.0)) - target_fps) * 25.0
+        )
+
+    best = min(profiles, key=score)
+    return {
+        "pixel_format": _normalize_pixel_format_code(best.get("pixel_format", "")),
+        "width": int(best.get("width", target_width)),
+        "height": int(best.get("height", target_height)),
+        "fps": float(best.get("fps", target_fps)),
+    }
+
+
+def find_matching_profile(available_profiles, requested_profile):
+    if not available_profiles:
+        return None
+
+    req_pixfmt = _normalize_pixel_format_code(requested_profile.get("pixel_format", ""))
+    req_width = _as_int(requested_profile.get("width"), 0, minimum=0, maximum=7680)
+    req_height = _as_int(requested_profile.get("height"), 0, minimum=0, maximum=4320)
+    req_fps = float(requested_profile.get("fps", 0.0) or 0.0)
+
+    filtered = []
+    for profile in available_profiles:
+        pixfmt = _normalize_pixel_format_code(profile.get("pixel_format", ""))
+        width = _as_int(profile.get("width"), 0, minimum=0, maximum=7680)
+        height = _as_int(profile.get("height"), 0, minimum=0, maximum=4320)
+        fps = float(profile.get("fps", 0.0) or 0.0)
+
+        if req_pixfmt and pixfmt and pixfmt != req_pixfmt:
+            continue
+        if req_width and width != req_width:
+            continue
+        if req_height and height != req_height:
+            continue
+        filtered.append(profile)
+
+    if not filtered:
+        return None
+
+    if req_fps > 0:
+        return min(filtered, key=lambda profile: abs(float(profile.get("fps", 0.0) or 0.0) - req_fps))
+    return filtered[0]
+
+
+def _build_gstreamer_capture_pipelines(device_path, width, height, fps, pixel_format=""):
     width = max(1, int(width))
     height = max(1, int(height))
     fps = max(1, int(fps))
+    pixfmt = _normalize_pixel_format_code(pixel_format)
+
+    raw_caps = "video/x-raw"
+    if pixfmt and pixfmt != "MJPG":
+        raw_caps += f",format=(string){pixfmt}"
+    raw_caps += (
+        f",width=(int){width},height=(int){height},framerate=(fraction){fps}/1"
+    )
+
+    jpeg_caps = (
+        "image/jpeg,"
+        f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1"
+    )
+
     return [
         (
             "nvv4l2camerasrc "
             f"device={device_path} ! "
-            "video/x-raw(memory:NVMM),format=(string)UYVY,"
+            "video/x-raw(memory:NVMM),"
+            f"format=(string){pixfmt if pixfmt and pixfmt != 'MJPG' else 'UYVY'},"
             f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1 ! "
             "nvvidconv ! video/x-raw,format=(string)BGRx ! "
             "videoconvert ! appsink drop=1 max-buffers=1 sync=false"
@@ -1395,41 +1669,64 @@ def _build_gstreamer_capture_pipelines(device_path, width, height, fps):
         (
             "v4l2src "
             f"device={device_path} io-mode=2 ! "
-            "video/x-raw,"
-            f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1 ! "
+            f"{raw_caps} ! "
             "videoconvert ! appsink drop=1 max-buffers=1 sync=false"
         ),
         (
             "v4l2src "
             f"device={device_path} io-mode=2 ! "
-            "image/jpeg,"
-            f"width=(int){width},height=(int){height},framerate=(fraction){fps}/1 ! "
+            f"{jpeg_caps} ! "
             "jpegdec ! videoconvert ! appsink drop=1 max-buffers=1 sync=false"
         ),
     ]
 
 
-def open_default_camera(device_path, width, height, fps):
+def _apply_requested_camera_props(cap, width, height, fps, pixel_format=""):
+    try:
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    except Exception:
+        pass
+    try:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+    except Exception:
+        pass
+    try:
+        cap.set(cv2.CAP_PROP_FPS, int(max(1, round(float(fps)))))
+    except Exception:
+        pass
+
+    pixfmt = _normalize_pixel_format_code(pixel_format)
+    if len(pixfmt) == 4:
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pixfmt))
+        except Exception:
+            pass
+
+
+def open_default_camera(device_path, width, height, fps, pixel_format=""):
     if os.name == "nt":
         backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
     else:
         backends = [cv2.CAP_V4L2, cv2.CAP_ANY]
 
     attempts = []
+    cap_gstreamer = getattr(cv2, "CAP_GSTREAMER", None)
+    if os.name != "nt" and cap_gstreamer is not None:
+        for idx, pipeline in enumerate(
+            _build_gstreamer_capture_pipelines(device_path, width, height, fps, pixel_format)
+        ):
+            attempts.append(("gstreamer", pipeline, cap_gstreamer, f"gstreamer:{idx}"))
+
     for backend in backends:
-        attempts.append(("path", device_path, backend))
+        attempts.append(("path", device_path, backend, f"path:{backend}"))
 
     device_index = _video_device_index(device_path)
     if device_index is not None:
         for backend in backends:
-            attempts.append(("index", device_index, backend))
+            attempts.append(("index", device_index, backend, f"index:{backend}"))
 
-    cap_gstreamer = getattr(cv2, "CAP_GSTREAMER", None)
-    if os.name != "nt" and cap_gstreamer is not None:
-        for pipeline in _build_gstreamer_capture_pipelines(device_path, width, height, fps):
-            attempts.append(("gstreamer", pipeline, cap_gstreamer))
-
-    for attempt_kind, source, backend in attempts:
+    for attempt_kind, source, backend, backend_label in attempts:
         try:
             cap = cv2.VideoCapture(source, backend)
         except Exception:
@@ -1441,10 +1738,7 @@ def open_default_camera(device_path, width, height, fps):
 
         # GStreamer pipelines encode desired stream params in the pipeline string.
         if attempt_kind != "gstreamer":
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
-            cap.set(cv2.CAP_PROP_FPS, int(fps))
+            _apply_requested_camera_props(cap, width, height, fps, pixel_format)
 
         # Some camera stacks report opened before frames are actually available.
         # Hold a short warm-up window and only accept a capture that can read frames.
@@ -1459,9 +1753,9 @@ def open_default_camera(device_path, width, height, fps):
             cap.release()
             continue
 
-        return cap
+        return cap, backend_label
 
-    return None
+    return None, ""
 
 
 def default_camera_worker(feed, device_path):
@@ -1470,18 +1764,22 @@ def default_camera_worker(feed, device_path):
     open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
 
     while service_running.is_set():
-        cap = open_default_camera(
+        requested_profile, requested_revision = feed.get_capture_profile()
+        cap, backend_label = open_default_camera(
             device_path,
-            source_options["camera_capture_width"],
-            source_options["camera_capture_height"],
-            source_options["camera_capture_fps"],
+            requested_profile["width"],
+            requested_profile["height"],
+            requested_profile["fps"],
+            requested_profile.get("pixel_format", ""),
         )
         if cap is None:
             open_failures += 1
             feed.mark_error(f"Unable to open {device_path}")
             if open_failures in (1, 3) or open_failures % 10 == 0:
                 log(
-                    f"[WARN] Failed to open camera {device_path}; "
+                    f"[WARN] Failed to open camera {device_path} "
+                    f"({requested_profile['width']}x{requested_profile['height']} @ {requested_profile['fps']}fps "
+                    f"{requested_profile.get('pixel_format') or ''}); "
                     f"retrying in {open_retry_delay:.1f}s (failure {open_failures})"
                 )
             time.sleep(open_retry_delay)
@@ -1493,10 +1791,20 @@ def default_camera_worker(feed, device_path):
 
         open_failures = 0
         open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
-        log(f"[OK] Camera worker started: {device_path}")
+        feed.set_active_capture(backend_label, requested_profile)
+        log(
+            f"[OK] Camera worker started: {device_path} "
+            f"({requested_profile['width']}x{requested_profile['height']} @ {requested_profile['fps']}fps "
+            f"{requested_profile.get('pixel_format') or 'auto'}, {backend_label})"
+        )
         next_emit = 0.0
         read_failures = 0
         while service_running.is_set():
+            latest_profile, latest_revision = feed.get_capture_profile()
+            if latest_revision != requested_revision:
+                log(f"[INFO] Capture profile updated for {device_path}; restarting camera worker")
+                break
+
             ok, frame = cap.read()
             if not ok or frame is None:
                 read_failures += 1
@@ -1634,7 +1942,21 @@ def initialize_camera_workers():
         devices = discover_default_devices(source_options["camera_device_glob"])
         for index, device in enumerate(devices):
             cam_id = f"default_{index}"
-            feed = register_feed(cam_id, f"Default Camera ({device})")
+            feed = register_feed(
+                cam_id,
+                f"Default Camera ({device})",
+                source_type="default",
+                device_path=device,
+            )
+            profiles, profile_error = query_default_camera_profiles(device)
+            feed.set_available_profiles(profiles, profile_error)
+            initial_profile = select_initial_default_profile(profiles)
+            feed.set_capture_profile(initial_profile)
+            if profile_error:
+                log(f"[INFO] {device}: {profile_error}")
+            elif profiles:
+                log(f"[INFO] {device}: discovered {len(profiles)} capture profile(s)")
+
             thread = threading.Thread(target=default_camera_worker, args=(feed, device), daemon=True)
             thread.start()
             capture_threads.append(thread)
@@ -1650,12 +1972,12 @@ def initialize_camera_workers():
             "ir_left": "rs_ir_left",
             "ir_right": "rs_ir_right",
         }
-        register_feed(rs_ids["color"], "RealSense D455 - Color")
+        register_feed(rs_ids["color"], "RealSense D455 - Color", source_type="realsense")
         if source_options["realsense_stream_depth"]:
-            register_feed(rs_ids["depth"], "RealSense D455 - Depth")
+            register_feed(rs_ids["depth"], "RealSense D455 - Depth", source_type="realsense")
         if source_options["realsense_stream_ir"]:
-            register_feed(rs_ids["ir_left"], "RealSense D455 - IR Left")
-            register_feed(rs_ids["ir_right"], "RealSense D455 - IR Right")
+            register_feed(rs_ids["ir_left"], "RealSense D455 - IR Left", source_type="realsense")
+            register_feed(rs_ids["ir_right"], "RealSense D455 - IR Right", source_type="realsense")
         thread = threading.Thread(target=realsense_worker, args=(rs_ids,), daemon=True)
         thread.start()
         capture_threads.append(thread)
@@ -2104,18 +2426,86 @@ def list_cameras():
     )
 
 
-@app.route("/stream_options/<camera_id>", methods=["GET"])
+@app.route("/stream_options/<camera_id>", methods=["GET", "POST"])
 @require_session
 def stream_options_for_camera(camera_id):
     feed = get_feed(camera_id)
     if not feed:
         return jsonify({"status": "error", "message": "Camera not found"}), 404
+
+    available_profiles, profile_error = feed.get_available_profiles()
+    current_profile, current_revision = feed.get_capture_profile()
+
+    if request.method == "POST":
+        if feed.source_type != "default":
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "Capture profile updates are only supported for default V4L2 feeds",
+                    "camera_id": camera_id,
+                }
+            ), 400
+        payload = request.get_json(silent=True) or {}
+        requested = payload.get("profile", payload)
+        if not isinstance(requested, dict):
+            return jsonify({"status": "error", "message": "Profile payload must be an object"}), 400
+
+        candidate = {
+            "pixel_format": _normalize_pixel_format_code(requested.get("pixel_format", current_profile["pixel_format"])),
+            "width": _as_int(requested.get("width"), current_profile["width"], minimum=1, maximum=7680),
+            "height": _as_int(requested.get("height"), current_profile["height"], minimum=1, maximum=4320),
+            "fps": float(
+                _as_int(
+                    requested.get("fps"),
+                    int(max(1, round(float(current_profile.get("fps", source_options["camera_capture_fps"]))))),
+                    minimum=1,
+                    maximum=240,
+                )
+            ),
+        }
+
+        if available_profiles:
+            matched = find_matching_profile(available_profiles, candidate)
+            if not matched:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "message": "Requested profile is not available for this camera",
+                        "camera_id": camera_id,
+                        "current_profile": current_profile,
+                        "available_profiles": available_profiles,
+                    }
+                ), 400
+            candidate = {
+                "pixel_format": _normalize_pixel_format_code(matched.get("pixel_format", "")),
+                "width": int(matched.get("width", current_profile["width"])),
+                "height": int(matched.get("height", current_profile["height"])),
+                "fps": float(matched.get("fps", current_profile["fps"])),
+            }
+
+        changed, applied_profile, next_revision = feed.set_capture_profile(candidate)
+        return jsonify(
+            {
+                "status": "success",
+                "camera_id": camera_id,
+                "changed": bool(changed),
+                "profile_revision": int(next_revision),
+                "profile": applied_profile,
+                "message": "Capture profile updated" if changed else "Capture profile unchanged",
+            }
+        )
+
     return jsonify(
         {
             "status": "success",
             "camera_id": camera_id,
             "protocols": stream_protocol_capabilities(),
             "modes": camera_mode_urls(camera_id),
+            "profile_mutable": feed.source_type == "default",
+            "current_profile": current_profile,
+            "profile_revision": int(current_revision),
+            "available_profiles": available_profiles,
+            "profile_query_error": profile_error,
         }
     )
 

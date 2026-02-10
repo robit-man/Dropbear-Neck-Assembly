@@ -724,10 +724,16 @@
           <select id="cameraModeSelect" style="flex:1;">
             <option value="webrtc" disabled>WebRTC (disabled)</option>
             <option value="mjpeg" selected>MJPEG stream (default)</option>
-            <option value="jpeg" disabled>JPEG polling (disabled)</option>
+            <option value="jpeg">JPEG polling (fallback)</option>
             <option value="mpegts" disabled>MPEG-TS stream (disabled)</option>
           </select>
         </div>
+        <div class="row">
+          <label for="cameraProfileSelect">Capture Profile:</label>
+          <select id="cameraProfileSelect" style="flex:1;"></select>
+          <button id="cameraProfileApplyBtn" type="button">Apply</button>
+        </div>
+        <p id="cameraProfileStatus" style="margin:0.25rem 0 0 0;opacity:0.82;font-size:0.85rem;">No camera profile selected</p>
         <div class="row">
           <button id="cameraPreviewStartBtn" class="primary">Start Preview</button>
           <button id="cameraPreviewStopBtn">Stop Preview</button>

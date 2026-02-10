@@ -90,10 +90,11 @@ function updateVideoMetrics() {
     const clients = Number(feed.clients) || 0;
     metrics.video.stats = `${fps.toFixed(1)} fps | ${Math.round(kbps)} kbps | ${clients} clients`;
 
+    const requiresPersistentClient = cameraPreview.activeMode !== STREAM_MODE_JPEG;
     if (!feed.online) {
         metrics.video.state = `Offline ${feed.id}`;
         metrics.video.quality = "error";
-    } else if (fps > 1 && clients > 0 && cameraPreview.desired) {
+    } else if (fps > 1 && (!requiresPersistentClient || clients > 0) && cameraPreview.desired) {
         metrics.video.state = `Live ${feed.id}`;
         metrics.video.quality = "good";
     } else if (!cameraPreview.desired) {
@@ -1063,6 +1064,7 @@ function initNknRouterUi() {
 
 const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
 const STREAM_MODE_MJPEG = "mjpeg";
+const STREAM_MODE_JPEG = "jpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
 const CAMERA_FEED_POLL_INTERVAL_MS = 1500;
 const MIN_PINNED_PREVIEW_WIDTH = 180;
@@ -1484,7 +1486,8 @@ async function monitorCameraPreviewHealth() {
 
     const clients = Number(selected.clients) || 0;
     const fps = Number(selected.fps) || 0;
-    if (clients <= 0 || fps <= 0.2) {
+    const requiresPersistentClient = cameraPreview.activeMode !== STREAM_MODE_JPEG;
+    if ((requiresPersistentClient && clients <= 0) || fps <= 0.2) {
       cameraPreview.zeroClientStreak += 1;
       if (cameraPreview.zeroClientStreak >= 3) {
         scheduleCameraPreviewRestart("stream stalled");
@@ -1664,6 +1667,7 @@ async function authenticateCameraRouter() {
 function renderCameraFeedOptions() {
   const feedSelect = document.getElementById("cameraFeedSelect");
   const feedList = document.getElementById("cameraFeedList");
+  const profileSelect = document.getElementById("cameraProfileSelect");
   if (!feedSelect || !feedList) {
     return;
   }
@@ -1698,6 +1702,157 @@ function renderCameraFeedOptions() {
     line.textContent = `${feed.id} | fps ${feed.fps} | kbps ${feed.kbps} | clients ${feed.clients} | ${feed.online ? "online" : "offline"}`;
     feedList.appendChild(line);
   });
+
+  if (profileSelect) {
+    renderCameraProfileOptions(feedSelect.value || "");
+  }
+}
+
+function formatProfileOption(profile) {
+  const pix = (profile.pixel_format || "AUTO").toUpperCase();
+  const width = Number(profile.width) || 0;
+  const height = Number(profile.height) || 0;
+  const fps = Number(profile.fps) || 0;
+  return `${pix} ${width}x${height} @ ${fps.toFixed(0)}fps`;
+}
+
+function profileMatches(a, b) {
+  if (!a || !b) {
+    return false;
+  }
+  const pixA = String(a.pixel_format || "").toUpperCase();
+  const pixB = String(b.pixel_format || "").toUpperCase();
+  const wA = Number(a.width) || 0;
+  const wB = Number(b.width) || 0;
+  const hA = Number(a.height) || 0;
+  const hB = Number(b.height) || 0;
+  const fpsA = Number(a.fps) || 0;
+  const fpsB = Number(b.fps) || 0;
+  return pixA === pixB && wA === wB && hA === hB && Math.abs(fpsA - fpsB) < 0.6;
+}
+
+function renderCameraProfileOptions(cameraId) {
+  const profileSelect = document.getElementById("cameraProfileSelect");
+  const profileStatus = document.getElementById("cameraProfileStatus");
+  const profileApplyBtn = document.getElementById("cameraProfileApplyBtn");
+  if (!profileSelect || !profileStatus) {
+    return;
+  }
+
+  profileSelect.innerHTML = "";
+  profileSelect.disabled = true;
+  if (profileApplyBtn) {
+    profileApplyBtn.disabled = true;
+  }
+
+  const feed = cameraRouterFeeds.find((item) => item.id === cameraId) || null;
+  if (!feed) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = "Select a camera feed";
+    profileSelect.appendChild(empty);
+    profileStatus.textContent = "No camera profile selected";
+    return;
+  }
+
+  const profiles = Array.isArray(feed.available_profiles) ? feed.available_profiles : [];
+  const currentProfile = feed.capture_profile || null;
+  const isMutable = String(feed.source_type || "") === "default";
+  let selectedIndex = 0;
+
+  if (profiles.length > 0) {
+    profiles.forEach((profile, idx) => {
+      const opt = document.createElement("option");
+      opt.value = String(idx);
+      opt.textContent = formatProfileOption(profile);
+      profileSelect.appendChild(opt);
+      if (currentProfile && profileMatches(profile, currentProfile)) {
+        selectedIndex = idx;
+      }
+    });
+    profileSelect.value = String(selectedIndex);
+    profileSelect.disabled = !isMutable;
+  } else {
+    const fallback = document.createElement("option");
+    fallback.value = "";
+    fallback.textContent = currentProfile
+      ? formatProfileOption(currentProfile)
+      : "Using camera defaults";
+    profileSelect.appendChild(fallback);
+  }
+
+  const active = feed.active_capture || {};
+  const activeBackend = active.backend ? `backend ${active.backend}` : "backend pending";
+  const activeRes =
+    active.width && active.height
+      ? `${active.width}x${active.height} @ ${(Number(active.fps) || 0).toFixed(0)}fps`
+      : "awaiting frames";
+  const profileError = feed.profile_query_error ? ` | ${feed.profile_query_error}` : "";
+  profileStatus.textContent = `${feed.device_path || feed.id}: ${activeRes} (${activeBackend})${profileError}`;
+  if (profileApplyBtn) {
+    profileApplyBtn.disabled = !isMutable;
+  }
+}
+
+async function applySelectedCameraProfile() {
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const profileSelect = document.getElementById("cameraProfileSelect");
+  if (!feedSelect || !profileSelect) {
+    return;
+  }
+
+  const cameraId = feedSelect.value || "";
+  if (!cameraId) {
+    setStreamStatus("Select a feed before applying a profile", true);
+    return;
+  }
+  const feed = cameraRouterFeeds.find((item) => item.id === cameraId) || null;
+  if (!feed) {
+    setStreamStatus("Selected feed metadata is unavailable", true);
+    return;
+  }
+  if (String(feed.source_type || "") !== "default") {
+    setStreamStatus("Profile changes are only supported for default V4L2 feeds", true);
+    return;
+  }
+
+  const profiles = Array.isArray(feed.available_profiles) ? feed.available_profiles : [];
+  let requestedProfile = feed.capture_profile || null;
+  const selectedIndex = parseInt(profileSelect.value, 10);
+  if (profiles.length > 0 && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < profiles.length) {
+    requestedProfile = profiles[selectedIndex];
+  }
+  if (!requestedProfile) {
+    setStreamStatus("No profile available to apply", true);
+    return;
+  }
+
+  try {
+    setStreamStatus(`Applying profile to ${cameraId}...`);
+    const response = await cameraRouterFetch(
+      `/stream_options/${encodeURIComponent(cameraId)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile: requestedProfile }),
+      },
+      true
+    );
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      throw new Error(data.message || `HTTP ${response.status}`);
+    }
+
+    await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    renderCameraProfileOptions(cameraId);
+    setStreamStatus(`Applied profile on ${cameraId}`);
+
+    if (cameraPreview.desired && cameraPreview.targetCameraId === cameraId) {
+      await startCameraPreview({ autoRestart: true, cameraId, reason: "profile change" });
+    }
+  } catch (err) {
+    setStreamStatus(`Profile apply failed: ${err}`, true);
+  }
 }
 
 async function refreshCameraFeeds(options = {}) {
@@ -1759,12 +1914,30 @@ async function startJpegPreview(cameraId) {
     return;
   }
 
+  imageEl.onload = () => {
+    cameraPreview.healthFailStreak = 0;
+    cameraPreview.zeroClientStreak = 0;
+    updateMetrics();
+  };
+  imageEl.onerror = () => {
+    if (cameraPreview.desired && cameraPreview.activeCameraId === cameraId) {
+      scheduleCameraPreviewRestart("jpeg polling error");
+    }
+  };
+  imageEl.onabort = imageEl.onerror;
+
   const refresh = () => {
     const t = Date.now();
     imageEl.src = cameraRouterUrl(`/jpeg/${encodeURIComponent(cameraId)}?t=${t}`, true);
   };
   refresh();
   cameraPreview.jpegTimer = setInterval(refresh, 120);
+  cameraPreview.activeCameraId = cameraId;
+  cameraPreview.targetCameraId = cameraId;
+  cameraPreview.activeMode = STREAM_MODE_JPEG;
+  syncPinnedPreviewSource({ forceRefresh: true });
+  setPinButtonState();
+  updateMetrics();
 }
 
 async function startMjpegPreview(cameraId) {
@@ -1875,9 +2048,10 @@ async function startCameraPreview(options = {}) {
     feedSelect.value = requestedCameraId;
   }
   let mode = modeSelect.value || STREAM_MODE_MJPEG;
-  if (mode !== STREAM_MODE_MJPEG) {
+  const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG]);
+  if (!allowedModes.has(mode)) {
     mode = STREAM_MODE_MJPEG;
-    modeSelect.value = STREAM_MODE_MJPEG;
+    modeSelect.value = mode;
   }
   if (!cameraId) {
     setStreamStatus("Select a feed first", true);
@@ -1899,16 +2073,22 @@ async function startCameraPreview(options = {}) {
   cameraPreview.desired = true;
   clearCameraPreviewRestartTimer();
   stopCameraPreview({ keepDesired: true });
-  setStreamStatus(`${autoRestart ? "Restarting" : "Starting"} ${STREAM_MODE_MJPEG} preview for ${cameraId}...`);
+  setStreamStatus(`${autoRestart ? "Restarting" : "Starting"} ${mode} preview for ${cameraId}...`);
 
   try {
-    await startMjpegPreview(cameraId);
+    if (mode === STREAM_MODE_JPEG) {
+      await startJpegPreview(cameraId);
+      cameraPreview.activeMode = STREAM_MODE_JPEG;
+    } else {
+      await startMjpegPreview(cameraId);
+      cameraPreview.activeMode = STREAM_MODE_MJPEG;
+    }
     cameraPreview.restartAttempts = 0;
     cameraPreview.healthFailStreak = 0;
     cameraPreview.zeroClientStreak = 0;
     startCameraPreviewMonitor();
     monitorCameraPreviewHealth().catch(() => {});
-    setStreamStatus("MJPEG preview started");
+    setStreamStatus(`${mode.toUpperCase()} preview started`);
   } catch (err) {
     setStreamStatus(`Preview failed: ${err}`, true);
     scheduleCameraPreviewRestart("startup failure");
@@ -1927,6 +2107,7 @@ function setupStreamConfigUi() {
   const refreshBtn = document.getElementById("cameraRouterRefreshBtn");
   const startBtn = document.getElementById("cameraPreviewStartBtn");
   const stopBtn = document.getElementById("cameraPreviewStopBtn");
+  const profileApplyBtn = document.getElementById("cameraProfileApplyBtn");
   const modeSelect = document.getElementById("cameraModeSelect");
   const feedSelect = document.getElementById("cameraFeedSelect");
   initializePinnedPreviewUi();
@@ -1948,8 +2129,10 @@ function setupStreamConfigUi() {
     cameraPreview.targetCameraId = localStorage.getItem("cameraRouterSelectedFeed") || "";
   }
   if (modeSelect) {
-    modeSelect.value = STREAM_MODE_MJPEG;
-    localStorage.setItem("cameraRouterSelectedMode", STREAM_MODE_MJPEG);
+    const savedMode = localStorage.getItem("cameraRouterSelectedMode") || STREAM_MODE_MJPEG;
+    const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG]);
+    modeSelect.value = allowedModes.has(savedMode) ? savedMode : STREAM_MODE_MJPEG;
+    localStorage.setItem("cameraRouterSelectedMode", modeSelect.value);
   }
 
   if (authBtn) {
@@ -1972,6 +2155,7 @@ function setupStreamConfigUi() {
       const nextFeed = feedSelect.value || "";
       localStorage.setItem("cameraRouterSelectedFeed", nextFeed);
       cameraPreview.targetCameraId = nextFeed;
+      renderCameraProfileOptions(nextFeed);
       if (cameraPreview.desired && nextFeed) {
         startCameraPreview({ autoRestart: true, cameraId: nextFeed, reason: "feed change" }).catch(() => {});
       } else {
@@ -1981,9 +2165,18 @@ function setupStreamConfigUi() {
   }
   if (modeSelect) {
     modeSelect.addEventListener("change", () => {
-      modeSelect.value = STREAM_MODE_MJPEG;
-      localStorage.setItem("cameraRouterSelectedMode", STREAM_MODE_MJPEG);
+      const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG]);
+      if (!allowedModes.has(modeSelect.value)) {
+        modeSelect.value = STREAM_MODE_MJPEG;
+      }
+      localStorage.setItem("cameraRouterSelectedMode", modeSelect.value);
+      if (cameraPreview.desired) {
+        startCameraPreview({ autoRestart: true, reason: "mode change" }).catch(() => {});
+      }
     });
+  }
+  if (profileApplyBtn) {
+    profileApplyBtn.addEventListener("click", applySelectedCameraProfile);
   }
 
   if (cameraRouterBaseUrl && cameraRouterSessionKey) {
