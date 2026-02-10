@@ -1004,7 +1004,7 @@ def main():
                         "status": "success",
                         "tunnel_url": tunnel_url,
                         "http_endpoint": f"{tunnel_url}{listen_route}",
-                        "ws_endpoint": tunnel_url.replace("https://", "wss://"),
+                        "ws_endpoint": f"{tunnel_url.replace('https://', 'wss://')}/ws",
                     }
                 )
             return jsonify(
@@ -1013,6 +1013,44 @@ def main():
                     "message": "Tunnel URL not yet available",
                 }
             )
+
+    @app.route("/router_info", methods=["GET"])
+    def router_info():
+        """Discovery payload for the NKN router sidecar."""
+        process_running = tunnel_process is not None and tunnel_process.poll() is None
+        with tunnel_url_lock:
+            current_tunnel = tunnel_url
+
+        local_base = f"http://127.0.0.1:{listen_port}"
+        tunnel_state = "active" if current_tunnel else ("starting" if process_running else "inactive")
+        tunnel_data = {
+            "state": tunnel_state,
+            "tunnel_url": current_tunnel,
+            "http_endpoint": f"{current_tunnel}{listen_route}" if current_tunnel else "",
+            "ws_endpoint": f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else "",
+        }
+
+        return jsonify(
+            {
+                "status": "success",
+                "service": "adapter",
+                "local": {
+                    "base_url": local_base,
+                    "listen_host": listen_host,
+                    "listen_port": int(listen_port),
+                    "command_route": listen_route,
+                    "auth_route": "/auth",
+                    "ws_path": "/ws",
+                    "http_endpoint": f"{local_base}{listen_route}",
+                    "ws_endpoint": f"ws://127.0.0.1:{listen_port}/ws",
+                },
+                "tunnel": tunnel_data,
+                "security": {
+                    "session_timeout": int(SESSION_TIMEOUT),
+                    "password_required": True,
+                },
+            }
+        )
 
     @app.route("/serial_reset", methods=["POST"])
     def http_serial_reset():

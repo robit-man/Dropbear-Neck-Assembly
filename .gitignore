@@ -5,3 +5,5 @@
 .vscode/ipch
 .vscode/
 /teleoperation/*/__pycache__/
+/teleoperation/router/router_venv/
+/teleoperation/router/nkn_sidecar/

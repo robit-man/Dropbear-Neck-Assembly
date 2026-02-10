@@ -6,6 +6,8 @@
   <title>Robotic Neck Control</title>
   <link rel="stylesheet" href="./style.css">
   <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
   <script type="importmap">
   {
     "imports": {
@@ -46,6 +48,32 @@
         <p style="font-size:0.85rem;opacity:0.7;margin:0.5rem 0 0 0;">
           Paste a tunnel/base URL, then click above to derive /send_command and /ws endpoints
         </p>
+      </div>
+
+      <div class="modal-section">
+        <h3 style="margin-top:0;">NKN Router Discovery</h3>
+        <div class="row">
+          <label for="routerApiBaseInput">Router API:</label>
+          <input type="text" id="routerApiBaseInput" placeholder="http://127.0.0.1:5070" style="flex:1;">
+        </div>
+        <div class="row">
+          <label for="routerNknAddressInput">Router NKN Address:</label>
+          <input type="text" id="routerNknAddressInput" placeholder="router.<pubkey-hex>" style="flex:1;">
+        </div>
+        <div class="row">
+          <button id="routerResolveBtn" class="primary">Resolve Endpoints via NKN</button>
+          <button id="routerRefreshInfoBtn">Refresh Router Info</button>
+        </div>
+        <div class="nkn-identity-grid">
+          <div class="nkn-identity-meta">
+            <div class="nkn-meta-label">Browser Seed</div>
+            <div id="browserNknSeedStatus" class="nkn-meta-value">Initializing...</div>
+            <div class="nkn-meta-label">Browser Pubkey (hex)</div>
+            <code id="browserNknPubkey" class="nkn-code">Pending...</code>
+          </div>
+          <div id="browserNknQr" class="nkn-qr" aria-label="Browser NKN pubkey QR"></div>
+        </div>
+        <p id="routerResolveStatus" style="font-size:0.85rem;opacity:0.85;margin:0.5rem 0 0 0;">Idle</p>
       </div>
 
       <button onclick="connectToAdapter()" class="primary" style="width:100%;padding:1rem;font-size:1.1rem;">

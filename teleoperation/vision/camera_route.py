@@ -245,6 +245,10 @@ source_options = {
     "realsense_stream_depth": DEFAULT_REALSENSE_STREAM_DEPTH,
     "realsense_stream_ir": DEFAULT_REALSENSE_STREAM_IR,
 }
+network_runtime = {
+    "listen_host": DEFAULT_LISTEN_HOST,
+    "listen_port": DEFAULT_LISTEN_PORT,
+}
 
 camera_feeds = {}
 camera_feeds_lock = Lock()
@@ -2052,6 +2056,7 @@ def list_cameras():
                 "webrtc_offer": "/webrtc/offer/<camera_id>",
                 "webrtc_player": "/webrtc/player/<camera_id>",
                 "stream_options": "/stream_options/<camera_id>",
+                "router_info": "/router_info",
             },
         }
     )
@@ -2306,6 +2311,47 @@ def tunnel_info():
         )
 
 
+@app.route("/router_info", methods=["GET"])
+def router_info():
+    process_running = tunnel_process is not None and tunnel_process.poll() is None
+    with tunnel_url_lock:
+        current_tunnel = tunnel_url
+        current_error = tunnel_last_error
+
+    listen_port = int(network_runtime.get("listen_port", DEFAULT_LISTEN_PORT))
+    listen_host = str(network_runtime.get("listen_host", DEFAULT_LISTEN_HOST))
+    local_base = f"http://127.0.0.1:{listen_port}"
+    tunnel_state = "active" if current_tunnel else ("starting" if process_running else "inactive")
+    if current_error and not process_running and not current_tunnel:
+        tunnel_state = "error"
+
+    return jsonify(
+        {
+            "status": "success",
+            "service": "camera_router",
+            "local": {
+                "base_url": local_base,
+                "listen_host": listen_host,
+                "listen_port": listen_port,
+                "auth_url": f"{local_base}/auth",
+                "list_url": f"{local_base}/list",
+                "health_url": f"{local_base}/health",
+            },
+            "tunnel": {
+                "state": tunnel_state,
+                "tunnel_url": current_tunnel,
+                "list_url": f"{current_tunnel}/list" if current_tunnel else "",
+                "health_url": f"{current_tunnel}/health" if current_tunnel else "",
+                "error": current_error,
+            },
+            "security": {
+                "require_auth": bool(runtime_security["require_auth"]),
+                "session_timeout": int(SESSION_TIMEOUT),
+            },
+        }
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runtime utility threads
 # ---------------------------------------------------------------------------
@@ -2434,6 +2480,8 @@ def main():
     listen_port = settings["listen_port"]
     enable_tunnel = settings["enable_tunnel"]
     auto_install_cloudflared = settings["auto_install_cloudflared"]
+    network_runtime["listen_host"] = listen_host
+    network_runtime["listen_port"] = int(listen_port)
 
     initialize_camera_workers()
     threading.Thread(target=session_cleanup_loop, daemon=True).start()

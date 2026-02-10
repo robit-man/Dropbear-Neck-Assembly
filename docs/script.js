@@ -530,14 +530,20 @@ function showConnectionModal() {
   if (modal) {
     modal.classList.add('active');
     ensureEndpointInputBindings();
+    initNknRouterUi();
     // Pre-fill only saved values, no defaults
     const passInput = document.getElementById('passwordInput');
     const wsInput = document.getElementById('wsUrlInput');
     const httpInput = document.getElementById('httpUrlInput');
+    const routerApiInput = document.getElementById("routerApiBaseInput");
+    const routerTargetInput = document.getElementById("routerNknAddressInput");
 
     if (passInput) passInput.value = PASSWORD || '';
     if (wsInput) wsInput.value = WS_URL || '';
     if (httpInput) httpInput.value = HTTP_URL || '';
+    if (routerApiInput) routerApiInput.value = routerApiBaseUrl || '';
+    if (routerTargetInput) routerTargetInput.value = routerTargetNknAddress || '';
+    ensureBrowserNknIdentity();
     hydrateEndpointInputs("http");
   }
 }
@@ -720,6 +726,8 @@ function parseConnectionFromQuery() {
   // &password=<secret> or &pass=<secret>
   const adapterParam = getFirstParam(["adapter", "server"]);
   const passwordParam = getFirstParam(["password", "pass"]);
+  const routerApiParam = getFirstParam(["router_api", "routerapi"]);
+  const routerNknParam = getFirstParam(["router_nkn", "nkn_router", "router_nkn_address"]);
 
   let adapterConfigured = false;
   let passwordProvided = false;
@@ -745,7 +753,312 @@ function parseConnectionFromQuery() {
     passwordProvided = true;
   }
 
+  if (routerApiParam) {
+    try {
+      routerApiBaseUrl = normalizeRouterApiBase(routerApiParam);
+      localStorage.setItem("routerApiBaseUrl", routerApiBaseUrl);
+    } catch (err) {}
+  }
+  if (routerNknParam) {
+    routerTargetNknAddress = routerNknParam;
+    localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+  }
+
   return { adapterConfigured, passwordProvided };
+}
+
+const ROUTER_API_DEFAULT_BASE = localStorage.getItem("routerApiBaseUrl") || "http://127.0.0.1:5070";
+let routerApiBaseUrl = ROUTER_API_DEFAULT_BASE;
+let routerTargetNknAddress = localStorage.getItem("routerTargetNknAddress") || "";
+let browserNknSeedHex = localStorage.getItem("browserNknSeedHex") || "";
+let browserNknPubHex = localStorage.getItem("browserNknPubHex") || "";
+let nknUiInitialized = false;
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex) {
+  if (!/^[0-9a-fA-F]+$/.test(hex || "") || (hex || "").length % 2 !== 0) {
+    return null;
+  }
+  const out = new Uint8Array((hex || "").length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function generateSeedHex() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return bytesToHex(bytes);
+}
+
+function setRouterResolveStatus(message, error = false) {
+  const statusEl = document.getElementById("routerResolveStatus");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = message;
+  statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function renderBrowserNknQr(text) {
+  const qrEl = document.getElementById("browserNknQr");
+  if (!qrEl) {
+    return;
+  }
+  qrEl.innerHTML = "";
+  if (!text) {
+    return;
+  }
+  if (typeof QRCode === "undefined") {
+    qrEl.textContent = "QR lib unavailable";
+    return;
+  }
+  new QRCode(qrEl, {
+    text,
+    width: 112,
+    height: 112,
+    correctLevel: QRCode.CorrectLevel.M,
+  });
+}
+
+function ensureBrowserNknIdentity() {
+  const statusEl = document.getElementById("browserNknSeedStatus");
+  const pubEl = document.getElementById("browserNknPubkey");
+
+  if (!/^[0-9a-f]{64}$/i.test(browserNknSeedHex)) {
+    browserNknSeedHex = generateSeedHex();
+    localStorage.setItem("browserNknSeedHex", browserNknSeedHex);
+  }
+
+  if (statusEl) {
+    statusEl.textContent = "Persisted in local storage";
+  }
+
+  if (typeof nacl === "undefined" || !nacl.sign || !nacl.sign.keyPair) {
+    browserNknPubHex = "";
+    if (pubEl) {
+      pubEl.textContent = "tweetnacl not loaded";
+    }
+    renderBrowserNknQr("");
+    return;
+  }
+
+  const seedBytes = hexToBytes(browserNknSeedHex);
+  if (!seedBytes || seedBytes.length !== 32) {
+    browserNknPubHex = "";
+    if (pubEl) {
+      pubEl.textContent = "Invalid seed";
+    }
+    renderBrowserNknQr("");
+    return;
+  }
+
+  try {
+    const kp = nacl.sign.keyPair.fromSeed(seedBytes);
+    browserNknPubHex = bytesToHex(kp.publicKey);
+    localStorage.setItem("browserNknPubHex", browserNknPubHex);
+    if (pubEl) {
+      pubEl.textContent = browserNknPubHex;
+    }
+    renderBrowserNknQr(browserNknPubHex);
+  } catch (err) {
+    browserNknPubHex = "";
+    if (pubEl) {
+      pubEl.textContent = `Key derivation failed: ${err}`;
+    }
+    renderBrowserNknQr("");
+  }
+}
+
+function normalizeRouterApiBase(rawValue) {
+  const normalized = normalizeOrigin(rawValue || "");
+  return normalized;
+}
+
+function applyResolvedEndpoints(resolved) {
+  if (!resolved || typeof resolved !== "object") {
+    return false;
+  }
+
+  let changed = false;
+  const adapter = resolved.adapter || {};
+  const camera = resolved.camera || {};
+
+  const httpCandidate = (adapter.http_endpoint || "").trim();
+  const wsCandidate = (adapter.ws_endpoint || "").trim();
+  if (httpCandidate) {
+    HTTP_URL = httpCandidate;
+    localStorage.setItem("httpUrl", HTTP_URL);
+    const httpInput = document.getElementById("httpUrlInput");
+    if (httpInput) {
+      httpInput.value = HTTP_URL;
+    }
+    changed = true;
+  }
+  if (wsCandidate) {
+    WS_URL = wsCandidate;
+    localStorage.setItem("wsUrl", WS_URL);
+    const wsInput = document.getElementById("wsUrlInput");
+    if (wsInput) {
+      wsInput.value = WS_URL;
+    }
+    changed = true;
+  }
+  if (httpCandidate || wsCandidate) {
+    hydrateEndpointInputs("http");
+  }
+
+  const cameraCandidate = (camera.tunnel_url || camera.base_url || "").trim();
+  if (cameraCandidate) {
+    try {
+      cameraRouterBaseUrl = normalizeOrigin(cameraCandidate);
+      localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
+      const camInput = document.getElementById("cameraRouterBaseInput");
+      if (camInput) {
+        camInput.value = cameraRouterBaseUrl;
+      }
+      if (typeof syncPinnedPreviewSource === "function") {
+        syncPinnedPreviewSource();
+      }
+      changed = true;
+    } catch (err) {}
+  }
+
+  return changed;
+}
+
+async function fetchLocalRouterInfo() {
+  try {
+    const response = await fetch(`${routerApiBaseUrl}/nkn/info`, { method: "GET" });
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      throw new Error(data.message || `HTTP ${response.status}`);
+    }
+    const address = (((data || {}).nkn || {}).address || "").trim();
+    const localReady = Boolean(((data || {}).nkn || {}).ready);
+    const statusBits = [];
+    statusBits.push(localReady ? "Local router ready" : "Local router starting");
+    if (address) {
+      statusBits.push(`Local address: ${address}`);
+      const targetInput = document.getElementById("routerNknAddressInput");
+      if (targetInput && !(targetInput.value || "").trim()) {
+        targetInput.placeholder = address;
+      }
+    }
+    setRouterResolveStatus(statusBits.join(" | "));
+    return data;
+  } catch (err) {
+    setRouterResolveStatus(`Router info error: ${err}`, true);
+    return null;
+  }
+}
+
+async function resolveEndpointsViaNkn() {
+  const baseInput = document.getElementById("routerApiBaseInput");
+  const targetInput = document.getElementById("routerNknAddressInput");
+  if (!baseInput || !targetInput) {
+    return;
+  }
+
+  try {
+    routerApiBaseUrl = normalizeRouterApiBase(baseInput.value);
+  } catch (err) {
+    setRouterResolveStatus(`Invalid router API URL: ${err}`, true);
+    return;
+  }
+  routerTargetNknAddress = (targetInput.value || "").trim();
+
+  localStorage.setItem("routerApiBaseUrl", routerApiBaseUrl);
+  localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+  if (!routerApiBaseUrl) {
+    setRouterResolveStatus("Enter router API URL first", true);
+    return;
+  }
+
+  if (!routerTargetNknAddress) {
+    setRouterResolveStatus("No target NKN address set. Resolving local snapshot...");
+  } else {
+    setRouterResolveStatus(`Resolving via NKN target ${routerTargetNknAddress}...`);
+  }
+
+  try {
+    const response = await fetch(`${routerApiBaseUrl}/nkn/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        target_address: routerTargetNknAddress,
+        timeout_seconds: 14,
+        refresh_local: true,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      throw new Error(data.message || `HTTP ${response.status}`);
+    }
+
+    const resolved =
+      data.resolved ||
+      (((data.snapshot || {}).resolved) || {}) ||
+      ((((data.reply || {}).snapshot || {}).resolved) || {});
+    const applied = applyResolvedEndpoints(resolved);
+    if (!applied) {
+      setRouterResolveStatus("Resolved response received but no endpoints found", true);
+      return;
+    }
+
+    setRouterResolveStatus("Endpoints resolved and applied");
+    const cameraBaseInput = document.getElementById("cameraRouterBaseInput");
+    if (cameraBaseInput && cameraRouterBaseUrl) {
+      cameraBaseInput.value = cameraRouterBaseUrl;
+    }
+    updateMetrics();
+  } catch (err) {
+    setRouterResolveStatus(`NKN resolve failed: ${err}`, true);
+  }
+}
+
+function initNknRouterUi() {
+  if (nknUiInitialized) {
+    return;
+  }
+  nknUiInitialized = true;
+
+  const baseInput = document.getElementById("routerApiBaseInput");
+  const targetInput = document.getElementById("routerNknAddressInput");
+  const resolveBtn = document.getElementById("routerResolveBtn");
+  const refreshBtn = document.getElementById("routerRefreshInfoBtn");
+
+  if (baseInput) {
+    baseInput.value = routerApiBaseUrl;
+    baseInput.addEventListener("change", () => {
+      try {
+        routerApiBaseUrl = normalizeRouterApiBase(baseInput.value);
+        localStorage.setItem("routerApiBaseUrl", routerApiBaseUrl);
+      } catch (err) {}
+    });
+  }
+
+  if (targetInput) {
+    targetInput.value = routerTargetNknAddress;
+    targetInput.addEventListener("change", () => {
+      routerTargetNknAddress = (targetInput.value || "").trim();
+      localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+    });
+  }
+
+  if (resolveBtn) {
+    resolveBtn.addEventListener("click", resolveEndpointsViaNkn);
+  }
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", fetchLocalRouterInfo);
+  }
+
+  ensureBrowserNknIdentity();
+  fetchLocalRouterInfo();
 }
 
 const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
@@ -1866,6 +2179,7 @@ window.addEventListener('load', async () => {
   initializeRouting();
   const initialRoute = getRouteFromLocation();
   ensureEndpointInputBindings();
+  initNknRouterUi();
   setupStreamConfigUi();
   const queryConnection = parseConnectionFromQuery();
 
