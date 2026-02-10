@@ -233,6 +233,7 @@ startup_time = time.time()
 tunnel_url = None
 tunnel_url_lock = Lock()
 tunnel_process = None
+tunnel_last_error = ""
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 MPEGTS_AVAILABLE = shutil.which(FFMPEG_BIN) is not None
@@ -1011,7 +1012,7 @@ def install_cloudflared():
 
 
 def stop_cloudflared_tunnel():
-    global tunnel_process
+    global tunnel_process, tunnel_last_error
     process = tunnel_process
     if not process:
         return
@@ -1026,17 +1027,25 @@ def stop_cloudflared_tunnel():
         pass
     finally:
         tunnel_process = None
+        tunnel_last_error = "Tunnel stopped"
 
 
 def start_cloudflared_tunnel(local_port):
-    global tunnel_url, tunnel_process
+    global tunnel_url, tunnel_process, tunnel_last_error
     cloudflared_path = get_cloudflared_path()
     if not os.path.exists(cloudflared_path):
         cloudflared_path = "cloudflared"
 
+    with tunnel_url_lock:
+        tunnel_url = None
+    tunnel_last_error = ""
+
+    cmd = [cloudflared_path, "tunnel", "--url", f"http://localhost:{local_port}"]
+    log(f"[START] Launching cloudflared: {' '.join(cmd)}")
+
     try:
         process = subprocess.Popen(
-            [cloudflared_path, "tunnel", "--url", f"http://localhost:{local_port}"],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -1044,28 +1053,44 @@ def start_cloudflared_tunnel(local_port):
         )
         tunnel_process = process
     except Exception as exc:
+        tunnel_last_error = str(exc)
         log(f"[ERROR] Failed to start cloudflared tunnel: {exc}")
         return False
 
     def monitor_output():
-        global tunnel_url
+        global tunnel_url, tunnel_last_error
+        found_url = False
         for raw_line in iter(process.stdout.readline, ""):
             line = raw_line.strip()
             if not line:
                 continue
-            if "trycloudflare.com" not in line:
-                continue
-            match = re.search(r"https://[a-zA-Z0-9-]+\\.trycloudflare\\.com", line)
-            if not match:
-                continue
-            with tunnel_url_lock:
-                if tunnel_url is None:
-                    tunnel_url = match.group(0)
-                    log("")
-                    log("=" * 60)
-                    log(f"[TUNNEL] Camera Router URL: {tunnel_url}")
-                    log("=" * 60)
-                    log("")
+            lowered = line.lower()
+            if any(token in lowered for token in ("error", "failed", "unable", "panic")):
+                log(f"[CLOUDFLARED] {line}")
+            if "trycloudflare.com" in line:
+                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                if not match:
+                    match = re.search(r"https://[^\s]+trycloudflare\.com[^\s]*", line)
+                if match:
+                    with tunnel_url_lock:
+                        if tunnel_url is None:
+                            tunnel_url = match.group(0)
+                            found_url = True
+                            tunnel_last_error = ""
+                            log("")
+                            log("=" * 60)
+                            log(f"[TUNNEL] Camera Router URL: {tunnel_url}")
+                            log("=" * 60)
+                            log("")
+
+        return_code = process.poll()
+        if return_code not in (None, 0):
+            if not found_url:
+                tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
+                log(f"[ERROR] {tunnel_last_error}")
+            else:
+                tunnel_last_error = f"cloudflared exited after startup (code {return_code})"
+                log(f"[WARN] {tunnel_last_error}")
 
     threading.Thread(target=monitor_output, daemon=True).start()
     return True
@@ -1761,6 +1786,7 @@ def health():
         sessions_active = len(sessions)
     with tunnel_url_lock:
         current_tunnel = tunnel_url
+    tunnel_running = tunnel_process is not None and tunnel_process.poll() is None
     return jsonify(
         {
             "status": "ok",
@@ -1768,6 +1794,8 @@ def health():
             "uptime_seconds": round(time.time() - startup_time, 2),
             "require_auth": runtime_security["require_auth"],
             "protocols": stream_protocol_capabilities(),
+            "tunnel_running": tunnel_running,
+            "tunnel_error": tunnel_last_error,
             "feeds_total": len(statuses),
             "feeds_online": online_count,
             "clients": clients,
@@ -2043,10 +2071,33 @@ def webrtc_player(camera_id):
 
 @app.route("/tunnel_info", methods=["GET"])
 def tunnel_info():
+    process_running = tunnel_process is not None and tunnel_process.poll() is None
     with tunnel_url_lock:
         if tunnel_url:
-            return jsonify({"status": "success", "tunnel_url": tunnel_url, "message": "Tunnel URL available"})
-        return jsonify({"status": "pending", "message": "Tunnel URL not yet available"})
+            return jsonify(
+                {
+                    "status": "success",
+                    "tunnel_url": tunnel_url,
+                    "running": process_running,
+                    "message": "Tunnel URL available",
+                }
+            )
+        if tunnel_last_error:
+            return jsonify(
+                {
+                    "status": "error",
+                    "running": process_running,
+                    "error": tunnel_last_error,
+                    "message": "Tunnel failed to start",
+                }
+            )
+        return jsonify(
+            {
+                "status": "pending",
+                "running": process_running,
+                "message": "Tunnel URL not yet available",
+            }
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2071,10 +2122,17 @@ def metrics_update_loop():
         ui.update_metric("Sessions", str(session_count))
         ui.update_metric("Requests", str(request_count["value"]))
 
+        process_running = tunnel_process is not None and tunnel_process.poll() is None
         with tunnel_url_lock:
             if tunnel_url:
                 ui.update_metric("Tunnel URL", tunnel_url)
                 ui.update_metric("Tunnel", "Active")
+            elif tunnel_last_error:
+                ui.update_metric("Tunnel", f"Error: {tunnel_last_error}")
+            elif process_running:
+                ui.update_metric("Tunnel", "Starting...")
+            else:
+                ui.update_metric("Tunnel", "Stopped")
 
         top = sorted(statuses, key=lambda x: x["fps"], reverse=True)[:2]
         for idx, stat in enumerate(top, start=1):

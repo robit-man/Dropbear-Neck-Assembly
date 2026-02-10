@@ -190,6 +190,9 @@ nav {
     border-radius: 0.5rem;
     padding: 1rem;
     margin-bottom: 0.5rem;
+    display:flex;
+    flex-flow:column;
+    gap:0.25rem;
 }
 
 button {
