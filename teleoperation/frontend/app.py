@@ -876,9 +876,16 @@ function resetSliders(options = {}) {
 
 // Send HOME command and then reset UI.
 function sendHomeCommand() {
-    sendCommand("HOME");
+    sendCommand("HOME_BRUTE");
     resetSliders({silent: true});
-    logToConsole("Sent HOME command");
+    logToConsole("Sent HOME_BRUTE command");
+}
+
+// Send soft HOME command and then reset UI.
+function sendHomeSoftCommand() {
+    sendCommand("HOME_SOFT");
+    resetSliders({silent: true});
+    logToConsole("Sent HOME_SOFT command");
 }
 
 // Authenticate with adapter
@@ -1330,7 +1337,10 @@ nav_html = """
     <a href="/quaternion" class="nav-link">Quaternion</a>
     <a href="/headstream" class="nav-link">Morphtarget</a>
   </div>
-      <button onclick="sendHomeCommand()" class="nav-button">HOME Command</button>
+  <div class="row">
+    <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>
+    <button onclick="sendHomeSoftCommand()" class="nav-button">HOME Soft</button>
+  </div>
 
 </nav>
 """
