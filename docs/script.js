@@ -768,7 +768,27 @@ function parseConnectionFromQuery() {
   return { adapterConfigured, passwordProvided };
 }
 
-const ROUTER_API_DEFAULT_BASE = localStorage.getItem("routerApiBaseUrl") || "http://127.0.0.1:5070";
+const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function isLocalHostname(hostname) {
+  return LOCALHOST_HOSTNAMES.has(String(hostname || "").trim().toLowerCase());
+}
+
+function isLocalPageContext() {
+  return isLocalHostname((window.location && window.location.hostname) || "");
+}
+
+function isLoopbackRouterApiBase(baseUrl) {
+  try {
+    const parsed = new URL(baseUrl);
+    return isLocalHostname(parsed.hostname || "");
+  } catch (err) {
+    return false;
+  }
+}
+
+const ROUTER_API_DEFAULT_BASE =
+  localStorage.getItem("routerApiBaseUrl") || (isLocalPageContext() ? "http://127.0.0.1:5070" : "");
 let routerApiBaseUrl = ROUTER_API_DEFAULT_BASE;
 let routerTargetNknAddress = localStorage.getItem("routerTargetNknAddress") || "";
 let browserNknSeedHex = localStorage.getItem("browserNknSeedHex") || "";
@@ -933,6 +953,17 @@ function applyResolvedEndpoints(resolved) {
 }
 
 async function fetchLocalRouterInfo() {
+  if (!routerApiBaseUrl) {
+    setRouterResolveStatus("Router API URL not configured");
+    return null;
+  }
+  if (isLoopbackRouterApiBase(routerApiBaseUrl) && !isLocalPageContext()) {
+    setRouterResolveStatus(
+      "Local router API is not reachable from this hosted page. Use a reachable router URL or run this UI locally."
+    );
+    return null;
+  }
+
   try {
     const response = await fetch(`${routerApiBaseUrl}/nkn/info`, { method: "GET" });
     const data = await response.json();
@@ -977,6 +1008,13 @@ async function resolveEndpointsViaNkn() {
   localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
   if (!routerApiBaseUrl) {
     setRouterResolveStatus("Enter router API URL first", true);
+    return;
+  }
+  if (isLoopbackRouterApiBase(routerApiBaseUrl) && !isLocalPageContext()) {
+    setRouterResolveStatus(
+      "Router API points to localhost, which is unreachable from this hosted page",
+      true
+    );
     return;
   }
 
@@ -1145,6 +1183,26 @@ function cameraRouterUrl(path, includeSession = true) {
   }
   const pathWithSession = withCameraSession(path, includeSession);
   return `${cameraRouterBaseUrl}${pathWithSession}`;
+}
+
+function isTryCloudflareBase(url) {
+  try {
+    const parsed = new URL(url || "");
+    return String(parsed.hostname || "").toLowerCase().endsWith(".trycloudflare.com");
+  } catch (err) {
+    return false;
+  }
+}
+
+function cameraRouterFetchErrorMessage(err) {
+  const detail = err && err.message ? err.message : String(err);
+  if (isTryCloudflareBase(cameraRouterBaseUrl)) {
+    return (
+      "Camera router tunnel unreachable. This trycloudflare URL is likely expired or offline; " +
+      "get a fresh URL from /tunnel_info and authenticate again."
+    );
+  }
+  return detail;
 }
 
 function setStreamStatus(message, error = false) {
@@ -1609,7 +1667,17 @@ async function cameraRouterFetch(path, options = {}, includeSession = true) {
     throw new Error("Camera Router URL is not configured");
   }
   const url = cameraRouterUrl(path, includeSession);
-  const response = await fetch(url, options);
+  let response = null;
+  try {
+    response = await fetch(url, options);
+  } catch (err) {
+    throw new Error(cameraRouterFetchErrorMessage(err));
+  }
+  if (response.status === 530 && isTryCloudflareBase(cameraRouterBaseUrl)) {
+    throw new Error(
+      "Camera router tunnel is offline (Cloudflare 530). Refresh the tunnel URL from /tunnel_info and retry."
+    );
+  }
   return response;
 }
 
@@ -1637,11 +1705,11 @@ async function authenticateCameraRouter() {
   setStreamStatus("Authenticating with camera router...");
 
   try {
-    const response = await fetch(`${cameraRouterBaseUrl}${authPath}`, {
+    const response = await cameraRouterFetch(authPath, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: cameraRouterPassword }),
-    });
+    }, false);
     const data = await response.json();
     if (!response.ok || data.status !== "success") {
       setStreamStatus(`Auth failed: ${data.message || response.status}`, true);

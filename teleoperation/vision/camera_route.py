@@ -225,6 +225,7 @@ DEFAULT_ROTATE_CLOCKWISE = True
 DEFAULT_WEBRTC_TARGET_FPS = 24
 DEFAULT_MPEGTS_TARGET_FPS = 24
 DEFAULT_MPEGTS_JPEG_QUALITY = 60
+DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
 
 SESSION_TIMEOUT = DEFAULT_SESSION_TIMEOUT
 runtime_security = {
@@ -285,6 +286,8 @@ tunnel_url = None
 tunnel_url_lock = Lock()
 tunnel_process = None
 tunnel_last_error = ""
+tunnel_desired = False
+tunnel_restart_lock = Lock()
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 MPEGTS_AVAILABLE = shutil.which(FFMPEG_BIN) is not None
@@ -1063,9 +1066,12 @@ def install_cloudflared():
 
 
 def stop_cloudflared_tunnel():
-    global tunnel_process, tunnel_last_error
+    global tunnel_process, tunnel_last_error, tunnel_url, tunnel_desired
+    tunnel_desired = False
     process = tunnel_process
     if not process:
+        with tunnel_url_lock:
+            tunnel_url = None
         return
     try:
         if process.poll() is None:
@@ -1078,11 +1084,18 @@ def stop_cloudflared_tunnel():
         pass
     finally:
         tunnel_process = None
+        with tunnel_url_lock:
+            tunnel_url = None
         tunnel_last_error = "Tunnel stopped"
 
 
 def start_cloudflared_tunnel(local_port):
-    global tunnel_url, tunnel_process, tunnel_last_error
+    global tunnel_url, tunnel_process, tunnel_last_error, tunnel_desired
+    with tunnel_restart_lock:
+        if tunnel_process is not None and tunnel_process.poll() is None:
+            return True
+        tunnel_desired = True
+
     cloudflared_path = get_cloudflared_path()
     if not os.path.exists(cloudflared_path):
         cloudflared_path = "cloudflared"
@@ -1091,7 +1104,14 @@ def start_cloudflared_tunnel(local_port):
         tunnel_url = None
     tunnel_last_error = ""
 
-    cmd = [cloudflared_path, "tunnel", "--url", f"http://localhost:{local_port}"]
+    cmd = [
+        cloudflared_path,
+        "tunnel",
+        "--protocol",
+        "http2",
+        "--url",
+        f"http://localhost:{local_port}",
+    ]
     log(f"[START] Launching cloudflared: {' '.join(cmd)}")
 
     try:
@@ -1109,8 +1129,9 @@ def start_cloudflared_tunnel(local_port):
         return False
 
     def monitor_output():
-        global tunnel_url, tunnel_last_error
+        global tunnel_url, tunnel_process, tunnel_last_error
         found_url = False
+        captured_url = ""
         for raw_line in iter(process.stdout.readline, ""):
             line = raw_line.strip()
             if not line:
@@ -1125,7 +1146,8 @@ def start_cloudflared_tunnel(local_port):
                 if match:
                     with tunnel_url_lock:
                         if tunnel_url is None:
-                            tunnel_url = match.group(0)
+                            captured_url = match.group(0)
+                            tunnel_url = captured_url
                             found_url = True
                             tunnel_last_error = ""
                             log("")
@@ -1135,13 +1157,29 @@ def start_cloudflared_tunnel(local_port):
                             log("")
 
         return_code = process.poll()
-        if return_code not in (None, 0):
-            if not found_url:
+        with tunnel_restart_lock:
+            if tunnel_process is process:
+                tunnel_process = None
+
+        if captured_url:
+            with tunnel_url_lock:
+                if tunnel_url == captured_url:
+                    tunnel_url = None
+
+        if return_code is not None:
+            if found_url:
+                tunnel_last_error = f"cloudflared exited (code {return_code}); tunnel URL expired"
+                log(f"[WARN] {tunnel_last_error}")
+            else:
                 tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
                 log(f"[ERROR] {tunnel_last_error}")
-            else:
-                tunnel_last_error = f"cloudflared exited after startup (code {return_code})"
-                log(f"[WARN] {tunnel_last_error}")
+
+            if tunnel_desired and service_running.is_set():
+                delay = DEFAULT_TUNNEL_RESTART_DELAY_SECONDS
+                log(f"[WARN] Restarting cloudflared in {delay:.1f}s...")
+                time.sleep(delay)
+                if tunnel_desired and service_running.is_set():
+                    start_cloudflared_tunnel(local_port)
 
     threading.Thread(target=monitor_output, daemon=True).start()
     return True
@@ -1599,7 +1637,10 @@ def select_initial_default_profile(profiles):
 
     best = min(profiles, key=score)
     return {
-        "pixel_format": _normalize_pixel_format_code(best.get("pixel_format", "")),
+        # Do not force a pixel format at startup; many Orin camera drivers expose
+        # formats that are valid in v4l2-ctl but not stable through OpenCV paths.
+        # Users can still choose an explicit format from available_profiles later.
+        "pixel_format": "",
         "width": int(best.get("width", target_width)),
         "height": int(best.get("height", target_height)),
         "fps": float(best.get("fps", target_fps)),
@@ -1645,7 +1686,7 @@ def _build_gstreamer_capture_pipelines(device_path, width, height, fps, pixel_fo
     pixfmt = _normalize_pixel_format_code(pixel_format)
 
     raw_caps = "video/x-raw"
-    if pixfmt and pixfmt != "MJPG":
+    if pixfmt and pixfmt not in ("MJPG", "RG10", "RG12", "RG16", "BA81", "GBRG", "GRBG", "BGGR"):
         raw_caps += f",format=(string){pixfmt}"
     raw_caps += (
         f",width=(int){width},height=(int){height},framerate=(fraction){fps}/1"
@@ -1697,7 +1738,8 @@ def _apply_requested_camera_props(cap, width, height, fps, pixel_format=""):
         pass
 
     pixfmt = _normalize_pixel_format_code(pixel_format)
-    if len(pixfmt) == 4:
+    safe_fourcc = {"MJPG", "YUYV", "UYVY", "NV12"}
+    if len(pixfmt) == 4 and pixfmt in safe_fourcc:
         try:
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*pixfmt))
         except Exception:
@@ -2354,9 +2396,9 @@ def health():
     clients = sum(s["clients"] for s in statuses)
     with sessions_lock:
         sessions_active = len(sessions)
-    with tunnel_url_lock:
-        current_tunnel = tunnel_url
     tunnel_running = tunnel_process is not None and tunnel_process.poll() is None
+    with tunnel_url_lock:
+        current_tunnel = tunnel_url if tunnel_running else None
     return jsonify(
         {
             "status": "ok",
@@ -2397,8 +2439,9 @@ def list_cameras():
                 "protocols": capabilities,
             }
         )
+    tunnel_running = tunnel_process is not None and tunnel_process.poll() is None
     with tunnel_url_lock:
-        current_tunnel = tunnel_url
+        current_tunnel = tunnel_url if tunnel_running else None
     return jsonify(
         {
             "status": "success",
@@ -2716,13 +2759,27 @@ def webrtc_player(camera_id):
 def tunnel_info():
     process_running = tunnel_process is not None and tunnel_process.poll() is None
     with tunnel_url_lock:
-        if tunnel_url:
+        current_tunnel = tunnel_url if process_running else None
+        stale_tunnel = tunnel_url if (tunnel_url and not process_running) else None
+
+        if current_tunnel:
             return jsonify(
                 {
                     "status": "success",
-                    "tunnel_url": tunnel_url,
+                    "tunnel_url": current_tunnel,
                     "running": process_running,
                     "message": "Tunnel URL available",
+                }
+            )
+        if stale_tunnel:
+            return jsonify(
+                {
+                    "status": "error",
+                    "running": process_running,
+                    "tunnel_url": "",
+                    "stale_tunnel_url": stale_tunnel,
+                    "error": tunnel_last_error or "Tunnel URL expired",
+                    "message": "Tunnel process is not running; URL is stale",
                 }
             )
         if tunnel_last_error:
@@ -2747,14 +2804,17 @@ def tunnel_info():
 def router_info():
     process_running = tunnel_process is not None and tunnel_process.poll() is None
     with tunnel_url_lock:
-        current_tunnel = tunnel_url
+        current_tunnel = tunnel_url if process_running else ""
+        stale_tunnel = tunnel_url if (tunnel_url and not process_running) else ""
         current_error = tunnel_last_error
 
     listen_port = int(network_runtime.get("listen_port", DEFAULT_LISTEN_PORT))
     listen_host = str(network_runtime.get("listen_host", DEFAULT_LISTEN_HOST))
     local_base = f"http://127.0.0.1:{listen_port}"
-    tunnel_state = "active" if current_tunnel else ("starting" if process_running else "inactive")
-    if current_error and not process_running and not current_tunnel:
+    tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
+    if stale_tunnel and not process_running:
+        tunnel_state = "stale"
+    if current_error and not process_running and not current_tunnel and not stale_tunnel:
         tunnel_state = "error"
 
     return jsonify(
@@ -2774,6 +2834,7 @@ def router_info():
                 "tunnel_url": current_tunnel,
                 "list_url": f"{current_tunnel}/list" if current_tunnel else "",
                 "health_url": f"{current_tunnel}/health" if current_tunnel else "",
+                "stale_tunnel_url": stale_tunnel,
                 "error": current_error,
             },
             "security": {
@@ -2808,9 +2869,11 @@ def metrics_update_loop():
 
         process_running = tunnel_process is not None and tunnel_process.poll() is None
         with tunnel_url_lock:
-            if tunnel_url:
+            if tunnel_url and process_running:
                 ui.update_metric("Tunnel URL", tunnel_url)
                 ui.update_metric("Tunnel", "Active")
+            elif tunnel_url and not process_running:
+                ui.update_metric("Tunnel", "Stale URL")
             elif tunnel_last_error:
                 ui.update_metric("Tunnel", f"Error: {tunnel_last_error}")
             elif process_running:
