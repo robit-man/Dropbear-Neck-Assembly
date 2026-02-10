@@ -888,6 +888,63 @@ function sendHomeSoftCommand() {
     logToConsole("Sent HOME_SOFT command");
 }
 
+function getAdapterOrigin() {
+    if (!HTTP_URL) {
+        return null;
+    }
+    try {
+        const parsedHttpUrl = new URL(HTTP_URL.includes("://") ? HTTP_URL : `https://${HTTP_URL}`);
+        return parsedHttpUrl.origin;
+    } catch (err) {
+        return null;
+    }
+}
+
+async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
+    if (!SESSION_KEY) {
+        logToConsole("[ERROR] No session key - please authenticate first");
+        showConnectionModal();
+        return;
+    }
+
+    const adapterOrigin = getAdapterOrigin();
+    if (!adapterOrigin) {
+        logToConsole("[ERROR] Cannot reset port: invalid adapter HTTP URL");
+        showConnectionModal();
+        return;
+    }
+
+    logToConsole("[RESET] Resetting adapter serial port...");
+    try {
+        const response = await fetch(`${adapterOrigin}/serial_reset`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                session_key: SESSION_KEY,
+                trigger_home: !!triggerHome,
+                home_command: homeCommand
+            })
+        });
+
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (jsonErr) {}
+
+        if (!response.ok || data.status !== 'success') {
+            const msg = data.message || `HTTP ${response.status}`;
+            logToConsole("[ERROR] Serial reset failed: " + msg);
+            return;
+        }
+
+        const homeSent = data.home_sent ? ` + ${data.home_sent}` : "";
+        logToConsole(`[OK] Serial reset complete${homeSent}`);
+        resetSliders({silent: true});
+    } catch (err) {
+        logToConsole("[ERROR] Serial reset request failed: " + err);
+    }
+}
+
 // Authenticate with adapter
 async function authenticate(password, wsUrl, httpUrl) {
     try {
@@ -1340,6 +1397,7 @@ nav_html = """
   <div class="row">
     <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>
     <button onclick="sendHomeSoftCommand()" class="nav-button">HOME Soft</button>
+    <button onclick="resetAdapterPort(false)" class="nav-button">Reset Port</button>
   </div>
 
 </nav>

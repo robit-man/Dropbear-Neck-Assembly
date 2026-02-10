@@ -124,6 +124,7 @@ current_state = {k: (1.0 if k in ("S","A") else 0) for k in allowed_ranges}
 # --- Session Management ---
 sessions = {}  # {session_key: {"created_at": timestamp, "last_used": timestamp}}
 sessions_lock = Lock()
+serial_io_lock = Lock()
 SESSION_TIMEOUT = 300  # seconds (5 minutes)
 DEFAULT_PASSWORD = "neck2025"  # Should be changed via config
 
@@ -205,10 +206,14 @@ def validate_command(cmd):
     return True
 
 # --- Merge Partial into State ---
+def _reset_state_to_home_defaults():
+    for k in current_state:
+        current_state[k] = 1.0 if k in ("S", "A") else 0
+
+
 def merge_into_state(cmd):
     if _normalized_home_command(cmd):
-        for k in current_state:
-            current_state[k] = 1.0 if k in ("S","A") else 0
+        _reset_state_to_home_defaults()
         return
     for token in cmd.split(","):
         m = re.match(r"^([XYZHSARP])(-?\d+(?:\.\d+)?)$", token.strip())
@@ -716,7 +721,10 @@ def process_command(cmd, ser):
     if home_cmd:
         outbound = home_cmd.upper()
         try:
-            ser.write((outbound + "\n").encode("utf-8"))
+            with serial_io_lock:
+                if ser is None or not getattr(ser, "is_open", True):
+                    return {"status":"error","message":"Serial port is not connected"}
+                ser.write((outbound + "\n").encode("utf-8"))
             log(f"Sent command: {outbound}")
             return {"status":"success","command":outbound}
         except Exception as e:
@@ -725,7 +733,10 @@ def process_command(cmd, ser):
 
     full = assemble_full_command()
     try:
-        ser.write((full + "\n").encode("utf-8"))
+        with serial_io_lock:
+            if ser is None or not getattr(ser, "is_open", True):
+                return {"status":"error","message":"Serial port is not connected"}
+            ser.write((full + "\n").encode("utf-8"))
         log(f"Sent command: {full}")
         return {"status":"success","command":full}
     except Exception as e:
@@ -836,6 +847,55 @@ def main():
         except Exception as exc:
             print(f"Serial connect error: {exc}\n")
 
+    def reset_serial_connection(trigger_home=True, home_command="HOME_BRUTE"):
+        """Disconnect and reconnect serial port, optionally issuing a home command."""
+        nonlocal ser, serial_device, baudrate
+
+        normalized_home = _normalized_home_command(str(home_command)) or "home_brute"
+        outbound_home = normalized_home.upper()
+
+        if not serial_device:
+            return False, "No serial device configured", None
+
+        with serial_io_lock:
+            if ser is not None:
+                try:
+                    if getattr(ser, "is_open", False):
+                        ser.close()
+                        log(f"Serial disconnected: {serial_device}@{baudrate}")
+                except Exception as close_exc:
+                    log(f"Serial close warning: {close_exc}")
+
+            # Give USB CDC device a moment to drop before reconnect attempts.
+            time.sleep(0.35)
+
+            last_exc = None
+            reconnect_attempts = 8
+            for attempt in range(1, reconnect_attempts + 1):
+                try:
+                    ser = serial.Serial(serial_device, int(baudrate), timeout=1)
+                    log(f"Serial reconnected: {serial_device}@{baudrate} (attempt {attempt})")
+                    break
+                except Exception as open_exc:
+                    last_exc = open_exc
+                    if attempt < reconnect_attempts:
+                        time.sleep(0.4)
+            else:
+                return False, f"Reconnect failed: {last_exc}", None
+
+            # Give firmware a moment after reconnect before optional home command.
+            time.sleep(0.2)
+
+            if trigger_home:
+                try:
+                    ser.write((outbound_home + "\n").encode("utf-8"))
+                    _reset_state_to_home_defaults()
+                    log(f"Sent command after serial reset: {outbound_home}")
+                except Exception as home_exc:
+                    return False, f"Reconnect succeeded but home send failed: {home_exc}", outbound_home
+
+        return True, "Serial port reset complete", outbound_home if trigger_home else None
+
     # --- Network Host/Port/Route ---
     listen_host = adapter_settings["listen_host"]
     listen_route = _normalize_route(adapter_settings["listen_route"])
@@ -920,6 +980,34 @@ def main():
                     "message": "Tunnel URL not yet available",
                 }
             )
+
+    @app.route("/serial_reset", methods=["POST"])
+    def http_serial_reset():
+        """Disconnect/reconnect serial and optionally send a post-reset home command."""
+        data = request.get_json() or {}
+        session_key = data.get("session_key", "")
+
+        if not validate_session(session_key):
+            return jsonify({"status": "error", "message": "Invalid or expired session"}), 401
+
+        trigger_home = _as_bool(data.get("trigger_home", True), default=True)
+        home_command = str(data.get("home_command", "HOME_BRUTE")).strip() or "HOME_BRUTE"
+
+        ok, message, home_sent = reset_serial_connection(
+            trigger_home=trigger_home,
+            home_command=home_command,
+        )
+        if not ok:
+            return jsonify({"status": "error", "message": message}), 500
+
+        response = {
+            "status": "success",
+            "message": message,
+            "serial_device": serial_device,
+            "baudrate": int(baudrate),
+            "home_sent": home_sent,
+        }
+        return jsonify(response)
 
     @app.route(listen_route, methods=["POST"])
     def http_receive():
