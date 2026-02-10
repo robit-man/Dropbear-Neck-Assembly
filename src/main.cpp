@@ -11,8 +11,9 @@
     3. Quaternion-based commands for orientation control (e.g.,
        "Q:0.7071,0,0.7071,0,S1,A1")
 
-  Additionally, sending the "HOME" command over serial will run a startup procedure
-  that moves the platform head to a home position and resets the stepper positions.
+  Homing commands:
+    - "HOME" or "HOME_BRUTE": aggressive overtravel homing then software zero.
+    - "HOME_SOFT": gentler homing then software zero.
 
   Make sure you have the FastAccelStepper library installed and select your ESP32 board.
 */
@@ -44,6 +45,10 @@ void moveHead(int angleX, int angleY, int angleZ, int heightOffset,
 void parseAndMove(String input);
 void handleQuaternionCommand(String command);
 void setupStepper(FastAccelStepper *&stepper, int stepPin, int dirPin, int speed, int accel);
+void zeroAllSteppers();
+void runHomeStep(int heightMm, float speedMultiplier, float accelMultiplier, unsigned long settleMs);
+void runSoftHome();
+void runBruteHome();
 
 // ----------------------- Pin Definitions and Constants -----------------------
 
@@ -82,6 +87,22 @@ void setupStepper(FastAccelStepper *&stepper, int stepPin, int dirPin, int speed
 int speedVar = 48000;
 int accVar = 36000;
 
+// Homing sequence tuning.
+const int SOFT_HOME_HEIGHT_MM = -40;
+const float SOFT_HOME_SPEED_MULT = 2.0f;
+const float SOFT_HOME_ACCEL_MULT = 2.0f;
+const unsigned long SOFT_HOME_SETTLE_MS = 2200;
+
+const int BRUTE_HOME_PREP_HEIGHT_MM = -55;
+const float BRUTE_HOME_PREP_SPEED_MULT = 2.5f;
+const float BRUTE_HOME_PREP_ACCEL_MULT = 2.5f;
+const unsigned long BRUTE_HOME_PREP_SETTLE_MS = 2300;
+
+const int BRUTE_HOME_HEIGHT_MM = -80;
+const float BRUTE_HOME_SPEED_MULT = 3.0f;
+const float BRUTE_HOME_ACCEL_MULT = 3.0f;
+const unsigned long BRUTE_HOME_SETTLE_MS = 2600;
+
 // Create a FastAccelStepperEngine instance to manage stepper motor actions.
 FastAccelStepperEngine engine = FastAccelStepperEngine();
 
@@ -110,6 +131,49 @@ void setupStepper(FastAccelStepper *&stepper, int stepPin, int dirPin, int speed
   }
 }
 
+void zeroAllSteppers()
+{
+  if (stepper1)
+    stepper1->setCurrentPosition(0);
+  if (stepper2)
+    stepper2->setCurrentPosition(0);
+  if (stepper3)
+    stepper3->setCurrentPosition(0);
+  if (stepper4)
+    stepper4->setCurrentPosition(0);
+  if (stepper5)
+    stepper5->setCurrentPosition(0);
+  if (stepper6)
+    stepper6->setCurrentPosition(0);
+}
+
+void runHomeStep(int heightMm, float speedMultiplier, float accelMultiplier, unsigned long settleMs)
+{
+  bool previousBypass = bypassClamp;
+  bypassClamp = true;
+
+  String cmd = "H" + String(heightMm) + ",S" + String(speedMultiplier, 2) + ",A" + String(accelMultiplier, 2);
+  executeCommand(cmd);
+  delay(settleMs);
+  zeroAllSteppers();
+
+  bypassClamp = previousBypass;
+}
+
+void runSoftHome()
+{
+  Serial.println("Executing HOME_SOFT command...");
+  runHomeStep(SOFT_HOME_HEIGHT_MM, SOFT_HOME_SPEED_MULT, SOFT_HOME_ACCEL_MULT, SOFT_HOME_SETTLE_MS);
+}
+
+void runBruteHome()
+{
+  Serial.println("Executing HOME_BRUTE command...");
+  runHomeStep(BRUTE_HOME_PREP_HEIGHT_MM, BRUTE_HOME_PREP_SPEED_MULT, BRUTE_HOME_PREP_ACCEL_MULT, BRUTE_HOME_PREP_SETTLE_MS);
+  delay(150);
+  runHomeStep(BRUTE_HOME_HEIGHT_MM, BRUTE_HOME_SPEED_MULT, BRUTE_HOME_ACCEL_MULT, BRUTE_HOME_SETTLE_MS);
+}
+
 void setup()
 {
   // ----------------------- Initialize Serial Communication -----------------------
@@ -128,29 +192,9 @@ void setup()
   setupStepper(stepper5, MOTOR5_STEP_PIN, MOTOR5_DIR_PIN, speedVar, accVar);
   setupStepper(stepper6, MOTOR6_STEP_PIN, MOTOR6_DIR_PIN, speedVar, accVar);
 
-  // ----------------------- Execute a Startup Command -----------------------
-  // For the HOME command, we want negative height values allowed.
-  // Set bypassClamp to true during HOME.
-  if (String("HOME").equalsIgnoreCase("HOME"))
-  { // This is just to simulate receiving HOME
-    bypassClamp = true;
-    Serial.println("Executing HOME command...");
-    executeCommand("H-40,S2,A2");
-    delay(2000); // Allow time for the movement to complete
-    if (stepper1)
-      stepper1->setCurrentPosition(0);
-    if (stepper2)
-      stepper2->setCurrentPosition(0);
-    if (stepper3)
-      stepper3->setCurrentPosition(0);
-    if (stepper4)
-      stepper4->setCurrentPosition(0);
-    if (stepper5)
-      stepper5->setCurrentPosition(0);
-    if (stepper6)
-      stepper6->setCurrentPosition(0);
-    bypassClamp = false; // Reset flag so that future non-HOME commands are clamped
-  }
+  // ----------------------- Startup Homing -----------------------
+  // On boot/USB connect, run aggressive homing to re-align all actuators.
+  runBruteHome();
 }
 
 // ----------------------- Movement and Command Processing Functions -----------------------
@@ -299,7 +343,7 @@ void parseAndMove(String input)
     String command = input.substring(startIdx, endIdx);
     executeCommand(command);
     startIdx = endIdx + 1;
-    endIdx = input.indexOf(',', startIdx);
+    endIdx = input.indexOf('|', startIdx);
   }
 
   // Execute the last (or only) command if any.
@@ -316,8 +360,8 @@ void parseAndMove(String input)
   Interprets and executes a single command string.
 
   Command types:
-    - If the command equals "HOME" (case-insensitive), it is treated as a home command.
-      (For HOME commands, bypassClamp is set to true so negative height values are allowed.)
+    - "HOME" or "HOME_BRUTE" runs aggressive homing + software zero.
+    - "HOME_SOFT" runs gentler homing + software zero.
     - If the command starts with 'Q', it is treated as a quaternion command.
     - If the command contains a colon (':'), it is processed as direct
       control of individual steppers (e.g., "1:30,2:45").
@@ -332,26 +376,15 @@ void executeCommand(String command)
   if (command.length() == 0)
     return;
 
-  // ---------- Handle HOME Command ----------
-  if (command.equalsIgnoreCase("HOME"))
+  // ---------- Handle Home Commands ----------
+  if (command.equalsIgnoreCase("HOME") || command.equalsIgnoreCase("HOME_BRUTE"))
   {
-    Serial.println("Executing HOME command...");
-    bypassClamp = true; // Allow negative values for HOME command
-    executeCommand("H-40,S2,A2");
-    delay(2000); // Allow time for the movement to complete
-    if (stepper1)
-      stepper1->setCurrentPosition(0);
-    if (stepper2)
-      stepper2->setCurrentPosition(0);
-    if (stepper3)
-      stepper3->setCurrentPosition(0);
-    if (stepper4)
-      stepper4->setCurrentPosition(0);
-    if (stepper5)
-      stepper5->setCurrentPosition(0);
-    if (stepper6)
-      stepper6->setCurrentPosition(0);
-    bypassClamp = false; // Reset clamp flag after HOME command
+    runBruteHome();
+    return;
+  }
+  if (command.equalsIgnoreCase("HOME_SOFT"))
+  {
+    runSoftHome();
     return;
   }
 
