@@ -24,6 +24,24 @@ const ROUTES = new Set(["connect", "home", "direct", "euler", "head", "quaternio
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
 
+function routeAllowsWebSocket(route) {
+    return route !== "orientation";
+}
+
+function disableWebSocketMode() {
+    if (socket) {
+        try {
+            socket.disconnect();
+        } catch (err) {
+            console.warn("Socket disconnect failed:", err);
+        }
+        socket = null;
+    }
+    useWS = false;
+    metrics.connected = !!authenticated;
+    updateMetrics();
+}
+
 // Metrics tracking
 let metrics = {
     connected: false,
@@ -246,7 +264,16 @@ function applyRoute(route) {
         hideConnectionModal();
     }
     if (route === "orientation") {
+        disableWebSocketMode();
         hideConnectionModal();
+    } else if (
+        routeAllowsWebSocket(route) &&
+        WS_URL &&
+        SESSION_KEY &&
+        authenticated &&
+        (!socket || socket.disconnected)
+    ) {
+        initWebSocket();
     }
 }
 
@@ -463,6 +490,15 @@ function initWebSocket() {
     return;
   }
 
+  if (socket) {
+    try {
+      socket.disconnect();
+    } catch (err) {
+      console.warn("Socket cleanup failed:", err);
+    }
+    socket = null;
+  }
+
   try {
     // Extract base URL from WS_URL (remove /ws path)
     const wsBase = WS_URL.replace(/^ws:/, 'http:').replace(/^wss:/, 'https:').replace(/\/ws$/, '');
@@ -547,6 +583,60 @@ function showConnectionModal() {
     ensureBrowserNknIdentity();
     hydrateEndpointInputs("http");
   }
+}
+
+// HTTP-only path used by local orientation streaming.
+function sendCommandHttpOnly(command) {
+    if (suppressCommandDispatch) {
+        return;
+    }
+
+    const startTime = Date.now();
+    metrics.commandsSent++;
+
+    if (!SESSION_KEY) {
+        logToConsole("[ERROR] No session key - please authenticate first");
+        showConnectionModal();
+        return;
+    }
+
+    if (!HTTP_URL) {
+        logToConsole("[ERROR] No HTTP URL configured");
+        showConnectionModal();
+        return;
+    }
+
+    fetch(HTTP_URL, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command: command, session_key: SESSION_KEY})
+    })
+    .then(r => {
+        metrics.latency = Date.now() - startTime;
+        return r.json();
+    })
+    .then(data => {
+        logToConsole("HTTP -> " + command);
+        if (data.status !== 'success') {
+            logToConsole("[ERROR] " + (data.message || JSON.stringify(data)));
+            if (data.message && data.message.includes('session')) {
+                SESSION_KEY = "";
+                localStorage.removeItem('sessionKey');
+                showConnectionModal();
+            }
+        }
+        const elapsed = (Date.now() - metrics.lastCommandTime) / 1000;
+        if (elapsed > 0) {
+            metrics.dataRate = 1 / elapsed;
+        }
+        metrics.lastCommandTime = Date.now();
+        updateMetrics();
+    })
+    .catch(err => {
+        logToConsole("[ERROR] Fetch error: " + err);
+        metrics.connected = false;
+        updateMetrics();
+    });
 }
 
 function hideConnectionModal() {
@@ -699,11 +789,13 @@ async function connectToAdapter() {
   if (success) {
     WS_URL = wsUrl;
     HTTP_URL = httpUrl;
+    const activeRoute = getRouteFromLocation();
 
     // Try WebSocket if URL provided
-    if (wsUrl) {
+    if (wsUrl && routeAllowsWebSocket(activeRoute)) {
       initWebSocket();
     } else {
+      disableWebSocketMode();
       hideConnectionModal();
     }
   }
@@ -2448,7 +2540,7 @@ window.addEventListener('load', async () => {
     logToConsole("[CONNECT] Adapter and password found in query; attempting auto-connect...");
     const autoConnected = await authenticate(PASSWORD, WS_URL, HTTP_URL);
     if (autoConnected) {
-      if (WS_URL) {
+      if (WS_URL && initialRoute !== "orientation") {
         initWebSocket();
       } else {
         hideConnectionModal();
@@ -2467,7 +2559,7 @@ window.addEventListener('load', async () => {
     updateMetrics();
 
     // Try WebSocket if configured
-    if (WS_URL) {
+    if (WS_URL && initialRoute !== "orientation") {
       initWebSocket();
     } else {
       hideConnectionModal();
@@ -2491,6 +2583,7 @@ window.addEventListener('load', async () => {
 });
 
 window.sendCommand = sendCommand;
+window.sendCommandHttpOnly = sendCommandHttpOnly;
 window.sendHomeCommand = sendHomeCommand;
 window.sendHomeSoftCommand = sendHomeSoftCommand;
 window.resetAdapterPort = resetAdapterPort;

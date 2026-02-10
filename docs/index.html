@@ -523,38 +523,17 @@
       <h2>Orientation</h2>
 
       <div class="control-section">
-        <h3 style="margin-top:0;">Orientation Hub</h3>
-        <p style="opacity:0.75;margin-top:0;">
-          Connect to your <code>wss_state_share</code> service, select a phone/device source, then stream mapped commands to the neck.
-        </p>
-        <div class="row">
-          <label for="orientationHubUrlInput">Hub URL:</label>
-          <input type="text" id="orientationHubUrlInput" placeholder="http://127.0.0.1:8080" style="flex:1;">
-        </div>
-        <div class="row">
-          <label for="orientationHubWsInput">Hub WS:</label>
-          <input type="text" id="orientationHubWsInput" placeholder="ws://127.0.0.1:8080" style="flex:1;">
-        </div>
-        <div class="row">
-          <button id="orientationLoadEmbedBtn">Load Embedded Hub</button>
-          <button id="orientationConnectBtn" class="primary">Connect Hub Feed</button>
-          <button id="orientationDisconnectBtn">Disconnect</button>
-        </div>
-        <div class="row">
-          <label for="orientationPeerSelect">Source Device:</label>
-          <select id="orientationPeerSelect" style="flex:1;">
-            <option value="">Auto (latest active)</option>
-          </select>
-        </div>
-        <p id="orientationStatus" style="margin:0.5rem 0 0 0;opacity:0.85;">Idle</p>
-      </div>
-
-      <div class="control-section">
         <h3 style="margin-top:0;">Embedded Orientation Scene</h3>
+        <div class="row" style="margin-bottom:0.35rem;">
+          <button id="orientationStreamToggleBtn" class="primary">Play Stream</button>
+          <button id="orientationProjectionPlaneBtn" class="primary" type="button">Planar</button>
+          <button id="orientationProjectionSphereBtn" type="button">Globe</button>
+        </div>
+        <p id="orientationStatus" style="margin:0;opacity:0.85;">Initializing local permissions...</p>
         <div class="orientation-embed-wrap">
           <iframe
             id="orientationEmbedFrame"
-            title="Orientation Hub"
+            title="Orientation Scene"
             referrerpolicy="no-referrer"
             allow="accelerometer; gyroscope; magnetometer; geolocation; fullscreen"
           ></iframe>
@@ -562,44 +541,8 @@
       </div>
 
       <div class="control-section">
-        <h3 style="margin-top:0;">Orientation Stream</h3>
-        <div class="stream-grid">
-          <div class="stream-card">
-            <div class="stream-label">Hub State</div>
-            <div id="orientationHubState" class="stream-value">Disconnected</div>
-          </div>
-          <div class="stream-card">
-            <div class="stream-label">Source Telemetry</div>
-            <div id="orientationSourceMeta" class="stream-value">No source selected</div>
-          </div>
-          <div class="stream-card">
-            <div class="stream-label">Command Stream</div>
-            <div id="orientationStreamState" class="stream-value">Paused</div>
-          </div>
-          <div class="stream-card">
-            <div class="stream-label">Last Command</div>
-            <div id="orientationCommandStream" class="stream-value">Waiting for source data...</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="control-section">
         <h3 style="margin-top:0;">Orientation Tuneables</h3>
         <p class="tuneables-note">These settings apply live while orientation streaming is playing.</p>
-
-        <div class="row" style="margin-bottom:0.5rem;">
-          <button id="orientationStreamToggleBtn" class="primary">Play Stream</button>
-          <button id="orientationRecenterBtn">Recenter</button>
-          <button id="orientationResetTuneablesBtn">Reset Tuneables</button>
-        </div>
-
-        <div class="row">
-          <label for="orientationProjectionSelect">Projection Mode:</label>
-          <select id="orientationProjectionSelect" style="flex:1;">
-            <option value="plane" selected>Planar</option>
-            <option value="sphere">Unit Sphere</option>
-          </select>
-        </div>
         <div class="row">
           <label for="orientationSensitivity">Orientation Sensitivity:</label>
           <input type="number" id="orientationSensitivity" min="0" max="20" step="0.1" value="1.0" style="width:90px;">

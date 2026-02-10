@@ -537,7 +537,7 @@ h3 {
     height: 22px;
     border-right: 2px solid var(--accent);
     border-bottom: 2px solid var(--accent);
-    border-bottom-right-radius: 8px;
+    border-bottom-right-radius: 14px;
     cursor: nwse-resize;
 }
 
