@@ -32,14 +32,19 @@ This repository is focused on the development of a robot head and neck assembly,
 
 ## Added Control Software in /interface
 
+First, you must run [the adapter](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/adapter/adapter.py) which exposes the neck serial control over a password protected endpoint. You will feed this endpoint to the app below
+```bash
+python3 adapter.py
+```
+
 Just run [this script](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/frontend/app.py) via 
 ```bash
 python3 app.py
 ```
 
-and it will automatically generate a venv and start the application via flask.
+and it will automatically generate a venv and start the application via flask. You can then visit the endpoint generated and inject the above password and http/s or ws/s endpoint provided by adapter interface.
 
-[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/interface/app.py)
+[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/frontend/app.py)
 
 
 ## Software Requirements
