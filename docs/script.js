@@ -915,7 +915,8 @@ function buildMjpegPreviewUrl(cameraId) {
   return cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
 }
 
-function syncPinnedPreviewSource() {
+function syncPinnedPreviewSource(options = {}) {
+  const forceRefresh = !!options.forceRefresh;
   const { image } = getPinnedPreviewElements();
   if (!image) {
     return;
@@ -928,7 +929,10 @@ function syncPinnedPreviewSource() {
 
   const sourceUrl = buildMjpegPreviewUrl(pinnedPreviewState.cameraId);
   const sourceKey = `${cameraRouterBaseUrl}|${cameraRouterSessionKey}|${pinnedPreviewState.cameraId}`;
-  if (image.dataset.sourceKey !== sourceKey) {
+  if (forceRefresh || image.dataset.sourceKey !== sourceKey) {
+    if (forceRefresh) {
+      image.src = "";
+    }
     image.src = sourceUrl;
     image.dataset.sourceKey = sourceKey;
   }
@@ -1458,6 +1462,7 @@ async function startMjpegPreview(cameraId) {
   cameraPreview.activeCameraId = cameraId;
   cameraPreview.targetCameraId = cameraId;
   cameraPreview.activeMode = STREAM_MODE_MJPEG;
+  syncPinnedPreviewSource({ forceRefresh: true });
   setPinButtonState();
   updateMetrics();
 }
