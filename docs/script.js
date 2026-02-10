@@ -20,7 +20,7 @@ let socket = null;
 let useWS = false;
 let authenticated = false;
 let suppressCommandDispatch = false;
-const ROUTES = new Set(["connect", "home", "direct", "euler", "head", "quaternion", "headstream"]);
+const ROUTES = new Set(["connect", "home", "direct", "euler", "head", "quaternion", "headstream", "streams"]);
 let headstreamInitTriggered = false;
 
 // Metrics tracking
@@ -136,6 +136,11 @@ function applyRoute(route) {
     if (route === "headstream" && !headstreamInitTriggered && typeof window.initHeadstreamApp === "function") {
         window.initHeadstreamApp();
         headstreamInitTriggered = true;
+    }
+
+    if (route === "streams") {
+        setupStreamConfigUi();
+        hideConnectionModal();
     }
 }
 
@@ -625,6 +630,412 @@ function parseConnectionFromQuery() {
   return { adapterConfigured, passwordProvided };
 }
 
+const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
+let cameraRouterBaseUrl = CAMERA_ROUTER_DEFAULT_BASE;
+let cameraRouterPassword = localStorage.getItem("cameraRouterPassword") || "";
+let cameraRouterSessionKey = localStorage.getItem("cameraRouterSessionKey") || "";
+let cameraRouterFeeds = [];
+let cameraRouterProtocols = {
+  webrtc: false,
+  mjpeg: true,
+  jpeg_snapshot: true,
+  mpegts: false,
+};
+const cameraPreview = {
+  jpegTimer: null,
+  peerConnection: null,
+};
+let streamUiInitialized = false;
+
+function normalizeOrigin(rawInput) {
+  const trimmed = (rawInput || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+  const candidate = trimmed.includes("://") ? trimmed : `https://${trimmed}`;
+  const parsed = new URL(candidate);
+  return `${parsed.protocol}//${parsed.host}`;
+}
+
+function withCameraSession(path, includeSession = true) {
+  if (!includeSession || !cameraRouterSessionKey) {
+    return path;
+  }
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}session_key=${encodeURIComponent(cameraRouterSessionKey)}`;
+}
+
+function cameraRouterUrl(path, includeSession = true) {
+  if (!cameraRouterBaseUrl) {
+    return "";
+  }
+  const pathWithSession = withCameraSession(path, includeSession);
+  return `${cameraRouterBaseUrl}${pathWithSession}`;
+}
+
+function setStreamStatus(message, error = false) {
+  const statusEl = document.getElementById("streamConfigStatus");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = message;
+  statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function stopCameraPreview() {
+  if (cameraPreview.jpegTimer) {
+    clearInterval(cameraPreview.jpegTimer);
+    cameraPreview.jpegTimer = null;
+  }
+  if (cameraPreview.peerConnection) {
+    try {
+      cameraPreview.peerConnection.getReceivers().forEach((receiver) => {
+        if (receiver.track) {
+          receiver.track.stop();
+        }
+      });
+      cameraPreview.peerConnection.close();
+    } catch (err) {}
+    cameraPreview.peerConnection = null;
+  }
+
+  const mjpegImg = document.getElementById("cameraPreviewImage");
+  if (mjpegImg) {
+    mjpegImg.src = "";
+    mjpegImg.style.display = "none";
+  }
+  const videoEl = document.getElementById("cameraPreviewVideo");
+  if (videoEl) {
+    try {
+      videoEl.pause();
+      if (videoEl.srcObject) {
+        const tracks = videoEl.srcObject.getTracks ? videoEl.srcObject.getTracks() : [];
+        tracks.forEach((track) => track.stop());
+      }
+    } catch (err) {}
+    videoEl.srcObject = null;
+    videoEl.removeAttribute("src");
+    videoEl.load();
+    videoEl.style.display = "none";
+  }
+}
+
+function activatePreviewMode(mode) {
+  const mjpegImg = document.getElementById("cameraPreviewImage");
+  const videoEl = document.getElementById("cameraPreviewVideo");
+  if (mjpegImg) {
+    mjpegImg.style.display = mode === "mjpeg" || mode === "jpeg" ? "block" : "none";
+  }
+  if (videoEl) {
+    videoEl.style.display = mode === "webrtc" || mode === "mpegts" ? "block" : "none";
+  }
+}
+
+async function cameraRouterFetch(path, options = {}, includeSession = true) {
+  if (!cameraRouterBaseUrl) {
+    throw new Error("Camera Router URL is not configured");
+  }
+  const url = cameraRouterUrl(path, includeSession);
+  const response = await fetch(url, options);
+  return response;
+}
+
+async function authenticateCameraRouter() {
+  const baseInput = document.getElementById("cameraRouterBaseInput");
+  const passInput = document.getElementById("cameraRouterPasswordInput");
+  if (!baseInput || !passInput) {
+    return;
+  }
+
+  try {
+    cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
+  } catch (err) {
+    setStreamStatus(`Invalid camera router URL: ${err}`, true);
+    return;
+  }
+
+  cameraRouterPassword = passInput.value.trim();
+  if (!cameraRouterBaseUrl || !cameraRouterPassword) {
+    setStreamStatus("Enter both camera router URL and password", true);
+    return;
+  }
+
+  const authPath = "/auth";
+  setStreamStatus("Authenticating with camera router...");
+
+  try {
+    const response = await fetch(`${cameraRouterBaseUrl}${authPath}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: cameraRouterPassword }),
+    });
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      setStreamStatus(`Auth failed: ${data.message || response.status}`, true);
+      return;
+    }
+
+    cameraRouterSessionKey = data.session_key;
+    localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
+    localStorage.setItem("cameraRouterPassword", cameraRouterPassword);
+    localStorage.setItem("cameraRouterSessionKey", cameraRouterSessionKey);
+
+    setStreamStatus(`Authenticated. Session timeout ${data.timeout}s`);
+    await refreshCameraFeeds();
+  } catch (err) {
+    setStreamStatus(`Auth error: ${err}`, true);
+  }
+}
+
+function renderCameraFeedOptions() {
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const feedList = document.getElementById("cameraFeedList");
+  if (!feedSelect || !feedList) {
+    return;
+  }
+
+  feedSelect.innerHTML = "";
+  cameraRouterFeeds.forEach((feed) => {
+    const opt = document.createElement("option");
+    opt.value = feed.id;
+    opt.textContent = `${feed.label} (${feed.online ? "online" : "offline"})`;
+    feedSelect.appendChild(opt);
+  });
+
+  if (cameraRouterFeeds.length > 0) {
+    const savedFeed = localStorage.getItem("cameraRouterSelectedFeed") || "";
+    if (savedFeed && cameraRouterFeeds.some((feed) => feed.id === savedFeed)) {
+      feedSelect.value = savedFeed;
+    } else if (!feedSelect.value) {
+      feedSelect.value = cameraRouterFeeds[0].id;
+    }
+    localStorage.setItem("cameraRouterSelectedFeed", feedSelect.value);
+  }
+
+  feedList.innerHTML = "";
+  cameraRouterFeeds.forEach((feed) => {
+    const line = document.createElement("div");
+    line.className = "stream-feed-row";
+    line.textContent = `${feed.id} | fps ${feed.fps} | kbps ${feed.kbps} | clients ${feed.clients} | ${feed.online ? "online" : "offline"}`;
+    feedList.appendChild(line);
+  });
+}
+
+async function refreshCameraFeeds() {
+  if (!cameraRouterBaseUrl) {
+    setStreamStatus("Set camera router URL first", true);
+    return;
+  }
+  try {
+    const response = await cameraRouterFetch("/list", {}, true);
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      if (response.status === 401) {
+        cameraRouterSessionKey = "";
+        localStorage.removeItem("cameraRouterSessionKey");
+      }
+      setStreamStatus(`List failed: ${data.message || response.status}`, true);
+      return;
+    }
+
+    cameraRouterFeeds = Array.isArray(data.cameras) ? data.cameras : [];
+    cameraRouterProtocols = data.protocols || cameraRouterProtocols;
+    renderCameraFeedOptions();
+    setStreamStatus(`Loaded ${cameraRouterFeeds.length} feeds`);
+  } catch (err) {
+    setStreamStatus(`List error: ${err}`, true);
+  }
+}
+
+async function startJpegPreview(cameraId) {
+  activatePreviewMode("jpeg");
+  const imageEl = document.getElementById("cameraPreviewImage");
+  if (!imageEl) {
+    return;
+  }
+
+  const refresh = () => {
+    const t = Date.now();
+    imageEl.src = cameraRouterUrl(`/jpeg/${encodeURIComponent(cameraId)}?t=${t}`, true);
+  };
+  refresh();
+  cameraPreview.jpegTimer = setInterval(refresh, 120);
+}
+
+async function startMjpegPreview(cameraId) {
+  activatePreviewMode("mjpeg");
+  const imageEl = document.getElementById("cameraPreviewImage");
+  if (!imageEl) {
+    return;
+  }
+  imageEl.src = cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
+}
+
+async function startMpegTsPreview(cameraId) {
+  activatePreviewMode("mpegts");
+  const videoEl = document.getElementById("cameraPreviewVideo");
+  if (!videoEl) {
+    return;
+  }
+  videoEl.src = cameraRouterUrl(`/mpegts/${encodeURIComponent(cameraId)}`, true);
+  videoEl.muted = true;
+  videoEl.playsInline = true;
+  try {
+    await videoEl.play();
+    setStreamStatus("MPEG-TS preview started");
+  } catch (err) {
+    setStreamStatus(`MPEG-TS preview failed to autoplay: ${err}`, true);
+  }
+}
+
+async function startWebRtcPreview(cameraId) {
+  if (!cameraRouterProtocols.webrtc) {
+    throw new Error("WebRTC is not available on camera router");
+  }
+
+  activatePreviewMode("webrtc");
+  const videoEl = document.getElementById("cameraPreviewVideo");
+  if (!videoEl) {
+    return;
+  }
+
+  const pc = new RTCPeerConnection();
+  cameraPreview.peerConnection = pc;
+  pc.addTransceiver("video", { direction: "recvonly" });
+  pc.ontrack = (event) => {
+    if (event.streams && event.streams[0]) {
+      videoEl.srcObject = event.streams[0];
+      videoEl.muted = true;
+      videoEl.playsInline = true;
+      videoEl.play().catch(() => {});
+    }
+  };
+  pc.onconnectionstatechange = () => {
+    setStreamStatus(`WebRTC state: ${pc.connectionState}`, pc.connectionState === "failed");
+  };
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const response = await cameraRouterFetch(
+    `/webrtc/offer/${encodeURIComponent(cameraId)}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+    },
+    true
+  );
+  const data = await response.json();
+  if (!response.ok || data.status !== "success") {
+    throw new Error(data.message || `HTTP ${response.status}`);
+  }
+  await pc.setRemoteDescription(data.answer);
+  setStreamStatus("WebRTC preview started");
+}
+
+async function startCameraPreview() {
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const modeSelect = document.getElementById("cameraModeSelect");
+  if (!feedSelect || !modeSelect) {
+    return;
+  }
+  const cameraId = feedSelect.value;
+  const mode = modeSelect.value;
+  if (!cameraId) {
+    setStreamStatus("Select a feed first", true);
+    return;
+  }
+
+  localStorage.setItem("cameraRouterSelectedFeed", cameraId);
+  localStorage.setItem("cameraRouterSelectedMode", mode);
+
+  stopCameraPreview();
+  setStreamStatus(`Starting ${mode} preview for ${cameraId}...`);
+
+  try {
+    if (mode === "webrtc") {
+      await startWebRtcPreview(cameraId);
+    } else if (mode === "mjpeg") {
+      await startMjpegPreview(cameraId);
+      setStreamStatus("MJPEG preview started");
+    } else if (mode === "jpeg") {
+      await startJpegPreview(cameraId);
+      setStreamStatus("JPEG polling preview started");
+    } else if (mode === "mpegts") {
+      await startMpegTsPreview(cameraId);
+    } else {
+      throw new Error(`Unknown mode: ${mode}`);
+    }
+  } catch (err) {
+    setStreamStatus(`Preview failed: ${err}`, true);
+  }
+}
+
+function setupStreamConfigUi() {
+  if (streamUiInitialized) {
+    return;
+  }
+  streamUiInitialized = true;
+
+  const baseInput = document.getElementById("cameraRouterBaseInput");
+  const passInput = document.getElementById("cameraRouterPasswordInput");
+  const authBtn = document.getElementById("cameraRouterAuthBtn");
+  const refreshBtn = document.getElementById("cameraRouterRefreshBtn");
+  const startBtn = document.getElementById("cameraPreviewStartBtn");
+  const stopBtn = document.getElementById("cameraPreviewStopBtn");
+  const modeSelect = document.getElementById("cameraModeSelect");
+  const feedSelect = document.getElementById("cameraFeedSelect");
+
+  if (baseInput) {
+    baseInput.value = cameraRouterBaseUrl;
+    baseInput.addEventListener("change", () => {
+      try {
+        cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
+      } catch (err) {}
+    });
+  }
+  if (passInput) {
+    passInput.value = cameraRouterPassword;
+  }
+  if (modeSelect) {
+    const savedMode = localStorage.getItem("cameraRouterSelectedMode") || "webrtc";
+    modeSelect.value = savedMode;
+  }
+
+  if (authBtn) {
+    authBtn.addEventListener("click", authenticateCameraRouter);
+  }
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", refreshCameraFeeds);
+  }
+  if (startBtn) {
+    startBtn.addEventListener("click", startCameraPreview);
+  }
+  if (stopBtn) {
+    stopBtn.addEventListener("click", () => {
+      stopCameraPreview();
+      setStreamStatus("Preview stopped");
+    });
+  }
+  if (feedSelect) {
+    feedSelect.addEventListener("change", () => {
+      localStorage.setItem("cameraRouterSelectedFeed", feedSelect.value || "");
+    });
+  }
+  if (modeSelect) {
+    modeSelect.addEventListener("change", () => {
+      localStorage.setItem("cameraRouterSelectedMode", modeSelect.value || "webrtc");
+    });
+  }
+
+  if (cameraRouterBaseUrl && cameraRouterSessionKey) {
+    refreshCameraFeeds();
+  } else {
+    setStreamStatus("Configure camera router URL + password, then authenticate");
+  }
+}
+
 function getNumberValue(id, fallback = 0) {
     const el = document.getElementById(id);
     if (!el) {
@@ -809,7 +1220,9 @@ function decQuatField(field, step) {
 
 window.addEventListener('load', async () => {
   initializeRouting();
+  const initialRoute = getRouteFromLocation();
   ensureEndpointInputBindings();
+  setupStreamConfigUi();
   const queryConnection = parseConnectionFromQuery();
 
   if (queryConnection.adapterConfigured && queryConnection.passwordProvided) {
@@ -843,10 +1256,18 @@ window.addEventListener('load', async () => {
   } else if (queryConnection.adapterConfigured) {
     // We have adapter URL but no session - show connection modal
     logToConsole("[CONNECT] Adapter URL configured, please authenticate...");
-    showConnectionModal();
+    if (initialRoute !== "streams") {
+      showConnectionModal();
+    } else {
+      hideConnectionModal();
+    }
   } else {
     // Show connection modal on first load
-    showConnectionModal();
+    if (initialRoute !== "streams") {
+      showConnectionModal();
+    } else {
+      hideConnectionModal();
+    }
   }
 });
 
@@ -871,3 +1292,7 @@ window.updateQuatView = updateQuatView;
 window.incQuatField = incQuatField;
 window.decQuatField = decQuatField;
 window.setRoute = setRoute;
+window.authenticateCameraRouter = authenticateCameraRouter;
+window.refreshCameraFeeds = refreshCameraFeeds;
+window.startCameraPreview = startCameraPreview;
+window.stopCameraPreview = stopCameraPreview;

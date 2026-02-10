@@ -4,6 +4,7 @@ qr_scan.py — ultra-low-latency QR scanner from a video URL.
 
 Usage:
   python3 qr_scan.py --video-url http://127.0.0.1:8080/video/rs_color
+  python3 qr_scan.py --video-url https://example.trycloudflare.com/video/rs_color --password camera2026
 
 Notes:
   - Uses a background grabber thread and keeps only the latest frame to avoid lag.
@@ -16,9 +17,11 @@ Requires:
 """
 
 import argparse
+import json
 import time
 import threading
 from typing import Optional, Tuple, List
+from urllib import parse, request as urlrequest
 
 import cv2
 import numpy as np
@@ -42,7 +45,58 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Optionally downscale frames to this width for faster decode (0 = disable).",
     )
+    ap.add_argument(
+        "--password",
+        default="",
+        help="Optional camera_router password. If set, the script calls /auth and appends session_key.",
+    )
+    ap.add_argument(
+        "--auth-url",
+        default="",
+        help="Optional explicit auth URL (default: <video origin>/auth).",
+    )
+    ap.add_argument(
+        "--session-key",
+        default="",
+        help="Optional pre-existing session key. If set, skips /auth.",
+    )
     return ap.parse_args()
+
+
+def build_auth_url(video_url: str, explicit_auth_url: str) -> str:
+    if explicit_auth_url:
+        return explicit_auth_url
+    parsed = parse.urlparse(video_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("video-url must be absolute when password auth is used")
+    return f"{parsed.scheme}://{parsed.netloc}/auth"
+
+
+def request_session_key(auth_url: str, password: str, timeout: float = 5.0) -> str:
+    payload = json.dumps({"password": password}).encode("utf-8")
+    req = urlrequest.Request(
+        auth_url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    data = json.loads(raw.decode("utf-8"))
+    if data.get("status") != "success":
+        raise RuntimeError(data.get("message", "Authentication failed"))
+    key = str(data.get("session_key", "")).strip()
+    if not key:
+        raise RuntimeError("No session_key returned by auth endpoint")
+    return key
+
+
+def with_session_key(video_url: str, session_key: str) -> str:
+    parsed = parse.urlparse(video_url)
+    query = parse.parse_qs(parsed.query, keep_blank_values=True)
+    query["session_key"] = [session_key]
+    new_query = parse.urlencode(query, doseq=True)
+    return parse.urlunparse(parsed._replace(query=new_query))
 
 
 class LatestFrameGrabber:
@@ -133,9 +187,21 @@ def draw_polys(img: np.ndarray, polys: List[np.ndarray], color=(0, 255, 0)):
 def main():
     args = parse_args()
 
+    video_url = args.video_url
+    session_key = args.session_key.strip()
+
+    if not session_key and args.password.strip():
+        auth_url = build_auth_url(video_url, args.auth_url.strip())
+        print(f"[qr] authenticating via: {auth_url}")
+        session_key = request_session_key(auth_url, args.password.strip())
+        print("[qr] authenticated, received session key")
+
+    if session_key:
+        video_url = with_session_key(video_url, session_key)
+
     # Start grabber
-    grabber = LatestFrameGrabber(args.video_url)
-    print(f"[qr] opened: {args.video_url}")
+    grabber = LatestFrameGrabber(video_url)
+    print(f"[qr] opened: {video_url}")
 
     detector = cv2.QRCodeDetector()
     cv2.namedWindow(args.window, cv2.WINDOW_NORMAL)

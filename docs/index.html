@@ -83,6 +83,7 @@
         <a href="#head" class="nav-link" data-route="head">Full Head</a>
         <a href="#quaternion" class="nav-link" data-route="quaternion">Quaternion</a>
         <a href="#headstream" class="nav-link" data-route="headstream">Morphtarget</a>
+        <a href="#streams" class="nav-link" data-route="streams">Streams</a>
       </div>
       <div class="row">
         <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>
@@ -441,6 +442,61 @@
           <input type="number" id="tuneIntervalMs" min="20" max="200" step="1" value="90" style="width:90px;">
           <input type="range" id="tuneIntervalMsRange" min="20" max="200" step="1" value="90">
         </div>
+      </div>
+    </section>
+
+    <section class="view" data-view="streams">
+      <h2>Stream Configuration</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Camera Router Connection</h3>
+        <div class="row">
+          <label for="cameraRouterBaseInput">Camera Router URL:</label>
+          <input type="text" id="cameraRouterBaseInput" placeholder="https://example.trycloudflare.com" style="flex:1;">
+        </div>
+        <div class="row">
+          <label for="cameraRouterPasswordInput">Password:</label>
+          <input type="password" id="cameraRouterPasswordInput" placeholder="camera router password" style="flex:1;">
+        </div>
+        <div class="row">
+          <button id="cameraRouterAuthBtn" class="primary">Authenticate</button>
+          <button id="cameraRouterRefreshBtn">Refresh Feeds</button>
+        </div>
+        <p id="streamConfigStatus" style="margin:0.5rem 0 0 0;opacity:0.85;">Idle</p>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Mode and Feed</h3>
+        <div class="row">
+          <label for="cameraFeedSelect">Camera Feed:</label>
+          <select id="cameraFeedSelect" style="flex:1;"></select>
+        </div>
+        <div class="row">
+          <label for="cameraModeSelect">Protocol:</label>
+          <select id="cameraModeSelect" style="flex:1;">
+            <option value="webrtc">WebRTC (lowest latency)</option>
+            <option value="mjpeg">MJPEG stream</option>
+            <option value="jpeg">JPEG polling</option>
+            <option value="mpegts">MPEG-TS stream</option>
+          </select>
+        </div>
+        <div class="row">
+          <button id="cameraPreviewStartBtn" class="primary">Start Preview</button>
+          <button id="cameraPreviewStopBtn">Stop Preview</button>
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Preview</h3>
+        <div class="stream-preview-wrap">
+          <img id="cameraPreviewImage" alt="Camera Preview" style="display:none;">
+          <video id="cameraPreviewVideo" autoplay muted playsinline controls style="display:none;"></video>
+        </div>
+      </div>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Feed Status</h3>
+        <div id="cameraFeedList" class="stream-feed-list"></div>
       </div>
     </section>
   </div>
