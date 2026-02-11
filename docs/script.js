@@ -1512,6 +1512,7 @@ let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
 let cameraSessionRotateInFlight = false;
 let cameraSelectInteractionUntilMs = 0;
+let cameraShareButtonResetTimer = null;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
 let pinnedPreviewState = {
@@ -1601,6 +1602,64 @@ function isCameraSelectInteractionActive() {
   return Date.now() < cameraSelectInteractionUntilMs;
 }
 
+function resetPreviewShareButton() {
+  const shareBtn = document.getElementById("cameraPreviewShareBtn");
+  if (!shareBtn) {
+    return;
+  }
+  shareBtn.textContent = "Share";
+  shareBtn.disabled = false;
+}
+
+function showPreviewShareCopiedState() {
+  const shareBtn = document.getElementById("cameraPreviewShareBtn");
+  if (!shareBtn) {
+    return;
+  }
+  if (cameraShareButtonResetTimer) {
+    clearTimeout(cameraShareButtonResetTimer);
+    cameraShareButtonResetTimer = null;
+  }
+  shareBtn.textContent = "Copied";
+  shareBtn.disabled = true;
+  cameraShareButtonResetTimer = setTimeout(() => {
+    cameraShareButtonResetTimer = null;
+    resetPreviewShareButton();
+  }, 1400);
+}
+
+async function copyTextToClipboard(text) {
+  const payload = String(text || "").trim();
+  if (!payload) {
+    return false;
+  }
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+    try {
+      await navigator.clipboard.writeText(payload);
+      return true;
+    } catch (err) {}
+  }
+
+  const node = document.createElement("textarea");
+  node.value = payload;
+  node.setAttribute("readonly", "");
+  node.style.position = "fixed";
+  node.style.opacity = "0";
+  node.style.left = "-9999px";
+  node.style.top = "0";
+  document.body.appendChild(node);
+  node.select();
+  let success = false;
+  try {
+    success = document.execCommand("copy");
+  } catch (err) {
+    success = false;
+  } finally {
+    document.body.removeChild(node);
+  }
+  return !!success;
+}
+
 function loadPinnedPreviewStateFromStorage() {
   try {
     const rawState = localStorage.getItem(PINNED_PREVIEW_STORAGE_KEY);
@@ -1686,6 +1745,58 @@ function buildMjpegPreviewUrl(cameraId) {
     return "";
   }
   return cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
+}
+
+function getCurrentPreviewShareUrl() {
+  const imageEl = document.getElementById("cameraPreviewImage");
+  if (imageEl && imageEl.style.display !== "none") {
+    const imageSrc = String(imageEl.currentSrc || imageEl.src || "").trim();
+    if (imageSrc) {
+      return imageSrc;
+    }
+  }
+
+  const videoEl = document.getElementById("cameraPreviewVideo");
+  if (videoEl && videoEl.style.display !== "none") {
+    const videoSrc = String(videoEl.currentSrc || videoEl.src || "").trim();
+    if (videoSrc) {
+      return videoSrc;
+    }
+  }
+
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const cameraId =
+    cameraPreview.activeCameraId ||
+    cameraPreview.targetCameraId ||
+    (feedSelect ? feedSelect.value : "");
+  if (!cameraId) {
+    return "";
+  }
+
+  if (cameraPreview.activeMode === STREAM_MODE_JPEG) {
+    return cameraRouterUrl(`/jpeg/${encodeURIComponent(cameraId)}`, true);
+  }
+  return cameraRouterUrl(`/mjpeg/${encodeURIComponent(cameraId)}`, true);
+}
+
+async function shareCurrentPreviewLink() {
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    setStreamStatus("Authenticate with camera router before sharing stream links", true);
+    return;
+  }
+  const streamUrl = getCurrentPreviewShareUrl();
+  if (!streamUrl) {
+    setStreamStatus("Start a preview first to share its stream URL", true);
+    return;
+  }
+
+  const copied = await copyTextToClipboard(streamUrl);
+  if (!copied) {
+    setStreamStatus("Unable to copy stream URL to clipboard", true);
+    return;
+  }
+  setStreamStatus("Stream URL copied to clipboard");
+  showPreviewShareCopiedState();
 }
 
 function syncPinnedPreviewSource(options = {}) {
@@ -2642,6 +2753,7 @@ function setupStreamConfigUi() {
   const rotateSessionBtn = document.getElementById("cameraRouterRotateSessionBtn");
   const startBtn = document.getElementById("cameraPreviewStartBtn");
   const stopBtn = document.getElementById("cameraPreviewStopBtn");
+  const shareBtn = document.getElementById("cameraPreviewShareBtn");
   const profileSelect = document.getElementById("cameraProfileSelect");
   const profileApplyBtn = document.getElementById("cameraProfileApplyBtn");
   const modeSelect = document.getElementById("cameraModeSelect");
@@ -2688,6 +2800,10 @@ function setupStreamConfigUi() {
       stopCameraPreview();
       setStreamStatus("Preview stopped");
     });
+  }
+  if (shareBtn) {
+    resetPreviewShareButton();
+    shareBtn.addEventListener("click", shareCurrentPreviewLink);
   }
   if (feedSelect) {
     feedSelect.addEventListener("pointerdown", () => {

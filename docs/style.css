@@ -270,6 +270,17 @@ nav {
     gap:0.5rem;
 }
 
+.section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.section-header h3 {
+    margin: 0;
+}
+
 button {
     background: var(--bg-secondary);
     border: 2px solid var(--border-light);
