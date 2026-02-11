@@ -1,0 +1,43 @@
+{
+    "camera_router": {
+        "network": {
+            "listen_host": "0.0.0.0",
+            "listen_port": 8080
+        },
+        "security": {
+            "password": "camera2026",
+            "session_timeout": 300,
+            "require_auth": true
+        },
+        "tunnel": {
+            "enable": true,
+            "auto_install_cloudflared": true
+        },
+        "sources": {
+            "default": {
+                "enable": false,
+                "device_glob": "/dev/video*",
+                "capture_width": 1280,
+                "capture_height": 720,
+                "capture_fps": 30
+            },
+            "realsense": {
+                "enable": true,
+                "stream_depth": true,
+                "stream_ir": true
+            }
+        },
+        "stream": {
+            "max_width": 960,
+            "max_height": 540,
+            "jpeg_quality": 72,
+            "target_fps": 30,
+            "webrtc_target_fps": 24,
+            "mpegts_target_fps": 24,
+            "mpegts_jpeg_quality": 60,
+            "rotate_clockwise": true,
+            "default_rotation_degrees": 90,
+            "camera_rotation_degrees": {}
+        }
+    }
+}

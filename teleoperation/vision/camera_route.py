@@ -2734,6 +2734,14 @@ INDEX_HTML = """
       .meta { opacity: 0.85; font-size: 0.85rem; margin: 0.3rem 0; }
       .ok { color: #00d08a; }
       .bad { color: #ff5c5c; }
+      .rotation-controls { margin-top: 0.45rem; }
+      .rotation-select { min-width: 90px; }
+      .rotation-manifest { margin-top: 0.25rem; }
+      .rotation-manifest code { color: #dfe8ff; }
+      .card a, .card a:visited, .card a:hover, .card a:focus {
+        color: #fff !important;
+        font-weight: 700;
+      }
       img { width: 100%; border-radius: 8px; background: #000; }
       code { color: #ffcc66; }
       table { width: 100%; border-collapse: collapse; }
@@ -2807,6 +2815,14 @@ INDEX_HTML = """
     </div>
     <script>
       let sessionKey = localStorage.getItem("camera_router_session_key") || "";
+      let listRefreshInFlight = false;
+      const latestCards = {
+        cameras: [],
+      };
+      const rotationManifestByCamera = {};
+      const rotationManifestFetchInFlight = {};
+      const rotationUpdateInFlight = {};
+      const ROTATION_VALUES = [0, 90, 180, 270];
       const configState = {
         schema: null,
         selectedCategoryId: "",
@@ -2820,9 +2836,17 @@ INDEX_HTML = """
       }
 
       function esc(value) {
-        return String(value ?? "").replace(/[&<>\"']/g, (m) => (
-          m === "&" ? "&amp;" : m === "<" ? "&lt;" : m === ">" ? "&gt;" : m === "\"" ? "&quot;" : "&#39;"
-        ));
+        var raw = value;
+        if (raw === null || raw === undefined) {
+          raw = "";
+        }
+        return String(raw).replace(/[&<>"']/g, function (m) {
+          if (m === "&") return "&amp;";
+          if (m === "<") return "&lt;";
+          if (m === ">") return "&gt;";
+          if (m === '"') return "&quot;";
+          return "&#39;";
+        });
       }
 
       function normalizeScalar(value) {
@@ -2835,7 +2859,11 @@ INDEX_HTML = """
 
       function asBool(value) {
         if (typeof value === "boolean") return value;
-        const text = String(value ?? "").trim().toLowerCase();
+        var raw = value;
+        if (raw === null || raw === undefined) {
+          raw = "";
+        }
+        const text = String(raw).trim().toLowerCase();
         return ["1", "true", "yes", "on"].includes(text);
       }
 
@@ -3057,27 +3085,196 @@ INDEX_HTML = """
         }
       }
 
+      function normalizeRotationDegrees(value) {
+        const n = Number(value);
+        if (!Number.isFinite(n)) return null;
+        const rounded = Math.round(n);
+        return ROTATION_VALUES.includes(rounded) ? rounded : null;
+      }
+
+      function readRotationManifest(cameraId) {
+        const key = String(cameraId || "").trim();
+        if (!key) return null;
+        return rotationManifestByCamera[key] || null;
+      }
+
+      function upsertRotationManifest(cameraId, updates) {
+        const key = String(cameraId || "").trim();
+        if (!key) return null;
+        const existing = rotationManifestByCamera[key] || {};
+        const merged = Object.assign({}, existing, updates || {});
+        rotationManifestByCamera[key] = merged;
+        return merged;
+      }
+
+      function selectedRotationForCard(cam, manifest) {
+        const selected = normalizeRotationDegrees(manifest && manifest.selected_rotation_degrees);
+        if (selected !== null) return selected;
+        const configured = normalizeRotationDegrees(manifest && manifest.configured_rotation_degrees);
+        if (configured !== null) return configured;
+        const effectiveFromManifest = normalizeRotationDegrees(manifest && manifest.effective_rotation_degrees);
+        if (effectiveFromManifest !== null) return effectiveFromManifest;
+        const effectiveFromCam = normalizeRotationDegrees(cam && cam.rotation_degrees);
+        if (effectiveFromCam !== null) return effectiveFromCam;
+        return 0;
+      }
+
+      function buildRotationManifestText(cam, manifest) {
+        const effective = normalizeRotationDegrees(
+          manifest && manifest.effective_rotation_degrees !== undefined
+            ? manifest.effective_rotation_degrees
+            : (cam ? cam.rotation_degrees : null)
+        );
+        const configured = normalizeRotationDegrees(manifest && manifest.configured_rotation_degrees);
+        const defaultRotation = normalizeRotationDegrees(manifest && manifest.default_rotation_degrees);
+        const keyText = manifest && manifest.configured_rotation_key ? String(manifest.configured_rotation_key) : "default";
+        const sourceText = manifest && manifest.source ? String(manifest.source) : "list";
+        const updatedText = manifest && manifest.updated_at ? String(manifest.updated_at) : "";
+        const effectiveText = effective === null ? "n/a" : `${effective}deg`;
+        const configuredText = configured === null ? "default" : `${configured}deg`;
+        const defaultText = defaultRotation === null ? "n/a" : `${defaultRotation}deg`;
+        const updatedSuffix = updatedText ? ` | updated ${updatedText}` : "";
+        return `rotation_manifest: effective=${effectiveText} | configured=${configuredText} | default=${defaultText} | key=${keyText} | source=${sourceText}${updatedSuffix}`;
+      }
+
+      async function fetchRotationManifest(cameraId, forceReload = false) {
+        const key = String(cameraId || "").trim();
+        if (!key || !sessionKey) return null;
+        const existing = readRotationManifest(key);
+        if (!forceReload && existing && existing.detail_loaded) return existing;
+        if (rotationManifestFetchInFlight[key]) return null;
+        rotationManifestFetchInFlight[key] = true;
+        try {
+          const res = await fetch(withSession(`/stream_options/${encodeURIComponent(key)}`), { cache: "no-store" });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            if (res.status === 401) {
+              sessionKey = "";
+              localStorage.removeItem("camera_router_session_key");
+              setConfigStatus("Session expired; authenticate to edit config.", true);
+            }
+            return null;
+          }
+          const updated = upsertRotationManifest(key, {
+            configured_rotation_degrees: normalizeRotationDegrees(data.configured_rotation_degrees),
+            configured_rotation_key: data.configured_rotation_key || "",
+            effective_rotation_degrees: normalizeRotationDegrees(data.effective_rotation_degrees),
+            default_rotation_degrees: normalizeRotationDegrees(data.default_rotation_degrees),
+            detail_loaded: true,
+            source: "stream_options",
+            updated_at: new Date().toLocaleTimeString(),
+          });
+          if (latestCards.cameras.length) {
+            renderCards(latestCards.cameras);
+          }
+          return updated;
+        } catch (err) {
+          return null;
+        } finally {
+          delete rotationManifestFetchInFlight[key];
+        }
+      }
+
+      function ensureRotationManifestForCameras(cameras) {
+        if (!sessionKey || !Array.isArray(cameras)) return;
+        cameras.forEach((cam) => {
+          const cameraId = String((cam && cam.id) || "").trim();
+          if (!cameraId) return;
+          const manifest = readRotationManifest(cameraId);
+          if (manifest && manifest.detail_loaded) return;
+          fetchRotationManifest(cameraId, false);
+        });
+      }
+
       function renderCards(cameras) {
         const root = document.getElementById("cards");
         root.innerHTML = "";
         cameras.forEach((cam) => {
+          const cameraId = String(cam.id || "");
           const streamUrl = withSession(cam.video_url);
           const snapUrl = withSession(cam.snapshot_url);
+          const manifest = readRotationManifest(cameraId);
+          const selectedRotation = selectedRotationForCard(cam, manifest);
+          const rotationOptions = ROTATION_VALUES.map((value) => {
+            const selected = value === selectedRotation ? "selected" : "";
+            return `<option value="${value}" ${selected}>${value}deg</option>`;
+          }).join("");
+          const rotationManifestText = buildRotationManifestText(cam, manifest);
+          const rotationBusy = !!rotationUpdateInFlight[cameraId];
           const card = document.createElement("div");
           card.className = "card";
           card.innerHTML = `
-            <h3 style="margin-top:0">${cam.label}</h3>
+            <h3 style="margin-top:0">${esc(cam.label)}</h3>
             <div class="meta ${cam.online ? "ok" : "bad"}">status: ${cam.online ? "online" : "offline"}</div>
-            <div class="meta">id: ${cam.id}</div>
+            <div class="meta">id: ${esc(cameraId)}</div>
             <div class="meta">fps: ${cam.fps} | kbps: ${cam.kbps} | clients: ${cam.clients}</div>
-            <img src="${streamUrl}" alt="${cam.label}">
-            <div class="meta"><a href="${snapUrl}" target="_blank">snapshot</a> | <a href="${streamUrl}" target="_blank">stream</a></div>
+            <div class="row rotation-controls">
+              <label style="min-width:64px;">rotate</label>
+              <select class="rotation-select" data-camera-id="${esc(cameraId)}">${rotationOptions}</select>
+              <button type="button" class="rotation-apply-btn" data-camera-id="${esc(cameraId)}" ${rotationBusy ? "disabled" : ""}>Apply</button>
+              <button type="button" class="rotation-clear-btn" data-camera-id="${esc(cameraId)}" ${rotationBusy ? "disabled" : ""}>Default</button>
+            </div>
+            <div class="meta rotation-manifest"><code>${esc(rotationManifestText)}</code></div>
+            <img src="${streamUrl}" alt="${esc(cam.label)}">
+            <div class="meta card-links"><a href="${snapUrl}" target="_blank">snapshot</a> | <a href="${streamUrl}" target="_blank">stream</a></div>
           `;
           root.appendChild(card);
         });
       }
 
+      async function applyRotationUpdate(cameraId, nextRotation, clearRule = false) {
+        const key = String(cameraId || "").trim();
+        if (!key) return;
+        if (!sessionKey) {
+          document.getElementById("statusLine").textContent = "Authenticate first to change rotation";
+          return;
+        }
+        if (rotationUpdateInFlight[key]) return;
+        rotationUpdateInFlight[key] = true;
+        const statusNode = document.getElementById("statusLine");
+        statusNode.textContent = clearRule
+          ? `Clearing rotation override for ${key}...`
+          : `Applying ${nextRotation}deg rotation for ${key}...`;
+        try {
+          const payload = clearRule ? { rotation_degrees: null } : { rotation_degrees: nextRotation };
+          const res = await fetch(withSession(`/stream_options/${encodeURIComponent(key)}`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            statusNode.textContent = `Rotation update failed for ${key}: ${data.message || res.status}`;
+            if (res.status === 401) {
+              sessionKey = "";
+              localStorage.removeItem("camera_router_session_key");
+              setConfigStatus("Session expired; authenticate to edit config.", true);
+            }
+            return;
+          }
+          const effectiveRotation = normalizeRotationDegrees(data.effective_rotation_degrees);
+          upsertRotationManifest(key, {
+            configured_rotation_degrees: normalizeRotationDegrees(data.configured_rotation_degrees),
+            configured_rotation_key: data.configured_rotation_key || "",
+            effective_rotation_degrees: effectiveRotation,
+            default_rotation_degrees: normalizeRotationDegrees(data.default_rotation_degrees),
+            detail_loaded: true,
+            source: "stream_options",
+            selected_rotation_degrees: effectiveRotation,
+            updated_at: new Date().toLocaleTimeString(),
+          });
+          statusNode.textContent = `Rotation updated for ${key}: effective ${effectiveRotation === null ? "n/a" : `${effectiveRotation}deg`}`;
+          await refreshList();
+        } catch (err) {
+          statusNode.textContent = `Rotation update error for ${key}: ${err}`;
+        } finally {
+          rotationUpdateInFlight[key] = false;
+        }
+      }
+
       async function refreshList() {
+        if (listRefreshInFlight) return;
+        listRefreshInFlight = true;
         try {
           const res = await fetch(withSession("/list"));
           const data = await res.json();
@@ -3090,11 +3287,30 @@ INDEX_HTML = """
             }
             return;
           }
-          document.getElementById("statusLine").textContent = `Loaded ${data.cameras.length} feeds`;
-          renderCards(data.cameras);
+          latestCards.cameras = Array.isArray(data.cameras) ? data.cameras : [];
+          latestCards.cameras.forEach((cam) => {
+            const cameraId = String((cam && cam.id) || "").trim();
+            if (!cameraId) return;
+            const effectiveFromList = normalizeRotationDegrees(cam.rotation_degrees);
+            const existing = readRotationManifest(cameraId);
+            upsertRotationManifest(cameraId, {
+              effective_rotation_degrees: effectiveFromList,
+              source: existing && existing.source ? existing.source : "list",
+            });
+          });
+          document.getElementById("statusLine").textContent = `Loaded ${latestCards.cameras.length} feeds`;
+          renderCards(latestCards.cameras);
+          ensureRotationManifestForCameras(latestCards.cameras);
         } catch (err) {
           document.getElementById("statusLine").textContent = `List error: ${err}`;
+        } finally {
+          listRefreshInFlight = false;
         }
+      }
+
+      function pollListIfAuthenticated() {
+        if (!sessionKey) return;
+        refreshList();
       }
 
       document.getElementById("tabHealthBtn").addEventListener("click", () => showTab("health"));
@@ -3120,10 +3336,40 @@ INDEX_HTML = """
       });
       document.getElementById("connectBtn").addEventListener("click", authenticate);
       document.getElementById("refreshBtn").addEventListener("click", refreshList);
+      document.getElementById("cards").addEventListener("change", (event) => {
+        const selectNode = event.target && event.target.closest ? event.target.closest("select.rotation-select") : null;
+        if (!selectNode) return;
+        const cameraId = String(selectNode.dataset.cameraId || "").trim();
+        if (!cameraId) return;
+        const selectedRotation = normalizeRotationDegrees(selectNode.value);
+        if (selectedRotation === null) return;
+        upsertRotationManifest(cameraId, { selected_rotation_degrees: selectedRotation });
+      });
+      document.getElementById("cards").addEventListener("click", (event) => {
+        const applyBtn = event.target && event.target.closest ? event.target.closest("button.rotation-apply-btn") : null;
+        if (applyBtn) {
+          const cameraId = String(applyBtn.dataset.cameraId || "").trim();
+          const controls = applyBtn.closest(".rotation-controls");
+          const selectNode = controls ? controls.querySelector("select.rotation-select") : null;
+          const selectedRotation = normalizeRotationDegrees(selectNode ? selectNode.value : null);
+          if (!cameraId || selectedRotation === null) {
+            document.getElementById("statusLine").textContent = "Select a valid rotation before applying";
+            return;
+          }
+          applyRotationUpdate(cameraId, selectedRotation, false);
+          return;
+        }
+        const clearBtn = event.target && event.target.closest ? event.target.closest("button.rotation-clear-btn") : null;
+        if (!clearBtn) return;
+        const cameraId = String(clearBtn.dataset.cameraId || "").trim();
+        if (!cameraId) return;
+        applyRotationUpdate(cameraId, null, true);
+      });
       showTab("health");
       refreshHealth();
       setInterval(refreshHealth, 3000);
       refreshList();
+      setInterval(pollListIfAuthenticated, 3000);
       loadConfigSchema();
     </script>
   </body>
@@ -3458,6 +3704,12 @@ def stream_options_for_camera(camera_id):
                 "configured_rotation_degrees": configured_rotation,
                 "configured_rotation_key": configured_rotation_key,
                 "effective_rotation_degrees": int(effective_rotation),
+                "default_rotation_degrees": int(
+                    _rotation_or_default(
+                        stream_options.get("default_rotation_degrees"),
+                        DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES,
+                    )
+                ),
                 "message": "Camera options updated",
             }
         )
