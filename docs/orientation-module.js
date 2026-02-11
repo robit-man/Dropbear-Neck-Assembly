@@ -5,6 +5,7 @@ const PROJECTION_STORAGE_KEY = "orientationProjectionMode";
 const COMMAND_LIMIT = 700;
 const HEIGHT_MIN = 0;
 const HEIGHT_MAX = 70;
+const SPHERE_RADIUS = 6.0;
 
 const defaultTuneables = {
   orientationSensitivity: 1.0,
@@ -31,41 +32,74 @@ const tuneables = { ...defaultTuneables };
 
 const state = {
   initialized: false,
+  projection: "plane",
+
   playbackEnabled: false,
   baselinePending: false,
-  baseline: null,
+  baselineQuaternion: null,
+  baselineHeading: null,
   smoothed: null,
   lastCommand: "",
   lastCommandSentAt: 0,
+
   sensorsEnabled: false,
-  localPayload: null,
   localHz: 0,
   lastSamplePerf: 0,
-  sceneLoaded: false,
-  lastScenePushAt: 0,
-  projection: "plane",
+
+  qRaw: new THREE.Quaternion(),
+  qOffset: new THREE.Quaternion(),
+  qDisp: new THREE.Quaternion(),
+  heading: null,
+  headingAcc: null,
+  acc: { x: 0, y: 0, z: 0 },
+  accG: null,
+  gps: null,
   locationWatchId: null,
+
+  // 3D scene
+  sceneReady: false,
+  sceneHost: null,
+  scene: null,
+  renderer: null,
+  mainCamera: null,
+  animationHandle: 0,
+  lights: null,
+  ground: null,
+  grid: null,
+  globe: null,
+  anchorMarker: null,
+  anchorUp: new THREE.Vector3(0, 1, 0),
+  anchorFrame: null,
+  localTwin: null,
 };
 
 const ui = {
   projectionPlaneBtn: null,
   projectionSphereBtn: null,
-  statusEl: null,
   streamToggleBtn: null,
-  embedFrame: null,
+  statusEl: null,
+  sceneHost: null,
 };
 
 const NORTH_POLE = new THREE.Vector3(0, 1, 0);
 const FALLBACK_REF = new THREE.Vector3(0, 0, -1);
+const ORIGIN = new THREE.Vector3(0, 0, 0);
+const WORLD_G = new THREE.Vector3(0, -9.81, 0);
+
+// DeviceOrientationControls-compatible quaternion conversion.
+const zee = new THREE.Vector3(0, 0, 1);
+const doEuler = new THREE.Euler();
+const doQ0 = new THREE.Quaternion();
+const doQ1 = new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5));
+
+function byId(id) {
+  return document.getElementById(id);
+}
 
 function logOrientation(message) {
   if (typeof logToConsole === "function") {
     logToConsole(message);
   }
-}
-
-function byId(id) {
-  return document.getElementById(id);
 }
 
 function clamp(value, min, max) {
@@ -90,7 +124,20 @@ function updateStreamToggleUi() {
     return;
   }
   ui.streamToggleBtn.textContent = state.playbackEnabled ? "Pause Stream" : "Play Stream";
-  ui.streamToggleBtn.className = state.playbackEnabled ? "" : "primary";
+  ui.streamToggleBtn.classList.toggle("primary", !state.playbackEnabled);
+}
+
+function projectionMode() {
+  return state.projection === "sphere" ? "sphere" : "plane";
+}
+
+function updateProjectionButtonsUi() {
+  if (ui.projectionPlaneBtn) {
+    ui.projectionPlaneBtn.classList.toggle("primary", projectionMode() === "plane");
+  }
+  if (ui.projectionSphereBtn) {
+    ui.projectionSphereBtn.classList.toggle("primary", projectionMode() === "sphere");
+  }
 }
 
 function formatHeading(heading) {
@@ -98,36 +145,65 @@ function formatHeading(heading) {
   if (!Number.isFinite(value)) {
     return "-";
   }
-  const wrapped = ((value % 360) + 360) % 360;
-  return `${wrapped.toFixed(1)}deg`;
+  return (((value % 360) + 360) % 360).toFixed(1);
 }
 
 function formatAccel(acc) {
-  if (!acc || typeof acc !== "object") {
-    return "-";
+  if (!acc) {
+    return "ax -, ay -, az -";
   }
-  const x = toFinite(acc.x, NaN);
-  const y = toFinite(acc.y, NaN);
-  const z = toFinite(acc.z, NaN);
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
-    return "-";
-  }
-  return `ax ${x.toFixed(2)}g, ay ${y.toFixed(2)}g, az ${z.toFixed(2)}g`;
+  return `ax ${toFinite(acc.x, 0).toFixed(2)}, ay ${toFinite(acc.y, 0).toFixed(2)}, az ${toFinite(acc.z, 0).toFixed(2)}`;
 }
 
-function setPlaybackBaselinePending(reasonMessage) {
-  state.baseline = null;
-  state.baselinePending = true;
-  state.smoothed = null;
-  state.lastCommand = "";
-  state.lastCommandSentAt = 0;
-  if (reasonMessage) {
-    setOrientationStatus(reasonMessage);
-  }
+function normalizeHeadingDelta(delta) {
+  let wrapped = delta;
+  while (wrapped > 180) wrapped -= 360;
+  while (wrapped < -180) wrapped += 360;
+  return wrapped;
 }
 
-function projectionMode() {
-  return state.projection === "sphere" ? "sphere" : "plane";
+function normalizeHeading(value) {
+  const normalized = toFinite(value, NaN);
+  if (!Number.isFinite(normalized)) {
+    return null;
+  }
+  return ((normalized % 360) + 360) % 360;
+}
+
+function screenOrientationRad() {
+  const angle =
+    window.screen && window.screen.orientation && typeof window.screen.orientation.angle === "number"
+      ? window.screen.orientation.angle
+      : typeof window.orientation === "number"
+        ? window.orientation
+        : 0;
+  return angle * Math.PI / 180;
+}
+
+function compassHeadingFromEuler(alpha, beta, gamma) {
+  const degtorad = Math.PI / 180;
+  const a = alpha * degtorad;
+  const b = beta * degtorad;
+  const g = gamma * degtorad;
+  const cA = Math.cos(a);
+  const sA = Math.sin(a);
+  const sB = Math.sin(b);
+  const cG = Math.cos(g);
+  const sG = Math.sin(g);
+  const rA = -cA * sG - sA * sB * cG;
+  const rB = -sA * sG + cA * sB * cG;
+  let heading = Math.atan2(rA, rB);
+  if (heading < 0) heading += 2 * Math.PI;
+  return heading * 180 / Math.PI;
+}
+
+function deviceEulerToQuaternion(alpha, beta, gamma, orientRad) {
+  const degtorad = Math.PI / 180;
+  doEuler.set(beta * degtorad, alpha * degtorad, -gamma * degtorad, "YXZ");
+  const q = new THREE.Quaternion().setFromEuler(doEuler);
+  q.multiply(doQ1);
+  q.multiply(doQ0.setFromAxisAngle(zee, -orientRad));
+  return q;
 }
 
 function latLonToUp(latDeg, lonDeg) {
@@ -141,14 +217,13 @@ function latLonToUp(latDeg, lonDeg) {
   const z = -sinPhi * Math.cos(theta);
 
   const v = new THREE.Vector3(x, y, z);
-  if (v.lengthSq() < 1e-12) {
-    return new THREE.Vector3(0, 1, 0);
-  }
+  if (v.lengthSq() < 1e-12) return new THREE.Vector3(0, 1, 0);
   return v.normalize();
 }
 
 function computeTangentFrameFromUp(upVec) {
   const up = upVec.clone().normalize();
+
   const east = new THREE.Vector3().crossVectors(NORTH_POLE, up);
   if (east.lengthSq() < 1e-10) {
     east.crossVectors(FALLBACK_REF, up);
@@ -157,113 +232,148 @@ function computeTangentFrameFromUp(upVec) {
 
   const north = new THREE.Vector3().crossVectors(up, east).normalize();
   const zAxis = north.clone().multiplyScalar(-1);
+
   const m = new THREE.Matrix4().makeBasis(east, up, zAxis);
   const q = new THREE.Quaternion().setFromRotationMatrix(m);
-  return { q };
+
+  return { up, east, north, q };
 }
 
-function normalizeHeadingDelta(delta) {
-  let wrapped = delta;
-  while (wrapped > 180) {
-    wrapped -= 360;
+function setAnchorFromUp(upVec) {
+  state.anchorUp.copy(upVec).normalize();
+  state.anchorFrame = computeTangentFrameFromUp(state.anchorUp);
+  if (state.anchorMarker) {
+    state.anchorMarker.position.copy(state.anchorFrame.up).multiplyScalar(SPHERE_RADIUS);
   }
-  while (wrapped < -180) {
-    wrapped += 360;
-  }
-  return wrapped;
 }
 
-function parseQuaternion(statePayload) {
-  if (!statePayload || !statePayload.q || typeof statePayload.q !== "object") {
-    return null;
-  }
-  const qObj = statePayload.q;
-  const x = toFinite(qObj.x, NaN);
-  const y = toFinite(qObj.y, NaN);
-  const z = toFinite(qObj.z, NaN);
-  const w = toFinite(qObj.w, NaN);
-  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z) || !Number.isFinite(w)) {
-    return null;
-  }
-  const q = new THREE.Quaternion(x, y, z, w);
-  if (q.lengthSq() < 1e-9) {
-    return null;
-  }
-  q.normalize();
-  return q;
+function makePhoneTwin(accent) {
+  const group = new THREE.Group();
+  const phoneGeom = new THREE.BoxGeometry(0.6, 1.2, 0.08);
+  const mat = new THREE.MeshStandardMaterial({
+    color: accent ? 0xffae00 : 0xffffff,
+    roughness: accent ? 0.25 : 0.65,
+    metalness: 0.05,
+  });
+  const mesh = new THREE.Mesh(phoneGeom, mat);
+  group.add(mesh);
+
+  const fwd = new THREE.ArrowHelper(new THREE.Vector3(0, 0, -1), ORIGIN, 1.0, accent ? 0xffae00 : 0xffffff);
+  group.add(fwd);
+
+  const ax = new THREE.ArrowHelper(new THREE.Vector3(1, 0, 0), ORIGIN, 0.001, accent ? 0xffae00 : 0xffffff);
+  const ay = new THREE.ArrowHelper(new THREE.Vector3(0, 1, 0), ORIGIN, 0.001, accent ? 0xffae00 : 0xffffff);
+  const az = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), ORIGIN, 0.001, accent ? 0xffae00 : 0xffffff);
+  group.add(ax, ay, az);
+
+  return { group, mesh, fwd, accelArrows: { ax, ay, az } };
 }
 
-function parseAcceleration(statePayload) {
-  const source = statePayload && typeof statePayload === "object"
-    ? (statePayload.acc || statePayload.accG || null)
-    : null;
-  if (!source) {
-    return { x: 0, y: 0, z: 0 };
-  }
-  const x = toFinite(source.x, 0);
-  const y = toFinite(source.y, 0);
-  const z = toFinite(source.z, 0);
-  return { x, y, z };
-}
-
-function snapshotFromState(statePayload) {
-  const qRaw = parseQuaternion(statePayload);
-  if (!qRaw) {
-    return null;
-  }
-
-  let qDisplay = qRaw.clone();
-  if (projectionMode() === "sphere") {
-    const gps = statePayload && statePayload.gps ? statePayload.gps : null;
-    const lat = toFinite(gps ? gps.lat : NaN, NaN);
-    const lon = toFinite(gps ? gps.lon : NaN, NaN);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) {
-      const frame = computeTangentFrameFromUp(latLonToUp(lat, lon));
-      qDisplay = frame.q.clone().multiply(qRaw);
+function updateAccelArrows(accelArrows, acc) {
+  const scale = 0.08;
+  const maxLen = 1.1;
+  const minVis = 0.12;
+  const comps = [
+    ["ax", acc && acc.x, new THREE.Vector3(1, 0, 0)],
+    ["ay", acc && acc.y, new THREE.Vector3(0, 1, 0)],
+    ["az", acc && acc.z, new THREE.Vector3(0, 0, 1)],
+  ];
+  for (let i = 0; i < comps.length; i += 1) {
+    const [key, value, axis] = comps[i];
+    const arrow = accelArrows[key];
+    if (!arrow) continue;
+    if (typeof value !== "number" || !Number.isFinite(value) || Math.abs(value) < minVis) {
+      arrow.setLength(0.001);
+      arrow.visible = false;
+      continue;
     }
+    arrow.visible = true;
+    const dir = axis.clone().multiplyScalar(value >= 0 ? 1 : -1).normalize();
+    const length = Math.min(maxLen, Math.abs(value) * scale);
+    arrow.setDirection(dir);
+    arrow.setLength(Math.max(0.02, length));
+  }
+}
+
+function applyLocalVisual() {
+  if (!state.localTwin) {
+    return;
+  }
+  state.qDisp.copy(state.qOffset).multiply(state.qRaw);
+  updateAccelArrows(state.localTwin.accelArrows, state.acc);
+
+  const mode = projectionMode();
+  if (state.globe) {
+    state.globe.visible = mode === "sphere";
+  }
+  if (state.anchorMarker) {
+    state.anchorMarker.visible = mode === "sphere";
   }
 
-  const heading = toFinite(statePayload ? statePayload.heading : NaN, NaN);
+  if (mode === "sphere") {
+    if (state.anchorFrame) {
+      state.localTwin.group.position.copy(state.anchorFrame.up).multiplyScalar(SPHERE_RADIUS);
+      state.localTwin.group.quaternion.copy(state.anchorFrame.q).multiply(state.qDisp);
+    }
+    return;
+  }
+
+  state.localTwin.group.position.set(0, 1.0, 0);
+  state.localTwin.group.quaternion.copy(state.qDisp);
+}
+
+function buildOrientationSnapshot() {
+  const qFlat = state.qDisp.clone().normalize();
+  let qDisplay = qFlat.clone();
+  if (projectionMode() === "sphere" && state.anchorFrame) {
+    qDisplay = state.anchorFrame.q.clone().multiply(qFlat);
+  }
   return {
     qDisplay,
-    heading: Number.isFinite(heading) ? ((heading % 360) + 360) % 360 : null,
-    acc: parseAcceleration(statePayload),
+    heading: state.heading,
+    acc: state.acc || { x: 0, y: 0, z: 0 },
   };
 }
 
-function captureBaselineFromSnapshot(snapshot) {
-  if (!snapshot) {
-    return false;
+function setPlaybackBaselinePending(reasonMessage) {
+  state.baselineQuaternion = null;
+  state.baselineHeading = null;
+  state.baselinePending = true;
+  state.smoothed = null;
+  state.lastCommand = "";
+  state.lastCommandSentAt = 0;
+  if (reasonMessage) {
+    setOrientationStatus(reasonMessage);
   }
-  state.baseline = {
-    qDisplay: snapshot.qDisplay.clone(),
-    heading: snapshot.heading,
-  };
+}
+
+function captureBaseline(snapshot) {
+  state.baselineQuaternion = snapshot.qDisplay.clone();
+  state.baselineHeading = typeof snapshot.heading === "number" ? snapshot.heading : null;
   state.baselinePending = false;
   state.smoothed = null;
   state.lastCommand = "";
   state.lastCommandSentAt = 0;
   setOrientationStatus("Centered at local baseline");
-  logOrientation("[ORIENTATION] Baseline captured (local)");
-  return true;
 }
 
 function buildCommand(snapshot) {
-  if (!snapshot || !state.baseline) {
+  if (!snapshot || !state.baselineQuaternion) {
     return null;
   }
 
-  const baselineInverse = state.baseline.qDisplay.clone().invert();
-  const deltaQuaternion = baselineInverse.multiply(snapshot.qDisplay);
+  const baselineInverse = state.baselineQuaternion.clone().invert();
+  const deltaQuaternion = baselineInverse.multiply(snapshot.qDisplay.clone());
   const deltaEuler = new THREE.Euler().setFromQuaternion(deltaQuaternion, "YXZ");
 
   const yawDeg = THREE.MathUtils.radToDeg(deltaEuler.y);
   const pitchDeg = THREE.MathUtils.radToDeg(deltaEuler.x);
   const rollDeg = THREE.MathUtils.radToDeg(deltaEuler.z);
 
-  const headingDelta = (snapshot.heading !== null && state.baseline.heading !== null)
-    ? normalizeHeadingDelta(snapshot.heading - state.baseline.heading)
-    : 0;
+  const headingDelta =
+    snapshot.heading !== null && state.baselineHeading !== null
+      ? normalizeHeadingDelta(snapshot.heading - state.baselineHeading)
+      : 0;
 
   const orientationScale = tuneables.orientationSensitivity;
   const yawRaw = orientationScale * ((yawDeg * tuneables.yawGain) + (headingDelta * tuneables.headingGain));
@@ -305,9 +415,7 @@ function buildCommand(snapshot) {
 }
 
 function dispatchCommand(command) {
-  if (!command) {
-    return;
-  }
+  if (!command) return;
   if (typeof window.sendCommandHttpOnly === "function") {
     window.sendCommandHttpOnly(command);
     return;
@@ -315,119 +423,28 @@ function dispatchCommand(command) {
   console.warn("sendCommandHttpOnly is unavailable, orientation command dropped:", command);
 }
 
-function normalizeHeading(value) {
-  const normalized = toFinite(value, NaN);
-  if (!Number.isFinite(normalized)) {
-    return null;
-  }
-  return ((normalized % 360) + 360) % 360;
-}
-
-function quaternionFromDeviceAngles(alphaDeg, betaDeg, gammaDeg) {
-  const alpha = THREE.MathUtils.degToRad(toFinite(alphaDeg, 0));
-  const beta = THREE.MathUtils.degToRad(toFinite(betaDeg, 0));
-  const gamma = THREE.MathUtils.degToRad(toFinite(gammaDeg, 0));
-
-  const euler = new THREE.Euler(beta, alpha, -gamma, "YXZ");
-  const q = new THREE.Quaternion().setFromEuler(euler);
-
-  const screenAngle = window.screen && window.screen.orientation
-    ? toFinite(window.screen.orientation.angle, 0)
-    : toFinite(window.orientation, 0);
-  const orient = THREE.MathUtils.degToRad(screenAngle);
-  const zAxis = new THREE.Vector3(0, 0, 1);
-  const qScreen = new THREE.Quaternion().setFromAxisAngle(zAxis, -orient);
-  q.multiply(qScreen);
-
-  if (q.lengthSq() < 1e-9) {
-    return null;
-  }
-  q.normalize();
-  return q;
-}
-
-function updateLocalPayload(nextPatch) {
-  const current = state.localPayload || {
-    q: { x: 0, y: 0, z: 0, w: 1 },
-    heading: null,
-    acc: { x: 0, y: 0, z: 0 },
-  };
-
-  state.localPayload = {
-    ...current,
-    ...nextPatch,
-    acc: {
-      ...(current.acc || { x: 0, y: 0, z: 0 }),
-      ...((nextPatch && nextPatch.acc) || {}),
-    },
-  };
-}
-
-function pushEmbeddedSceneState(snapshot, command = "") {
-  if (!ui.embedFrame || !state.sceneLoaded || !snapshot) {
-    return;
-  }
-
-  const now = performance.now();
-  if (now - state.lastScenePushAt < 33) {
-    return;
-  }
-  state.lastScenePushAt = now;
-
-  const euler = new THREE.Euler().setFromQuaternion(snapshot.qDisplay, "YXZ");
-  const yaw = THREE.MathUtils.radToDeg(euler.y);
-  const pitch = THREE.MathUtils.radToDeg(euler.x);
-  const roll = THREE.MathUtils.radToDeg(euler.z);
-
-  const targetWindow = ui.embedFrame.contentWindow;
-  if (!targetWindow) {
-    return;
-  }
-
-  targetWindow.postMessage(
-    {
-      type: "orientation_local_update",
-      yaw,
-      pitch,
-      roll,
-      heading: snapshot.heading,
-      command,
-      playbackEnabled: state.playbackEnabled,
-    },
-    "*"
-  );
-}
-
 function processOrientationFrame() {
-  if (!state.localPayload) {
-    setOrientationStatus("Waiting for local sensor data...");
+  if (!state.sensorsEnabled) {
+    setOrientationStatus("Waiting for sensor permissions...");
     return;
   }
 
-  const snapshot = snapshotFromState(state.localPayload);
-  if (!snapshot) {
-    setOrientationStatus("Waiting for valid orientation payload...");
-    return;
-  }
-
-  pushEmbeddedSceneState(snapshot, state.lastCommand);
+  const snapshot = buildOrientationSnapshot();
 
   if (!state.playbackEnabled) {
+    const hz = Number.isFinite(state.localHz) ? state.localHz.toFixed(1) : "0.0";
+    setOrientationStatus(
+      `Sensors ready ${hz}Hz | heading ${formatHeading(state.heading)}deg | ${formatAccel(state.acc)}`
+    );
     return;
   }
 
-  if (state.baselinePending || !state.baseline) {
-    captureBaselineFromSnapshot(snapshot);
+  if (state.baselinePending || !state.baselineQuaternion) {
+    captureBaseline(snapshot);
   }
 
   const command = buildCommand(snapshot);
-  if (!command) {
-    return;
-  }
-  const hz = Number.isFinite(state.localHz) ? state.localHz.toFixed(1) : "0.0";
-  setOrientationStatus(
-    `Live ${hz}Hz | heading ${formatHeading(state.localPayload.heading)} | ${formatAccel(state.localPayload.acc)}`
-  );
+  if (!command) return;
 
   const now = Date.now();
   if (command !== state.lastCommand && now - state.lastCommandSentAt >= tuneables.commandIntervalMs) {
@@ -435,24 +452,43 @@ function processOrientationFrame() {
     state.lastCommand = command;
     state.lastCommandSentAt = now;
   }
+
+  const hz = Number.isFinite(state.localHz) ? state.localHz.toFixed(1) : "0.0";
+  setOrientationStatus(
+    `Streaming ${hz}Hz | heading ${formatHeading(state.heading)}deg | ${formatAccel(state.acc)}`
+  );
+}
+
+function computeLinearAccelFallbackFromAccG(accG, qRaw) {
+  if (!accG) return null;
+  if (typeof accG.x !== "number" || typeof accG.y !== "number" || typeof accG.z !== "number") return null;
+  const inv = qRaw.clone().invert();
+  const gDevice = WORLD_G.clone().applyQuaternion(inv);
+  return {
+    x: accG.x + gDevice.x,
+    y: accG.y + gDevice.y,
+    z: accG.z + gDevice.z,
+  };
 }
 
 function onDeviceOrientation(event) {
-  if (!state.sensorsEnabled) {
-    return;
-  }
+  if (!state.sensorsEnabled) return;
+  if (event.alpha == null || event.beta == null || event.gamma == null) return;
 
-  const alpha = toFinite(event.alpha, NaN);
-  const beta = toFinite(event.beta, NaN);
-  const gamma = toFinite(event.gamma, NaN);
-  if (!Number.isFinite(alpha) || !Number.isFinite(beta) || !Number.isFinite(gamma)) {
-    return;
-  }
+  state.qRaw.copy(deviceEulerToQuaternion(event.alpha, event.beta, event.gamma, screenOrientationRad()));
 
-  const q = quaternionFromDeviceAngles(alpha, beta, gamma);
-  if (!q) {
-    return;
+  let heading = null;
+  let headingAcc = null;
+  if (typeof event.webkitCompassHeading === "number" && event.webkitCompassHeading >= 0) {
+    heading = event.webkitCompassHeading;
+    if (typeof event.webkitCompassAccuracy === "number") {
+      headingAcc = event.webkitCompassAccuracy;
+    }
+  } else if (event.absolute === true) {
+    heading = compassHeadingFromEuler(event.alpha, event.beta, event.gamma);
   }
+  state.heading = normalizeHeading(heading);
+  state.headingAcc = Number.isFinite(headingAcc) ? headingAcc : null;
 
   const nowPerf = performance.now();
   if (state.lastSamplePerf > 0) {
@@ -461,37 +497,27 @@ function onDeviceOrientation(event) {
   }
   state.lastSamplePerf = nowPerf;
 
-  const webkitHeading = toFinite(event.webkitCompassHeading, NaN);
-  const heading = Number.isFinite(webkitHeading)
-    ? normalizeHeading(webkitHeading)
-    : normalizeHeading(alpha);
-
-  updateLocalPayload({
-    q: { x: q.x, y: q.y, z: q.z, w: q.w },
-    heading,
-  });
-
+  applyLocalVisual();
   processOrientationFrame();
 }
 
 function onDeviceMotion(event) {
-  if (!state.sensorsEnabled) {
-    return;
+  if (!state.sensorsEnabled) return;
+
+  const a = event.acceleration;
+  const ag = event.accelerationIncludingGravity;
+  if (ag && Number.isFinite(ag.x) && Number.isFinite(ag.y) && Number.isFinite(ag.z)) {
+    state.accG = { x: ag.x, y: ag.y, z: ag.z };
+  }
+  if (a && Number.isFinite(a.x) && Number.isFinite(a.y) && Number.isFinite(a.z)) {
+    state.acc = { x: a.x, y: a.y, z: a.z };
+  } else if (state.accG) {
+    const fallback = computeLinearAccelFallbackFromAccG(state.accG, state.qRaw);
+    if (fallback) state.acc = fallback;
   }
 
-  const source = event.accelerationIncludingGravity || event.acceleration;
-  if (!source) {
-    return;
-  }
-
-  const g = 9.80665;
-  const ax = toFinite(source.x, 0) / g;
-  const ay = toFinite(source.y, 0) / g;
-  const az = toFinite(source.z, 0) / g;
-
-  updateLocalPayload({
-    acc: { x: ax, y: ay, z: az },
-  });
+  updateAccelArrows(state.localTwin.accelArrows, state.acc);
+  processOrientationFrame();
 }
 
 async function requestSensorPermissionIfNeeded() {
@@ -501,7 +527,6 @@ async function requestSensorPermissionIfNeeded() {
       throw new Error("Device orientation permission denied");
     }
   }
-
   if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function") {
     const motionResult = await DeviceMotionEvent.requestPermission();
     if (motionResult !== "granted") {
@@ -512,7 +537,6 @@ async function requestSensorPermissionIfNeeded() {
 
 function startLocationTracking() {
   if (!("geolocation" in navigator)) {
-    setOrientationStatus("Geolocation unavailable; using planar orientation only", true);
     return false;
   }
   if (state.locationWatchId !== null) {
@@ -521,54 +545,48 @@ function startLocationTracking() {
 
   const onPosition = (position) => {
     const coords = position && position.coords ? position.coords : null;
-    if (!coords) {
-      return;
+    if (!coords) return;
+    state.gps = {
+      lat: toFinite(coords.latitude, NaN),
+      lon: toFinite(coords.longitude, NaN),
+      acc: toFinite(coords.accuracy, NaN),
+    };
+    if (projectionMode() === "sphere" && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)) {
+      setAnchorFromUp(latLonToUp(state.gps.lat, state.gps.lon));
+      applyLocalVisual();
     }
-    updateLocalPayload({
-      gps: {
-        lat: toFinite(coords.latitude, NaN),
-        lon: toFinite(coords.longitude, NaN),
-        accuracy_m: toFinite(coords.accuracy, NaN),
-      },
-    });
-    if (state.playbackEnabled) {
-      processOrientationFrame();
-    }
+    processOrientationFrame();
   };
 
   const onError = (error) => {
-    const detail = error && error.message ? error.message : "geolocation permission denied";
-    setOrientationStatus(`Location unavailable: ${detail}`, true);
+    const detail = error && error.message ? error.message : "location unavailable";
     logOrientation(`[ORIENTATION] Location unavailable: ${detail}`);
   };
 
   try {
     state.locationWatchId = navigator.geolocation.watchPosition(onPosition, onError, {
-      enableHighAccuracy: false,
-      maximumAge: 15000,
-      timeout: 10000,
+      enableHighAccuracy: true,
+      maximumAge: 250,
+      timeout: 15000,
     });
-    // Trigger immediate permission prompt on first load where applicable.
     navigator.geolocation.getCurrentPosition(onPosition, onError, {
-      enableHighAccuracy: false,
-      maximumAge: 15000,
-      timeout: 10000,
+      enableHighAccuracy: true,
+      maximumAge: 250,
+      timeout: 15000,
     });
     return true;
   } catch (err) {
-    setOrientationStatus(`Location unavailable: ${err.message || err}`, true);
+    logOrientation(`[ORIENTATION] Location tracking failed: ${err.message || err}`);
     return false;
   }
 }
 
 async function startLocalSensors() {
   if (state.sensorsEnabled) {
-    setOrientationStatus("Local sensor input already enabled");
     return true;
   }
-
   if (typeof window.DeviceOrientationEvent === "undefined") {
-    setOrientationStatus("DeviceOrientation is not available in this browser/device", true);
+    setOrientationStatus("DeviceOrientation is not available on this browser/device", true);
     return false;
   }
 
@@ -580,29 +598,50 @@ async function startLocalSensors() {
   }
 
   window.addEventListener("deviceorientation", onDeviceOrientation, true);
+  window.addEventListener("deviceorientationabsolute", onDeviceOrientation, true);
   window.addEventListener("devicemotion", onDeviceMotion, true);
 
   state.sensorsEnabled = true;
-  setOrientationStatus("Local sensor input enabled");
-  logOrientation("[ORIENTATION] Local sensors enabled");
   startLocationTracking();
-
-  if (state.playbackEnabled) {
-    setPlaybackBaselinePending("Sensors enabled. Re-centering...");
-  }
+  setOrientationStatus("Sensors enabled");
+  logOrientation("[ORIENTATION] Local sensors enabled");
   return true;
 }
 
 function stopLocalSensors() {
   window.removeEventListener("deviceorientation", onDeviceOrientation, true);
+  window.removeEventListener("deviceorientationabsolute", onDeviceOrientation, true);
   window.removeEventListener("devicemotion", onDeviceMotion, true);
-
+  if (state.locationWatchId !== null && "geolocation" in navigator) {
+    try {
+      navigator.geolocation.clearWatch(state.locationWatchId);
+    } catch (err) {
+      // no-op
+    }
+    state.locationWatchId = null;
+  }
   state.sensorsEnabled = false;
   state.localHz = 0;
   state.lastSamplePerf = 0;
-  setOrientationStatus("Local sensor input disabled");
-
+  setOrientationStatus("Sensors disabled");
   logOrientation("[ORIENTATION] Local sensors disabled");
+}
+
+function setPlaybackEnabled(enabled) {
+  state.playbackEnabled = !!enabled;
+  if (state.playbackEnabled) {
+    setPlaybackBaselinePending("Play requested - waiting for baseline...");
+    processOrientationFrame();
+  } else {
+    state.baselinePending = false;
+    state.baselineQuaternion = null;
+    state.baselineHeading = null;
+    state.smoothed = null;
+    state.lastCommand = "";
+    state.lastCommandSentAt = 0;
+    processOrientationFrame();
+  }
+  updateStreamToggleUi();
 }
 
 function applyTuneableValue(key, rawValue, integerValue = false) {
@@ -619,268 +658,18 @@ function bindTuneablePair(numberId, rangeId, key, integerValue = false) {
   if (!numberEl || !rangeEl) {
     return;
   }
-
   const apply = (raw) => {
     applyTuneableValue(key, raw, integerValue);
-    const valueText = integerValue ? String(Math.round(tuneables[key])) : String(tuneables[key]);
-    numberEl.value = valueText;
-    rangeEl.value = valueText;
+    const textValue = integerValue ? String(Math.round(tuneables[key])) : String(tuneables[key]);
+    numberEl.value = textValue;
+    rangeEl.value = textValue;
     if (state.playbackEnabled) {
       processOrientationFrame();
     }
   };
-
   numberEl.addEventListener("input", () => apply(numberEl.value));
   rangeEl.addEventListener("input", () => apply(rangeEl.value));
   apply(numberEl.value || rangeEl.value || String(defaultTuneables[key]));
-}
-
-function setTuneablesToDefaults() {
-  Object.assign(tuneables, defaultTuneables);
-  const mappings = [
-    ["orientationSensitivity", "orientationSensitivity"],
-    ["orientationSensitivityRange", "orientationSensitivity"],
-    ["orientationHeadingGain", "headingGain"],
-    ["orientationHeadingGainRange", "headingGain"],
-    ["orientationYawGain", "yawGain"],
-    ["orientationYawGainRange", "yawGain"],
-    ["orientationPitchGain", "pitchGain"],
-    ["orientationPitchGainRange", "pitchGain"],
-    ["orientationRollGain", "rollGain"],
-    ["orientationRollGainRange", "rollGain"],
-    ["orientationAccelYGain", "accelYGain"],
-    ["orientationAccelYGainRange", "accelYGain"],
-    ["orientationAccelZGain", "accelZGain"],
-    ["orientationAccelZGainRange", "accelZGain"],
-    ["orientationAccelHGain", "accelHGain"],
-    ["orientationAccelHGainRange", "accelHGain"],
-    ["orientationSmoothAlpha", "smoothAlpha"],
-    ["orientationSmoothAlphaRange", "smoothAlpha"],
-    ["orientationIntervalMs", "commandIntervalMs"],
-    ["orientationIntervalMsRange", "commandIntervalMs"],
-    ["orientationSpeed", "speed"],
-    ["orientationSpeedRange", "speed"],
-    ["orientationAccel", "acceleration"],
-    ["orientationAccelRange", "acceleration"],
-    ["orientationOffsetX", "offsetX"],
-    ["orientationOffsetXRange", "offsetX"],
-    ["orientationOffsetY", "offsetY"],
-    ["orientationOffsetYRange", "offsetY"],
-    ["orientationOffsetZ", "offsetZ"],
-    ["orientationOffsetZRange", "offsetZ"],
-    ["orientationOffsetH", "offsetH"],
-    ["orientationOffsetHRange", "offsetH"],
-    ["orientationOffsetR", "offsetR"],
-    ["orientationOffsetRRange", "offsetR"],
-    ["orientationOffsetP", "offsetP"],
-    ["orientationOffsetPRange", "offsetP"],
-  ];
-
-  mappings.forEach(([id, key]) => {
-    const input = byId(id);
-    if (input) {
-      input.value = String(tuneables[key]);
-    }
-  });
-}
-
-function setPlaybackEnabled(enabled) {
-  state.playbackEnabled = !!enabled;
-  if (state.playbackEnabled) {
-    setPlaybackBaselinePending("Play requested - waiting for local sensor data...");
-    logOrientation("[ORIENTATION] Stream play");
-    processOrientationFrame();
-  } else {
-    state.baselinePending = false;
-    state.baseline = null;
-    state.smoothed = null;
-    state.lastCommand = "";
-    state.lastCommandSentAt = 0;
-    setOrientationStatus("Paused");
-    logOrientation("[ORIENTATION] Stream pause");
-  }
-  updateStreamToggleUi();
-}
-
-function recenterBaseline() {
-  if (!state.localPayload) {
-    setOrientationStatus("Cannot recenter: no local sensor payload", true);
-    return;
-  }
-  const snapshot = snapshotFromState(state.localPayload);
-  if (!snapshot) {
-    setOrientationStatus("Cannot recenter: local payload is invalid", true);
-    return;
-  }
-  captureBaselineFromSnapshot(snapshot);
-  if (state.playbackEnabled) {
-    processOrientationFrame();
-  }
-}
-
-function embeddedSceneDocument() {
-  return `<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-      html, body {
-        margin: 0;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: radial-gradient(circle at 30% 20%, #1f2d3a 0%, #0a1018 70%);
-        color: #e5eef9;
-        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;
-      }
-      .root {
-        width: 100%;
-        height: 100%;
-        display: grid;
-        grid-template-rows: 1fr auto;
-      }
-      .stage {
-        perspective: 900px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-      }
-      .cube {
-        position: relative;
-        width: 110px;
-        height: 110px;
-        transform-style: preserve-3d;
-        transition: transform 0.05s linear;
-      }
-      .face {
-        position: absolute;
-        width: 110px;
-        height: 110px;
-        border: 1px solid rgba(255,255,255,0.25);
-        background: rgba(64, 145, 255, 0.14);
-        box-shadow: inset 0 0 20px rgba(120, 180, 255, 0.2);
-      }
-      .f1 { transform: translateZ(55px); }
-      .f2 { transform: rotateY(180deg) translateZ(55px); }
-      .f3 { transform: rotateY(90deg) translateZ(55px); }
-      .f4 { transform: rotateY(-90deg) translateZ(55px); }
-      .f5 { transform: rotateX(90deg) translateZ(55px); }
-      .f6 { transform: rotateX(-90deg) translateZ(55px); }
-      .meta {
-        padding: 8px 10px;
-        font-size: 12px;
-        line-height: 1.35;
-        background: rgba(3, 8, 14, 0.72);
-        border-top: 1px solid rgba(255,255,255,0.1);
-      }
-      .meta .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .accent { color: #8fd2ff; }
-    </style>
-  </head>
-  <body>
-    <div class="root">
-      <div class="stage">
-        <div id="cube" class="cube">
-          <div class="face f1"></div>
-          <div class="face f2"></div>
-          <div class="face f3"></div>
-          <div class="face f4"></div>
-          <div class="face f5"></div>
-          <div class="face f6"></div>
-        </div>
-      </div>
-      <div class="meta">
-        <div class="line">Mode: <span id="mode" class="accent">Paused</span></div>
-        <div class="line" id="angles">Yaw 0.0 | Pitch 0.0 | Roll 0.0</div>
-        <div class="line" id="heading">Heading -</div>
-        <div class="line" id="command">Command: waiting...</div>
-      </div>
-    </div>
-    <script>
-      const cube = document.getElementById("cube");
-      const modeEl = document.getElementById("mode");
-      const anglesEl = document.getElementById("angles");
-      const headingEl = document.getElementById("heading");
-      const commandEl = document.getElementById("command");
-
-      window.addEventListener("message", (event) => {
-        const data = event.data || {};
-        if (data.type !== "orientation_local_update") {
-          return;
-        }
-        const yaw = Number(data.yaw) || 0;
-        const pitch = Number(data.pitch) || 0;
-        const roll = Number(data.roll) || 0;
-        cube.style.transform = "rotateX(" + pitch.toFixed(2) + "deg) rotateY(" + yaw.toFixed(2) + "deg) rotateZ(" + roll.toFixed(2) + "deg)";
-        modeEl.textContent = data.playbackEnabled ? "Streaming" : "Paused";
-        anglesEl.textContent = "Yaw " + yaw.toFixed(1) + " | Pitch " + pitch.toFixed(1) + " | Roll " + roll.toFixed(1);
-        headingEl.textContent = Number.isFinite(Number(data.heading))
-          ? "Heading " + Number(data.heading).toFixed(1) + "deg"
-          : "Heading -";
-        commandEl.textContent = data.command ? "Command: " + data.command : "Command: waiting...";
-      });
-    </script>
-  </body>
-</html>`;
-}
-
-function loadEmbeddedScene() {
-  if (!ui.embedFrame) {
-    return;
-  }
-
-  state.sceneLoaded = false;
-  ui.embedFrame.onload = () => {
-    state.sceneLoaded = true;
-    setOrientationStatus("Embedded local orientation scene loaded");
-    if (state.localPayload) {
-      const snapshot = snapshotFromState(state.localPayload);
-      if (snapshot) {
-        pushEmbeddedSceneState(snapshot, state.lastCommand);
-      }
-    }
-  };
-  ui.embedFrame.srcdoc = embeddedSceneDocument();
-}
-
-function updateProjectionButtonsUi() {
-  if (ui.projectionPlaneBtn) {
-    ui.projectionPlaneBtn.classList.toggle("primary", projectionMode() === "plane");
-  }
-  if (ui.projectionSphereBtn) {
-    ui.projectionSphereBtn.classList.toggle("primary", projectionMode() === "sphere");
-  }
-}
-
-function setProjectionMode(mode) {
-  state.projection = mode === "sphere" ? "sphere" : "plane";
-  localStorage.setItem(PROJECTION_STORAGE_KEY, state.projection);
-  updateProjectionButtonsUi();
-  if (state.playbackEnabled) {
-    setPlaybackBaselinePending(`Projection changed to ${state.projection}. Re-centering...`);
-  }
-  processOrientationFrame();
-}
-
-function bindCoreUi() {
-  if (ui.projectionPlaneBtn) {
-    ui.projectionPlaneBtn.addEventListener("click", () => setProjectionMode("plane"));
-  }
-  if (ui.projectionSphereBtn) {
-    ui.projectionSphereBtn.addEventListener("click", () => setProjectionMode("sphere"));
-  }
-  if (ui.streamToggleBtn) {
-    ui.streamToggleBtn.addEventListener("click", async () => {
-      if (!state.playbackEnabled) {
-        const ok = await startLocalSensors();
-        if (!ok) {
-          return;
-        }
-      }
-      setPlaybackEnabled(!state.playbackEnabled);
-    });
-  }
 }
 
 function bindTuneablesUi() {
@@ -904,10 +693,139 @@ function bindTuneablesUi() {
   bindTuneablePair("orientationOffsetP", "orientationOffsetPRange", "offsetP");
 }
 
+function resizeScene() {
+  if (!state.sceneReady || !state.renderer || !state.mainCamera || !ui.sceneHost) {
+    return;
+  }
+  const rect = ui.sceneHost.getBoundingClientRect();
+  const width = Math.max(1, Math.floor(rect.width));
+  const height = Math.max(1, Math.floor(rect.height));
+  state.mainCamera.aspect = width / height;
+  state.mainCamera.updateProjectionMatrix();
+  state.renderer.setSize(width, height, false);
+}
+
+function animateScene() {
+  if (!state.sceneReady) {
+    return;
+  }
+  state.animationHandle = window.requestAnimationFrame(animateScene);
+  if (projectionMode() === "plane" && state.localTwin) {
+    state.localTwin.group.position.y = 1.0 + Math.sin(Date.now() * 0.0012) * 0.02;
+  } else {
+    applyLocalVisual();
+  }
+  state.renderer.render(state.scene, state.mainCamera);
+}
+
+function initScene() {
+  if (state.sceneReady || !ui.sceneHost) {
+    return;
+  }
+
+  state.scene = new THREE.Scene();
+  state.scene.fog = new THREE.Fog(0x000000, 12, 35);
+
+  state.mainCamera = new THREE.PerspectiveCamera(65, 16 / 9, 0.05, 100);
+  state.mainCamera.position.set(0, 15, 15);
+  state.mainCamera.lookAt(0, 1.2, 0);
+
+  state.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  ui.sceneHost.innerHTML = "";
+  ui.sceneHost.appendChild(state.renderer.domElement);
+
+  state.scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+  const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+  dir.position.set(5, 8, 5);
+  state.scene.add(dir);
+
+  state.ground = new THREE.Mesh(
+    new THREE.CircleGeometry(20, 64),
+    new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 1, metalness: 0 })
+  );
+  state.ground.rotation.x = -Math.PI / 2;
+  state.ground.position.y = 0;
+  state.scene.add(state.ground);
+
+  state.grid = new THREE.GridHelper(20, 20, 0x222222, 0x111111);
+  state.grid.position.y = 0.01;
+  state.scene.add(state.grid);
+
+  state.globe = new THREE.Mesh(
+    new THREE.SphereGeometry(SPHERE_RADIUS, 64, 32),
+    new THREE.MeshStandardMaterial({
+      color: 0xaaaaaa,
+      roughness: 1,
+      metalness: 0,
+      wireframe: true,
+      transparent: true,
+      opacity: 0.35,
+    })
+  );
+  state.globe.visible = false;
+  state.scene.add(state.globe);
+
+  state.anchorMarker = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 16, 12),
+    new THREE.MeshStandardMaterial({ color: 0xffae00, roughness: 0.3, metalness: 0.1 })
+  );
+  state.anchorMarker.visible = false;
+  state.scene.add(state.anchorMarker);
+
+  state.localTwin = makePhoneTwin(true);
+  state.localTwin.group.position.set(0, 1.0, 0);
+  state.scene.add(state.localTwin.group);
+
+  setAnchorFromUp(state.anchorUp);
+  applyLocalVisual();
+
+  state.sceneReady = true;
+  resizeScene();
+  animateScene();
+}
+
+function setProjectionMode(mode) {
+  state.projection = mode === "sphere" ? "sphere" : "plane";
+  localStorage.setItem(PROJECTION_STORAGE_KEY, state.projection);
+  updateProjectionButtonsUi();
+
+  if (state.projection === "sphere" && state.gps && Number.isFinite(state.gps.lat) && Number.isFinite(state.gps.lon)) {
+    setAnchorFromUp(latLonToUp(state.gps.lat, state.gps.lon));
+  }
+  applyLocalVisual();
+
+  if (state.playbackEnabled) {
+    setPlaybackBaselinePending(`Projection changed to ${state.projection}. Re-centering...`);
+  } else {
+    processOrientationFrame();
+  }
+}
+
+function bindCoreUi() {
+  if (ui.streamToggleBtn) {
+    ui.streamToggleBtn.addEventListener("click", async () => {
+      if (!state.playbackEnabled && !state.sensorsEnabled) {
+        const ok = await startLocalSensors();
+        if (!ok) {
+          return;
+        }
+      }
+      setPlaybackEnabled(!state.playbackEnabled);
+    });
+  }
+  if (ui.projectionPlaneBtn) {
+    ui.projectionPlaneBtn.addEventListener("click", () => setProjectionMode("plane"));
+  }
+  if (ui.projectionSphereBtn) {
+    ui.projectionSphereBtn.addEventListener("click", () => setProjectionMode("sphere"));
+  }
+}
+
 function hydrateDefaults() {
-  const savedProjection = localStorage.getItem(PROJECTION_STORAGE_KEY);
-  if (savedProjection === "sphere" || savedProjection === "plane") {
-    state.projection = savedProjection;
+  const saved = localStorage.getItem(PROJECTION_STORAGE_KEY);
+  if (saved === "sphere" || saved === "plane") {
+    state.projection = saved;
   }
   updateProjectionButtonsUi();
 }
@@ -915,18 +833,18 @@ function hydrateDefaults() {
 function cacheElements() {
   ui.projectionPlaneBtn = byId("orientationProjectionPlaneBtn");
   ui.projectionSphereBtn = byId("orientationProjectionSphereBtn");
-  ui.statusEl = byId("orientationStatus");
   ui.streamToggleBtn = byId("orientationStreamToggleBtn");
-  ui.embedFrame = byId("orientationEmbedFrame");
+  ui.statusEl = byId("orientationStatus");
+  ui.sceneHost = byId("orientationSceneHost");
 }
 
 function initOrientationApp() {
   if (state.initialized) {
     return;
   }
-  cacheElements();
 
-  if (!ui.streamToggleBtn) {
+  cacheElements();
+  if (!ui.sceneHost || !ui.streamToggleBtn) {
     return;
   }
 
@@ -935,14 +853,18 @@ function initOrientationApp() {
   bindCoreUi();
   bindTuneablesUi();
   updateStreamToggleUi();
+  initScene();
+
+  window.addEventListener("resize", resizeScene);
   setOrientationStatus("Requesting orientation and location permissions...");
-  loadEmbeddedScene();
+
   startLocationTracking();
   startLocalSensors().then((ok) => {
     if (!ok) {
       setOrientationStatus("Permission required. Press Play Stream to retry", true);
       return;
     }
+    processOrientationFrame();
     setOrientationStatus("Sensors ready. Press Play Stream to send commands");
   });
 }
@@ -953,3 +875,4 @@ const initialRoute = window.location.hash.replace(/^#\/?/, "").trim().toLowerCas
 if (initialRoute === "orientation") {
   initOrientationApp();
 }
+

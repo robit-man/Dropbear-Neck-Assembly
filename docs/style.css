@@ -403,7 +403,8 @@ h3 {
     background: #050505;
 }
 
-.orientation-embed-wrap iframe {
+.orientation-embed-wrap iframe,
+#orientationSceneHost {
     display: block;
     width: 100%;
     min-height: 460px;
@@ -576,7 +577,8 @@ h3 {
     }
 
     .orientation-embed-wrap,
-    .orientation-embed-wrap iframe {
+    .orientation-embed-wrap iframe,
+    #orientationSceneHost {
         min-height: 320px;
     }
 
