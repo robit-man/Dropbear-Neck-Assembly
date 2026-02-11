@@ -1726,51 +1726,116 @@ ROUTER_DASHBOARD_HTML = """
     </div>
 
     <script>
-      const state = {
+      var state = {
         history: [],
         refreshEveryMs: 1000,
         lastAddress: "",
+        polling: false
       };
 
+      function nowMs() {
+        return new Date().getTime();
+      }
+
       function normalizeAddress(value) {
-        const text = String(value ?? "").trim();
+        var raw = value;
+        if (raw === null || raw === undefined) {
+          raw = "";
+        }
+        var text = String(raw).replace(/^\\s+|\\s+$/g, "");
         return text ? text : "";
       }
 
       function esc(value) {
-        return String(value ?? "").replace(/[&<>\"']/g, (m) => (
-          m === "&" ? "&amp;" : m === "<" ? "&lt;" : m === ">" ? "&gt;" : m === "\"" ? "&quot;" : "&#39;"
-        ));
+        var raw = value;
+        if (raw === null || raw === undefined) {
+          raw = "";
+        }
+        return String(raw).replace(/[&<>"']/g, function (m) {
+          if (m === "&") return "&amp;";
+          if (m === "<") return "&lt;";
+          if (m === ">") return "&gt;";
+          if (m === '"') return "&quot;";
+          return "&#39;";
+        });
       }
 
       function fmtBytes(bytes) {
-        const n = Number(bytes || 0);
-        if (!Number.isFinite(n)) return "0 B";
-        const abs = Math.abs(n);
-        if (abs < 1024) return `${n.toFixed(0)} B`;
-        if (abs < 1024 * 1024) return `${(n / 1024).toFixed(2)} KiB`;
-        if (abs < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
-        return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+        var n = Number(bytes || 0);
+        if (!isFinite(n)) return "0 B";
+        var abs = Math.abs(n);
+        if (abs < 1024) return n.toFixed(0) + " B";
+        if (abs < 1024 * 1024) return (n / 1024).toFixed(2) + " KiB";
+        if (abs < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(2) + " MiB";
+        return (n / (1024 * 1024 * 1024)).toFixed(2) + " GiB";
       }
 
       function fmtRate(bytesPerSec) {
-        return `${fmtBytes(bytesPerSec)}/s`;
+        return fmtBytes(bytesPerSec) + "/s";
       }
 
       function pickRateSample(history) {
-        if (!Array.isArray(history) || !history.length) {
+        if (!history || !history.length) {
           return { inbound_bps: 0, outbound_bps: 0 };
         }
         return history[history.length - 1] || { inbound_bps: 0, outbound_bps: 0 };
       }
 
+      function fetchJson(url, timeoutMs, done) {
+        var xhr = new XMLHttpRequest();
+        var finished = false;
+        var timeout = Number(timeoutMs || 4500);
+        if (!isFinite(timeout) || timeout < 500) timeout = 4500;
+
+        function finish(err, response, data) {
+          if (finished) return;
+          finished = true;
+          done(err, response, data);
+        }
+
+        try {
+          xhr.open("GET", url, true);
+        } catch (err) {
+          finish(err, null, null);
+          return;
+        }
+
+        xhr.timeout = timeout;
+        xhr.onreadystatechange = function () {
+          if (xhr.readyState !== 4) return;
+          var text = xhr.responseText || "";
+          var data = {};
+          if (text) {
+            try {
+              data = JSON.parse(text);
+            } catch (parseErr) {
+              finish(parseErr, xhr, null);
+              return;
+            }
+          }
+          finish(null, xhr, data);
+        };
+        xhr.onerror = function () {
+          finish(new Error("network error"), xhr, null);
+        };
+        xhr.ontimeout = function () {
+          finish(new Error("timeout"), xhr, null);
+        };
+
+        try {
+          xhr.send();
+        } catch (sendErr) {
+          finish(sendErr, xhr, null);
+        }
+      }
+
       function drawChart(history) {
-        const canvas = document.getElementById("rateChart");
-        if (!canvas) return;
-        const ctx = canvas.getContext("2d");
-        const width = canvas.clientWidth || canvas.width;
-        const height = canvas.clientHeight || canvas.height;
-        const dpr = window.devicePixelRatio || 1;
+        var canvas = document.getElementById("rateChart");
+        if (!canvas || !canvas.getContext) return;
+        var ctx = canvas.getContext("2d");
+        var width = canvas.clientWidth || canvas.width;
+        var height = canvas.clientHeight || canvas.height;
+        var dpr = window.devicePixelRatio || 1;
         canvas.width = Math.floor(width * dpr);
         canvas.height = Math.floor(height * dpr);
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1778,189 +1843,253 @@ ROUTER_DASHBOARD_HTML = """
         ctx.fillStyle = "#161616";
         ctx.fillRect(0, 0, width, height);
 
-        const pad = 28;
-        const drawW = width - pad * 2;
-        const drawH = height - pad * 2;
+        var pad = 28;
+        var drawW = width - pad * 2;
+        var drawH = height - pad * 2;
         ctx.strokeStyle = "#333";
         ctx.lineWidth = 1;
         ctx.strokeRect(pad, pad, drawW, drawH);
 
-        if (!Array.isArray(history) || history.length < 2) return;
+        if (!history || history.length < 2) return;
 
-        let maxRate = 1;
-        for (const p of history) {
-          maxRate = Math.max(maxRate, Number(p.inbound_bps || 0), Number(p.outbound_bps || 0));
+        var maxRate = 1;
+        var i;
+        for (i = 0; i < history.length; i += 1) {
+          var point = history[i] || {};
+          maxRate = Math.max(maxRate, Number(point.inbound_bps || 0), Number(point.outbound_bps || 0));
         }
 
-        const drawSeries = (color, key) => {
+        function drawSeries(color, key) {
           ctx.beginPath();
           ctx.strokeStyle = color;
           ctx.lineWidth = 2;
-          for (let i = 0; i < history.length; i += 1) {
-            const x = pad + (i / (history.length - 1)) * drawW;
-            const v = Number(history[i][key] || 0);
-            const y = pad + drawH - (Math.min(maxRate, v) / maxRate) * drawH;
-            if (i === 0) ctx.moveTo(x, y);
+          for (var j = 0; j < history.length; j += 1) {
+            var x = pad + (j / (history.length - 1)) * drawW;
+            var item = history[j] || {};
+            var v = Number(item[key] || 0);
+            var y = pad + drawH - (Math.min(maxRate, v) / maxRate) * drawH;
+            if (j === 0) ctx.moveTo(x, y);
             else ctx.lineTo(x, y);
           }
           ctx.stroke();
-        };
+        }
 
         drawSeries("#00d08a", "inbound_bps");
         drawSeries("#5ca8ff", "outbound_bps");
 
         ctx.fillStyle = "#d0d0d0";
         ctx.font = "12px monospace";
-        ctx.fillText(`max ${fmtRate(maxRate)}`, pad + 6, pad + 16);
+        ctx.fillText("max " + fmtRate(maxRate), pad + 6, pad + 16);
       }
 
-      async function copyAddress() {
-        const addr = state.lastAddress || "";
-        const status = document.getElementById("copyStatus");
-        if (!addr || addr === "N/A") {
-          status.textContent = "Address not ready";
-          return;
-        }
+      function fallbackCopyAddress(addr, statusNode) {
         try {
-          await navigator.clipboard.writeText(addr);
-          status.textContent = "Copied";
-          return;
-        } catch (_) {}
-
-        try {
-          const ta = document.createElement("textarea");
+          var ta = document.createElement("textarea");
           ta.value = addr;
           document.body.appendChild(ta);
           ta.select();
           document.execCommand("copy");
           document.body.removeChild(ta);
-          status.textContent = "Copied";
+          statusNode.textContent = "Copied";
         } catch (err) {
-          status.textContent = `Copy failed: ${err}`;
+          statusNode.textContent = "Copy failed: " + String(err);
         }
       }
 
-      async function hydrateAddressFromInfo() {
-        try {
-          const res = await fetch(`/nkn/info?t=${Date.now()}`, { cache: "no-store" });
-          const info = await res.json();
-          if (!res.ok || info.status !== "success") {
-            return "";
-          }
-          const address = normalizeAddress(info?.nkn?.address || "");
-          if (address) {
-            state.lastAddress = address;
-            document.getElementById("routerAddress").textContent = address;
-          }
-          return address;
-        } catch (_) {
-          return "";
+      function copyAddress() {
+        var addr = state.lastAddress || "";
+        var status = document.getElementById("copyStatus");
+        if (!status) return;
+        if (!addr || addr === "N/A") {
+          status.textContent = "Address not ready";
+          return;
         }
+
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          navigator.clipboard.writeText(addr).then(
+            function () {
+              status.textContent = "Copied";
+            },
+            function () {
+              fallbackCopyAddress(addr, status);
+            }
+          );
+          return;
+        }
+
+        fallbackCopyAddress(addr, status);
+      }
+
+      function hydrateAddressFromInfo(done) {
+        fetchJson("/nkn/info?t=" + nowMs(), 4500, function (err, res, info) {
+          if (err || !res || res.status < 200 || res.status >= 300 || !info || info.status !== "success") {
+            done({ address: "", ready: null });
+            return;
+          }
+          var nknInfo = info.nkn && typeof info.nkn === "object" ? info.nkn : {};
+          var address = normalizeAddress(nknInfo.address || "");
+          var ready = typeof nknInfo.ready === "boolean" ? nknInfo.ready : null;
+          done({ address: address, ready: ready });
+        });
       }
 
       function renderPeers(peers) {
-        const root = document.getElementById("peerRows");
-        if (!Array.isArray(peers) || !peers.length) {
+        var root = document.getElementById("peerRows");
+        if (!root) return;
+        if (!peers || !peers.length) {
           root.innerHTML = "<tr><td colspan='5' class='muted'>No peer activity yet</td></tr>";
           return;
         }
-        root.innerHTML = peers.map((peer) => {
-          const endpointHits = peer.endpoint_hits || {};
-          const endpointLine = Object.entries(endpointHits)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 6)
-            .map(([k, v]) => `${esc(k)}:${v}`)
-            .join(" ");
-          return `
-            <tr>
-              <td class="small"><code>${esc(peer.peer || "(unknown)")}</code></td>
-              <td class="small">${Number(peer.inbound_messages || 0)} / ${Number(peer.outbound_messages || 0)}</td>
-              <td class="small">${fmtBytes(peer.inbound_bytes || 0)} / ${fmtBytes(peer.outbound_bytes || 0)}</td>
-              <td class="small">${endpointLine || "<span class='muted'>none</span>"}</td>
-              <td class="small">${esc(peer.last_event || "")}</td>
-            </tr>
-          `;
-        }).join("");
+
+        var html = "";
+        for (var i = 0; i < peers.length; i += 1) {
+          var peer = peers[i] || {};
+          var endpointHits = peer.endpoint_hits || {};
+          var endpointPairs = [];
+          for (var key in endpointHits) {
+            if (Object.prototype.hasOwnProperty.call(endpointHits, key)) {
+              endpointPairs.push([key, endpointHits[key]]);
+            }
+          }
+          endpointPairs.sort(function (a, b) {
+            return Number(b[1] || 0) - Number(a[1] || 0);
+          });
+
+          var endpointLine = "";
+          for (var j = 0; j < endpointPairs.length && j < 6; j += 1) {
+            if (endpointLine) endpointLine += " ";
+            endpointLine += esc(endpointPairs[j][0]) + ":" + endpointPairs[j][1];
+          }
+          if (!endpointLine) endpointLine = "<span class='muted'>none</span>";
+
+          html += "<tr>";
+          html += "<td class='small'><code>" + esc(peer.peer || "(unknown)") + "</code></td>";
+          html += "<td class='small'>" + Number(peer.inbound_messages || 0) + " / " + Number(peer.outbound_messages || 0) + "</td>";
+          html += "<td class='small'>" + fmtBytes(peer.inbound_bytes || 0) + " / " + fmtBytes(peer.outbound_bytes || 0) + "</td>";
+          html += "<td class='small'>" + endpointLine + "</td>";
+          html += "<td class='small'>" + esc(peer.last_event || "") + "</td>";
+          html += "</tr>";
+        }
+        root.innerHTML = html;
       }
 
       function renderLogs(logs) {
-        const root = document.getElementById("logRows");
-        if (!Array.isArray(logs) || !logs.length) {
+        var root = document.getElementById("logRows");
+        if (!root) return;
+        if (!logs || !logs.length) {
           root.textContent = "No activity logs yet";
           return;
         }
-        root.innerHTML = logs.slice().reverse().map((row) => {
-          const cat = esc(row.category || "system");
-          const dir = esc(row.direction || "");
-          const peer = esc(row.peer || "");
-          const event = esc(row.event || "");
-          const msg = esc(row.message || "");
-          const prefix = `[${esc(row.time || "")}] [${cat}]`;
-          const suffix = [dir, peer, event].filter(Boolean).join(" ");
-          return `<div class="log-row"><code>${prefix}${suffix ? " " + suffix : ""}</code> ${msg}</div>`;
-        }).join("");
+
+        var html = "";
+        for (var i = logs.length - 1; i >= 0; i -= 1) {
+          var row = logs[i] || {};
+          var cat = esc(row.category || "system");
+          var dir = esc(row.direction || "");
+          var peer = esc(row.peer || "");
+          var event = esc(row.event || "");
+          var msg = esc(row.message || "");
+          var prefix = "[" + esc(row.time || "") + "] [" + cat + "]";
+          var suffixParts = [];
+          if (dir) suffixParts.push(dir);
+          if (peer) suffixParts.push(peer);
+          if (event) suffixParts.push(event);
+          var suffix = suffixParts.join(" ");
+          html += "<div class='log-row'><code>" + prefix + (suffix ? " " + suffix : "") + "</code> " + msg + "</div>";
+        }
+        root.innerHTML = html;
       }
 
-      function updateDom(data) {
-        const nkn = data.nkn || {};
-        const totals = data.totals || {};
-        const history = Array.isArray(data.history) ? data.history : [];
+      function updateDom(data, infoAddress, infoReady) {
+        var nkn = data && data.nkn ? data.nkn : {};
+        var totals = data && data.totals ? data.totals : {};
+        var history = data && data.history && data.history.length ? data.history : [];
         state.history = history;
-        const latest = pickRateSample(history);
+        var latest = pickRateSample(history);
 
-        const currentAddress = normalizeAddress(nkn.address || "");
+        var dashboardAddress = normalizeAddress((nkn && nkn.address) || "");
+        var currentAddress = infoAddress || dashboardAddress;
         state.lastAddress = currentAddress || "N/A";
-        document.getElementById("routerAddress").textContent = state.lastAddress;
-        document.getElementById("readyState").textContent = nkn.ready ? "NKN ready" : "NKN waiting";
-        document.getElementById("readyState").className = nkn.ready ? "ok" : "warn";
 
-        document.getElementById("inMsgs").textContent = Number(totals.inbound_messages || 0);
-        document.getElementById("outMsgs").textContent = Number(totals.outbound_messages || 0);
-        document.getElementById("inBytes").textContent = fmtBytes(totals.inbound_bytes || 0);
-        document.getElementById("outBytes").textContent = fmtBytes(totals.outbound_bytes || 0);
-        document.getElementById("inRate").textContent = fmtRate(latest.inbound_bps || 0);
-        document.getElementById("outRate").textContent = fmtRate(latest.outbound_bps || 0);
-        document.getElementById("pendingResolves").textContent = Number(data.pending_resolves || 0);
-        document.getElementById("requestsServed").textContent = Number(data.requests_served || 0);
-        document.getElementById("resolveIn").textContent = Number(totals.resolve_requests_in || 0);
-        document.getElementById("resolveOut").textContent = Number(totals.resolve_requests_out || 0);
-        document.getElementById("resolveSuccess").textContent = Number(totals.resolve_success_out || 0);
-        document.getElementById("resolveFail").textContent = Number(totals.resolve_fail_out || 0);
+        var routerAddressNode = document.getElementById("routerAddress");
+        if (routerAddressNode) routerAddressNode.textContent = state.lastAddress;
 
-        const resolved = (data.snapshot && data.snapshot.resolved) || {};
-        document.getElementById("resolvedOut").textContent = JSON.stringify(resolved, null, 2);
-        document.getElementById("endpointTotals").textContent = JSON.stringify(totals.endpoint_usage_totals || {}, null, 2);
+        var ready = typeof infoReady === "boolean" ? infoReady : !!nkn.ready;
+        var readyState = document.getElementById("readyState");
+        if (readyState) {
+          readyState.textContent = ready ? "NKN ready" : "NKN waiting";
+          readyState.className = ready ? "ok" : "warn";
+        }
 
-        renderPeers(data.peers || []);
-        renderLogs(data.logs || []);
+        var setText = function (id, value) {
+          var node = document.getElementById(id);
+          if (node) node.textContent = String(value);
+        };
+
+        setText("inMsgs", Number(totals.inbound_messages || 0));
+        setText("outMsgs", Number(totals.outbound_messages || 0));
+        setText("inBytes", fmtBytes(totals.inbound_bytes || 0));
+        setText("outBytes", fmtBytes(totals.outbound_bytes || 0));
+        setText("inRate", fmtRate(latest.inbound_bps || 0));
+        setText("outRate", fmtRate(latest.outbound_bps || 0));
+        setText("pendingResolves", Number(data && data.pending_resolves || 0));
+        setText("requestsServed", Number(data && data.requests_served || 0));
+        setText("resolveIn", Number(totals.resolve_requests_in || 0));
+        setText("resolveOut", Number(totals.resolve_requests_out || 0));
+        setText("resolveSuccess", Number(totals.resolve_success_out || 0));
+        setText("resolveFail", Number(totals.resolve_fail_out || 0));
+
+        var resolved = data && data.snapshot && data.snapshot.resolved ? data.snapshot.resolved : {};
+        var resolvedOut = document.getElementById("resolvedOut");
+        if (resolvedOut) resolvedOut.textContent = JSON.stringify(resolved, null, 2);
+        var endpointTotals = document.getElementById("endpointTotals");
+        if (endpointTotals) endpointTotals.textContent = JSON.stringify(totals.endpoint_usage_totals || {}, null, 2);
+
+        renderPeers(data && data.peers ? data.peers : []);
+        renderLogs(data && data.logs ? data.logs : []);
         drawChart(history);
       }
 
-      async function refreshDashboard() {
-        const started = Date.now();
-        const marker = document.getElementById("refreshState");
-        marker.textContent = "updating...";
-        try {
-          const res = await fetch(`/dashboard/data?history=300&logs=150&peers=60&t=${Date.now()}`, { cache: "no-store" });
-          const data = await res.json();
-          if (!res.ok || data.status !== "success") {
-            marker.textContent = `update failed (${res.status})`;
+      function refreshDashboard() {
+        if (state.polling) return;
+        state.polling = true;
+
+        var started = nowMs();
+        var marker = document.getElementById("refreshState");
+        if (marker) marker.textContent = "updating...";
+
+        fetchJson("/dashboard/data?history=300&logs=150&peers=60&t=" + nowMs(), 5500, function (err, res, data) {
+          if (err || !res) {
+            if (marker) marker.textContent = "update error: " + String(err || "unknown");
+            state.polling = false;
             return;
           }
-          updateDom(data);
-          if (!normalizeAddress(data?.nkn?.address || "")) {
-            await hydrateAddressFromInfo();
+          if (res.status < 200 || res.status >= 300 || !data || data.status !== "success") {
+            if (marker) marker.textContent = "update failed (" + res.status + ")";
+            state.polling = false;
+            return;
           }
-          marker.textContent = `updated ${new Date().toLocaleTimeString()} (${Date.now() - started} ms)`;
-        } catch (err) {
-          marker.textContent = `update error: ${err}`;
-        }
+
+          hydrateAddressFromInfo(function (info) {
+            var infoAddress = normalizeAddress(info && info.address ? info.address : "");
+            var infoReady = info && typeof info.ready === "boolean" ? info.ready : null;
+            updateDom(data, infoAddress, infoReady);
+            var addressState = state.lastAddress && state.lastAddress !== "N/A" ? "addr ok" : "addr pending";
+            if (marker) {
+              marker.textContent = "updated " + new Date().toLocaleTimeString() + " (" + (nowMs() - started) + " ms, " + addressState + ")";
+            }
+            state.polling = false;
+          });
+        });
       }
 
-      document.getElementById("copyAddressBtn").addEventListener("click", copyAddress);
-      document.getElementById("routerAddress").addEventListener("click", copyAddress);
-      document.getElementById("refreshNowBtn").addEventListener("click", refreshDashboard);
-      window.addEventListener("resize", () => drawChart(state.history));
+      var copyBtn = document.getElementById("copyAddressBtn");
+      if (copyBtn) copyBtn.addEventListener("click", copyAddress);
+      var addrNode = document.getElementById("routerAddress");
+      if (addrNode) addrNode.addEventListener("click", copyAddress);
+      var refreshBtn = document.getElementById("refreshNowBtn");
+      if (refreshBtn) refreshBtn.addEventListener("click", refreshDashboard);
+      window.addEventListener("resize", function () { drawChart(state.history); });
       refreshDashboard();
       setInterval(refreshDashboard, state.refreshEveryMs);
     </script>
