@@ -563,6 +563,7 @@ function initWebSocket() {
 
 // Show/hide connection modal
 function showConnectionModal() {
+  ensureConnectionModalBindings();
   const modal = document.getElementById('connectionModal');
   if (modal) {
     modal.classList.add('active');
@@ -642,6 +643,23 @@ function hideConnectionModal() {
   if (modal) {
     modal.classList.remove('active');
   }
+}
+
+let connectionModalBindingsInstalled = false;
+function ensureConnectionModalBindings() {
+  if (connectionModalBindingsInstalled) {
+    return;
+  }
+  const modal = document.getElementById('connectionModal');
+  if (!modal) {
+    return;
+  }
+  connectionModalBindingsInstalled = true;
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) {
+      hideConnectionModal();
+    }
+  });
 }
 
 let endpointInputBindingsInstalled = false;
@@ -2790,6 +2808,7 @@ function decQuatField(field, step) {
 window.addEventListener('load', async () => {
   initializeRouting();
   const initialRoute = getRouteFromLocation();
+  ensureConnectionModalBindings();
   const queryConnection = parseConnectionFromQuery();
   ensureEndpointInputBindings();
   initNknRouterUi();
