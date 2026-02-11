@@ -211,6 +211,8 @@ DEFAULT_CAMERA_CAPTURE_FPS = 30
 DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS = 2.0
 DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_MAX_SECONDS = 20.0
 DEFAULT_DEFAULT_CAMERA_DISCONNECT_RETRY_SECONDS = 0.5
+DEFAULT_STALE_CAMERA_TERM_WAIT_SECONDS = 2.0
+DEFAULT_STALE_CAMERA_KILL_WAIT_SECONDS = 1.0
 
 DEFAULT_REALSENSE_ENABLED = True
 DEFAULT_REALSENSE_STREAM_DEPTH = True
@@ -222,6 +224,7 @@ DEFAULT_STREAM_MAX_HEIGHT = 540
 DEFAULT_STREAM_JPEG_QUALITY = 72
 DEFAULT_STREAM_TARGET_FPS = 30
 DEFAULT_ROTATE_CLOCKWISE = True
+DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES = 90 if DEFAULT_ROTATE_CLOCKWISE else 0
 DEFAULT_WEBRTC_TARGET_FPS = 24
 DEFAULT_MPEGTS_TARGET_FPS = 24
 DEFAULT_MPEGTS_JPEG_QUALITY = 60
@@ -237,6 +240,7 @@ stream_options = {
     "max_height": DEFAULT_STREAM_MAX_HEIGHT,
     "jpeg_quality": DEFAULT_STREAM_JPEG_QUALITY,
     "target_fps": DEFAULT_STREAM_TARGET_FPS,
+    "default_rotation_degrees": DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES,
     "rotate_clockwise": DEFAULT_ROTATE_CLOCKWISE,
     "webrtc_target_fps": DEFAULT_WEBRTC_TARGET_FPS,
     "mpegts_target_fps": DEFAULT_MPEGTS_TARGET_FPS,
@@ -272,6 +276,11 @@ camera_feeds = {}
 camera_feeds_lock = Lock()
 capture_threads = []
 service_running = threading.Event()
+capture_threads_lock = Lock()
+active_capture_handles = {}
+active_capture_handles_lock = Lock()
+camera_rotation_rules = {}
+camera_rotation_rules_lock = Lock()
 
 imu_state = {}
 imu_lock = Lock()
@@ -300,6 +309,102 @@ def log(message):
         ui.log(message)
     else:
         print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {message}")
+
+
+def _register_active_capture_handle(feed_id, handle):
+    if handle is None:
+        return
+    key = str(feed_id or "")
+    with active_capture_handles_lock:
+        bucket = active_capture_handles.setdefault(key, [])
+        if all(item is not handle for item in bucket):
+            bucket.append(handle)
+
+
+def _unregister_active_capture_handle(feed_id, handle):
+    if handle is None:
+        return
+    key = str(feed_id or "")
+    with active_capture_handles_lock:
+        handles = active_capture_handles.get(key)
+        if not handles:
+            return
+        active_capture_handles[key] = [item for item in handles if item is not handle]
+        handles = active_capture_handles.get(key)
+        if not handles:
+            active_capture_handles.pop(key, None)
+
+
+def _release_all_active_capture_handles():
+    with active_capture_handles_lock:
+        handles = []
+        for bucket in active_capture_handles.values():
+            handles.extend(bucket)
+        active_capture_handles.clear()
+    for handle in handles:
+        try:
+            handle.release()
+        except Exception:
+            pass
+
+
+def _rotation_rule_keys_for_feed(feed):
+    if not feed:
+        return []
+    keys = [str(feed.camera_id or "").strip()]
+    device_path = str(feed.device_path or "").strip()
+    if device_path:
+        keys.append(device_path)
+        keys.append(os.path.basename(device_path))
+    return [item for item in keys if item]
+
+
+def get_feed_rotation_degrees(feed):
+    keys = _rotation_rule_keys_for_feed(feed)
+    with camera_rotation_rules_lock:
+        for key in keys:
+            if key in camera_rotation_rules:
+                return int(camera_rotation_rules[key])
+    return _rotation_or_default(
+        stream_options.get("default_rotation_degrees", DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES),
+        DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES,
+    )
+
+
+def _persist_camera_rotation_rules():
+    config = load_config()
+    with camera_rotation_rules_lock:
+        rules_copy = dict(camera_rotation_rules)
+    _set_nested(config, "camera_router.stream.camera_rotation_degrees", rules_copy)
+    save_config(config)
+
+
+def set_camera_rotation_rule(rule_key, rotation_degrees, persist=True):
+    key = str(rule_key or "").strip()
+    if not key:
+        raise ValueError("Missing rule key")
+    normalized = _parse_rotation_degrees(rotation_degrees)
+    if normalized is None:
+        raise ValueError("rotation_degrees must be one of 0, 90, 180, 270")
+    with camera_rotation_rules_lock:
+        camera_rotation_rules[key] = normalized
+    if persist:
+        _persist_camera_rotation_rules()
+    return normalized
+
+
+def clear_camera_rotation_rule(rule_key, persist=True):
+    key = str(rule_key or "").strip()
+    if not key:
+        return False
+    changed = False
+    with camera_rotation_rules_lock:
+        if key in camera_rotation_rules:
+            camera_rotation_rules.pop(key, None)
+            changed = True
+    if changed and persist:
+        _persist_camera_rotation_rules()
+    return changed
 
 
 _MISSING = object()
@@ -359,6 +464,44 @@ def _as_int(value, default, minimum=None, maximum=None):
     if maximum is not None and parsed > maximum:
         return default
     return parsed
+
+
+def _parse_rotation_degrees(value):
+    if isinstance(value, bool):
+        return 90 if value else 0
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed in (0, 90, 180, 270) else None
+
+
+def _rotation_or_default(value, default=0):
+    parsed = _parse_rotation_degrees(value)
+    fallback = _parse_rotation_degrees(default)
+    if parsed is not None:
+        return parsed
+    return fallback if fallback is not None else 0
+
+
+def _normalize_rotation_rules(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    clean = {}
+    for key, rule_value in value.items():
+        normalized = _parse_rotation_degrees(rule_value)
+        if normalized is None:
+            continue
+        rule_key = str(key or "").strip()
+        if not rule_key:
+            continue
+        clean[rule_key] = normalized
+    return clean
 
 
 def load_config():
@@ -644,7 +787,25 @@ def _load_camera_settings(config):
         ),
         default=DEFAULT_ROTATE_CLOCKWISE,
     )
+    default_rotation_degrees = _rotation_or_default(
+        _read_config_value(
+            config,
+            "camera_router.stream.default_rotation_degrees",
+            90 if rotate_clockwise else 0,
+        ),
+        default=90 if rotate_clockwise else 0,
+    )
+    rotate_clockwise = default_rotation_degrees == 90
     promote("camera_router.stream.rotate_clockwise", rotate_clockwise)
+    promote("camera_router.stream.default_rotation_degrees", default_rotation_degrees)
+
+    camera_rotation_rules_value = _read_config_value(
+        config,
+        "camera_router.stream.camera_rotation_degrees",
+        {},
+    )
+    camera_rotation_degrees = _normalize_rotation_rules(camera_rotation_rules_value)
+    promote("camera_router.stream.camera_rotation_degrees", camera_rotation_degrees)
 
     return {
         "listen_host": listen_host,
@@ -670,6 +831,8 @@ def _load_camera_settings(config):
         "mpegts_target_fps": mpegts_target_fps,
         "mpegts_jpeg_quality": mpegts_jpeg_quality,
         "rotate_clockwise": rotate_clockwise,
+        "default_rotation_degrees": default_rotation_degrees,
+        "camera_rotation_degrees": camera_rotation_degrees,
     }, changed
 
 
@@ -819,12 +982,23 @@ def _build_camera_config_spec():
                         restart_required=True,
                     ),
                     SettingSpec(
-                        id="rotate_clockwise",
-                        label="Rotate Clockwise",
-                        path="camera_router.stream.rotate_clockwise",
-                        value_type="bool",
-                        default=DEFAULT_ROTATE_CLOCKWISE,
-                        description="Rotate outgoing frame 90deg clockwise.",
+                        id="default_rotation_degrees",
+                        label="Default Rotation",
+                        path="camera_router.stream.default_rotation_degrees",
+                        value_type="int",
+                        default=DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES,
+                        min_value=0,
+                        max_value=270,
+                        description="Default camera rotation degrees (allowed: 0, 90, 180, 270).",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="camera_rotation_rules",
+                        label="Camera Rotation Rules",
+                        path="camera_router.stream.camera_rotation_degrees",
+                        value_type="str",
+                        default="{}",
+                        description='JSON map like {"default_0":90,"rs_color":180}.',
                         restart_required=True,
                     ),
                 ),
@@ -939,6 +1113,129 @@ def _build_camera_config_spec():
             ),
         ),
     )
+
+
+def _config_spec_available():
+    return UI_AVAILABLE and ConfigSpec is not None and SettingSpec is not None and CategorySpec is not None
+
+
+def _serialize_setting_spec(spec):
+    return {
+        "id": str(spec.id),
+        "label": str(spec.label),
+        "path": str(spec.path),
+        "value_type": str(spec.value_type),
+        "description": str(spec.description or ""),
+        "default": spec.default,
+        "choices": list(spec.choices or ()),
+        "sensitive": bool(spec.sensitive),
+        "restart_required": bool(spec.restart_required),
+        "min_value": spec.min_value,
+        "max_value": spec.max_value,
+    }
+
+
+def _camera_config_schema_payload(config_data=None):
+    if not _config_spec_available():
+        return {
+            "status": "error",
+            "message": "Configurator unavailable (terminal_ui support is not loaded).",
+        }, 503
+
+    spec = _build_camera_config_spec()
+    if spec is None:
+        return {"status": "error", "message": "Configurator spec unavailable."}, 503
+
+    config_data = load_config() if config_data is None else config_data
+    categories_payload = []
+    for category in spec.categories:
+        settings_payload = []
+        for setting in category.settings:
+            raw = _get_nested(config_data, setting.path, _MISSING)
+            if raw is _MISSING:
+                current_value = setting.default
+                current_source = "default"
+            else:
+                current_value = raw
+                current_source = "config"
+            settings_payload.append(
+                {
+                    **_serialize_setting_spec(setting),
+                    "current_value": current_value,
+                    "current_source": current_source,
+                }
+            )
+
+        categories_payload.append(
+            {
+                "id": str(category.id),
+                "label": str(category.label),
+                "settings": settings_payload,
+            }
+        )
+
+    return {
+        "status": "success",
+        "config": {
+            "label": str(spec.label),
+            "categories": categories_payload,
+        },
+    }, 200
+
+
+def _coerce_config_value(raw_value, setting_spec):
+    value_type = str(setting_spec.value_type or "str").strip().lower()
+
+    if value_type == "bool":
+        if isinstance(raw_value, bool):
+            parsed = raw_value
+        elif isinstance(raw_value, (int, float)):
+            parsed = bool(raw_value)
+        elif isinstance(raw_value, str):
+            normalized = raw_value.strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                parsed = True
+            elif normalized in ("0", "false", "no", "off"):
+                parsed = False
+            else:
+                raise ValueError("Expected boolean value (true/false)")
+        else:
+            raise ValueError("Expected boolean value")
+        return parsed
+
+    if value_type == "int":
+        try:
+            parsed = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            raise ValueError("Expected integer value")
+        if setting_spec.min_value is not None and parsed < setting_spec.min_value:
+            raise ValueError(f"Minimum is {setting_spec.min_value}")
+        if setting_spec.max_value is not None and parsed > setting_spec.max_value:
+            raise ValueError(f"Maximum is {setting_spec.max_value}")
+        return parsed
+
+    if value_type == "float":
+        try:
+            parsed = float(str(raw_value).strip())
+        except (TypeError, ValueError):
+            raise ValueError("Expected numeric value")
+        if setting_spec.min_value is not None and parsed < setting_spec.min_value:
+            raise ValueError(f"Minimum is {setting_spec.min_value}")
+        if setting_spec.max_value is not None and parsed > setting_spec.max_value:
+            raise ValueError(f"Maximum is {setting_spec.max_value}")
+        return parsed
+
+    if value_type == "enum":
+        parsed = str(raw_value)
+        choices = tuple(setting_spec.choices or ())
+        if choices and parsed not in choices:
+            raise ValueError(f"Expected one of: {', '.join(str(item) for item in choices)}")
+        return parsed
+
+    if value_type in ("secret", "str"):
+        return str(raw_value if raw_value is not None else "")
+
+    return str(raw_value if raw_value is not None else "")
 
 
 # ---------------------------------------------------------------------------
@@ -1228,8 +1525,8 @@ class FrameFeed:
             "fps": 0,
         }
 
-    def publish(self, frame, options):
-        prepared = prepare_frame(frame, options)
+    def publish(self, frame, options, rotation_degrees=None):
+        prepared = prepare_frame(frame, options, rotation_degrees=rotation_degrees)
         if prepared is None:
             return
         ok, encoded = cv2.imencode(
@@ -1390,15 +1687,27 @@ class FrameFeed:
                 "active_capture": dict(self.active_capture),
                 "available_profiles": [dict(item) for item in self.available_profiles],
                 "profile_query_error": self.profile_query_error,
+                "rotation_degrees": int(get_feed_rotation_degrees(self)),
             }
 
 
-def prepare_frame(frame, options):
+def prepare_frame(frame, options, rotation_degrees=None):
     if frame is None:
         return None
     out = frame
-    if options.get("rotate_clockwise", False):
+    rotation = _parse_rotation_degrees(rotation_degrees)
+    if rotation is None:
+        # Legacy fallback for older configs.
+        if options.get("rotate_clockwise", False):
+            rotation = 90
+        else:
+            rotation = _rotation_or_default(options.get("default_rotation_degrees"), 0)
+    if rotation == 90:
         out = cv2.rotate(out, cv2.ROTATE_90_CLOCKWISE)
+    elif rotation == 180:
+        out = cv2.rotate(out, cv2.ROTATE_180)
+    elif rotation == 270:
+        out = cv2.rotate(out, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     h, w = out.shape[:2]
     max_w = int(options.get("max_width", 0))
@@ -1497,6 +1806,135 @@ def _video_device_index(device_path):
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def _pid_is_running(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except Exception:
+        return False
+
+
+def _pid_parent(pid):
+    try:
+        with open(f"/proc/{int(pid)}/status", "r", encoding="utf-8") as fp:
+            for line in fp:
+                if line.startswith("PPid:"):
+                    return int(line.split(":", 1)[1].strip() or 0)
+    except Exception:
+        return 0
+    return 0
+
+
+def _protected_pids():
+    protected = set()
+    pid = os.getpid()
+    for _ in range(24):
+        if not pid or pid <= 1 or pid in protected:
+            break
+        protected.add(pid)
+        pid = _pid_parent(pid)
+    try:
+        protected.add(os.getppid())
+    except Exception:
+        pass
+    return protected
+
+
+def _pid_cmdline(pid):
+    try:
+        with open(f"/proc/{int(pid)}/cmdline", "rb") as fp:
+            raw = fp.read().replace(b"\x00", b" ").strip()
+        return raw.decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _pid_is_camera_router(pid):
+    cmdline = _pid_cmdline(pid).lower()
+    if not cmdline:
+        return False
+    return ("camera_route.py" in cmdline) or ("teleoperation/vision/camera_route.py" in cmdline)
+
+
+def _camera_device_owner_pids(device_path):
+    owners = set()
+    device_path = str(device_path or "").strip()
+    if not device_path or os.name == "nt":
+        return []
+
+    fuser_bin = shutil.which("fuser")
+    if fuser_bin:
+        try:
+            result = subprocess.run([fuser_bin, device_path], capture_output=True, text=True, timeout=2)
+            merged = f"{result.stdout or ''}\n{result.stderr or ''}"
+            for token in re.findall(r"\b\d+\b", merged):
+                owners.add(int(token))
+        except Exception:
+            pass
+
+    if not owners:
+        lsof_bin = shutil.which("lsof")
+        if lsof_bin:
+            try:
+                result = subprocess.run([lsof_bin, "-t", device_path], capture_output=True, text=True, timeout=2)
+                for line in (result.stdout or "").splitlines():
+                    line = line.strip()
+                    if line.isdigit():
+                        owners.add(int(line))
+            except Exception:
+                pass
+
+    protected = _protected_pids()
+    return sorted(pid for pid in owners if pid not in protected)
+
+
+def _wait_for_pid_exit(pids, timeout_seconds):
+    deadline = time.time() + max(0.1, float(timeout_seconds))
+    remaining = {int(pid) for pid in pids if pid}
+    while remaining and time.time() < deadline:
+        remaining = {pid for pid in remaining if _pid_is_running(pid)}
+        if not remaining:
+            return True
+        time.sleep(0.05)
+    return not remaining
+
+
+def _recover_stale_camera_holders(device_path, force_all=False):
+    owners = _camera_device_owner_pids(device_path)
+    if not owners:
+        return False
+
+    stale_router_owners = [pid for pid in owners if _pid_is_camera_router(pid)]
+    targets = stale_router_owners if stale_router_owners else (owners if force_all else [])
+    if not targets:
+        return False
+
+    target_text = ", ".join(str(pid) for pid in targets)
+    reason = "stale camera_route holder(s)" if stale_router_owners else "camera holder(s)"
+    log(f"[WARN] Recovering busy camera {device_path}: {reason} pid={target_text}")
+
+    for pid in targets:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+
+    _wait_for_pid_exit(targets, DEFAULT_STALE_CAMERA_TERM_WAIT_SECONDS)
+    survivors = [pid for pid in targets if _pid_is_running(pid)]
+    if not survivors:
+        return True
+
+    survivor_text = ", ".join(str(pid) for pid in survivors)
+    log(f"[WARN] Forcing kill of camera holder(s) on {device_path}: pid={survivor_text}")
+    for pid in survivors:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except Exception:
+            pass
+    _wait_for_pid_exit(survivors, DEFAULT_STALE_CAMERA_KILL_WAIT_SECONDS)
+    return True
 
 
 def discover_default_devices(device_glob):
@@ -1804,6 +2242,7 @@ def default_camera_worker(feed, device_path):
     publish_interval = 1.0 / float(max(1, int(stream_options["target_fps"])))
     open_failures = 0
     open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
+    last_recovery_attempt_ts = 0.0
 
     while service_running.is_set():
         requested_profile, requested_revision = feed.get_capture_profile()
@@ -1817,6 +2256,14 @@ def default_camera_worker(feed, device_path):
         if cap is None:
             open_failures += 1
             feed.mark_error(f"Unable to open {device_path}")
+            now = time.time()
+            # On repeated open failures, clear stale/hung processes still holding /dev/video*.
+            if now - last_recovery_attempt_ts >= 1.0:
+                recovered = _recover_stale_camera_holders(device_path, force_all=(open_failures >= 3))
+                last_recovery_attempt_ts = now
+                if recovered:
+                    time.sleep(0.2)
+                    continue
             if open_failures in (1, 3) or open_failures % 10 == 0:
                 log(
                     f"[WARN] Failed to open camera {device_path} "
@@ -1834,6 +2281,7 @@ def default_camera_worker(feed, device_path):
         open_failures = 0
         open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
         feed.set_active_capture(backend_label, requested_profile)
+        _register_active_capture_handle(feed.camera_id, cap)
         log(
             f"[OK] Camera worker started: {device_path} "
             f"({requested_profile['width']}x{requested_profile['height']} @ {requested_profile['fps']}fps "
@@ -1861,9 +2309,13 @@ def default_camera_worker(feed, device_path):
             if now < next_emit:
                 continue
             next_emit = now + publish_interval
-            feed.publish(frame, stream_options)
+            feed.publish(frame, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
 
-        cap.release()
+        try:
+            cap.release()
+        except Exception:
+            pass
+        _unregister_active_capture_handle(feed.camera_id, cap)
         time.sleep(DEFAULT_DEFAULT_CAMERA_DISCONNECT_RETRY_SECONDS)
 
     feed.mark_offline()
@@ -1890,6 +2342,7 @@ def realsense_worker(rs_ids):
         cap = RealsenseCapture(stream_ir=include_ir)
         try:
             cap.start(max_retries=DEFAULT_REALSENSE_START_ATTEMPTS)
+            _register_active_capture_handle("realsense", cap)
             log(f"[OK] RealSense capture started (ir={'on' if include_ir else 'off'})")
             start_retry_delay = 1.0
         except Exception as exc:
@@ -1949,25 +2402,26 @@ def realsense_worker(rs_ids):
 
             feed = get_feed(rs_ids["color"])
             if feed:
-                feed.publish(color, stream_options)
+                feed.publish(color, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
 
             if source_options["realsense_stream_depth"]:
                 feed = get_feed(rs_ids["depth"])
                 if feed:
-                    feed.publish(depth_vis, stream_options)
+                    feed.publish(depth_vis, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
 
             if include_ir and source_options["realsense_stream_ir"]:
                 feed = get_feed(rs_ids["ir_left"])
                 if feed:
-                    feed.publish(ir_left, stream_options)
+                    feed.publish(ir_left, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
                 feed = get_feed(rs_ids["ir_right"])
                 if feed:
-                    feed.publish(ir_right, stream_options)
+                    feed.publish(ir_right, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
 
         try:
             cap.release()
         except Exception:
             pass
+        _unregister_active_capture_handle("realsense", cap)
         time.sleep(0.25)
 
     for feed_id in rs_ids.values():
@@ -1982,6 +2436,8 @@ def initialize_camera_workers():
 
     if source_options["default_cameras_enabled"]:
         devices = discover_default_devices(source_options["camera_device_glob"])
+        for device in devices:
+            _recover_stale_camera_holders(device, force_all=False)
         for index, device in enumerate(devices):
             cam_id = f"default_{index}"
             feed = register_feed(
@@ -2001,7 +2457,8 @@ def initialize_camera_workers():
 
             thread = threading.Thread(target=default_camera_worker, args=(feed, device), daemon=True)
             thread.start()
-            capture_threads.append(thread)
+            with capture_threads_lock:
+                capture_threads.append(thread)
             default_worker_started = True
 
         if not devices:
@@ -2022,7 +2479,8 @@ def initialize_camera_workers():
             register_feed(rs_ids["ir_right"], "RealSense D455 - IR Right", source_type="realsense")
         thread = threading.Thread(target=realsense_worker, args=(rs_ids,), daemon=True)
         thread.start()
-        capture_threads.append(thread)
+        with capture_threads_lock:
+            capture_threads.append(thread)
     elif source_options["realsense_enabled"] and not REALSENSE_AVAILABLE:
         if REALSENSE_IMPORT_ERROR:
             log(f"[INFO] RealSense source disabled at runtime: {REALSENSE_IMPORT_ERROR}")
@@ -2035,6 +2493,25 @@ def initialize_camera_workers():
 
 def stop_camera_workers():
     service_running.clear()
+    with camera_feeds_lock:
+        feeds = list(camera_feeds.values())
+    for feed in feeds:
+        try:
+            with feed.cond:
+                feed.cond.notify_all()
+        except Exception:
+            pass
+    _release_all_active_capture_handles()
+
+    with capture_threads_lock:
+        threads = list(capture_threads)
+        capture_threads.clear()
+    for thread in threads:
+        try:
+            if thread.is_alive():
+                thread.join(timeout=1.5)
+        except Exception:
+            pass
 
 
 if WEBRTC_AVAILABLE:
@@ -2248,6 +2725,10 @@ INDEX_HTML = """
       .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
       input, button { background: #222; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 0.5rem; }
       button { cursor: pointer; }
+      .tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+      .tab-btn.active { border-color: #8aa0ff; color: #d7e1ff; }
+      .tab-panel { display: none; margin-top: 0.8rem; }
+      .tab-panel.active { display: block; }
       .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1rem; }
       .card { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 0.8rem; }
       .meta { opacity: 0.85; font-size: 0.85rem; margin: 0.3rem 0; }
@@ -2255,6 +2736,25 @@ INDEX_HTML = """
       .bad { color: #ff5c5c; }
       img { width: 100%; border-radius: 8px; background: #000; }
       code { color: #ffcc66; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 0.45rem; border-bottom: 1px solid #333; vertical-align: top; }
+      th { opacity: 0.85; }
+      .cfg-wrap { overflow: auto; max-height: 460px; border: 1px solid #333; border-radius: 8px; }
+      .cfg-input, .cfg-select {
+        width: 100%;
+        background: #222;
+        color: #fff;
+        border: 1px solid #444;
+        border-radius: 6px;
+        padding: 0.35rem 0.45rem;
+      }
+      .cfg-check { transform: scale(1.1); }
+      .cfg-row.pending { background: rgba(0, 208, 138, 0.08); }
+      .cfg-source { font-size: 0.8rem; opacity: 0.85; }
+      .cfg-path { font-size: 0.78rem; opacity: 0.72; }
+      .badge { display: inline-block; margin-left: 0.4rem; padding: 0.1rem 0.4rem; border-radius: 999px; border: 1px solid #666; font-size: 0.7rem; }
+      .config-status.ok { color: #00d08a; }
+      .config-status.bad { color: #ff5c5c; }
     </style>
   </head>
   <body>
@@ -2271,18 +2771,258 @@ INDEX_HTML = """
         <div class="meta">Tip: append <code>?session_key=...</code> to <code>/video/&lt;camera_id&gt;</code> for OpenCV clients.</div>
       </div>
       <div class="panel">
-        <h3 style="margin-top:0">/health</h3>
-        <pre id="healthOut" class="meta">loading...</pre>
+        <div class="tabs">
+          <button id="tabHealthBtn" class="tab-btn active" type="button">Health</button>
+          <button id="tabConfigBtn" class="tab-btn" type="button">Configurator</button>
+        </div>
+        <div id="healthPanel" class="tab-panel active">
+          <h3 style="margin-top:0">/health</h3>
+          <pre id="healthOut" class="meta">loading...</pre>
+        </div>
+        <div id="configPanel" class="tab-panel">
+          <div class="row">
+            <button id="configReloadBtn" type="button">Reload Config</button>
+            <button id="configSaveBtn" type="button">Save Changes</button>
+            <button id="configDiscardBtn" type="button">Discard Changes</button>
+          </div>
+          <div id="configStatus" class="meta config-status">Load config schema to begin.</div>
+          <div id="configCategoryTabs" class="tabs" style="margin:0.6rem 0;"></div>
+          <div class="cfg-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="min-width:180px;">Setting</th>
+                  <th style="min-width:220px;">Value</th>
+                  <th style="min-width:70px;">Type</th>
+                  <th style="min-width:90px;">Source</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody id="configRows"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
       <div id="cards" class="cards"></div>
     </div>
     <script>
       let sessionKey = localStorage.getItem("camera_router_session_key") || "";
+      const configState = {
+        schema: null,
+        selectedCategoryId: "",
+        pending: {},
+      };
 
       function withSession(path) {
         if (!sessionKey) return path;
         const sep = path.includes("?") ? "&" : "?";
         return `${path}${sep}session_key=${encodeURIComponent(sessionKey)}`;
+      }
+
+      function esc(value) {
+        return String(value ?? "").replace(/[&<>\"']/g, (m) => (
+          m === "&" ? "&amp;" : m === "<" ? "&lt;" : m === ">" ? "&gt;" : m === "\"" ? "&quot;" : "&#39;"
+        ));
+      }
+
+      function normalizeScalar(value) {
+        if (value === null || value === undefined) return "";
+        if (typeof value === "object") {
+          try { return JSON.stringify(value); } catch (_) { return String(value); }
+        }
+        return String(value);
+      }
+
+      function asBool(value) {
+        if (typeof value === "boolean") return value;
+        const text = String(value ?? "").trim().toLowerCase();
+        return ["1", "true", "yes", "on"].includes(text);
+      }
+
+      function showTab(tabName) {
+        const healthBtn = document.getElementById("tabHealthBtn");
+        const configBtn = document.getElementById("tabConfigBtn");
+        const healthPanel = document.getElementById("healthPanel");
+        const configPanel = document.getElementById("configPanel");
+        const healthActive = tabName === "health";
+        healthBtn.classList.toggle("active", healthActive);
+        configBtn.classList.toggle("active", !healthActive);
+        healthPanel.classList.toggle("active", healthActive);
+        configPanel.classList.toggle("active", !healthActive);
+      }
+
+      function setConfigStatus(message, isError = false) {
+        const node = document.getElementById("configStatus");
+        node.textContent = message;
+        node.classList.toggle("ok", !isError);
+        node.classList.toggle("bad", !!isError);
+      }
+
+      function getSpecByPath(path) {
+        if (!configState.schema || !Array.isArray(configState.schema.categories)) return null;
+        for (const category of configState.schema.categories) {
+          if (!Array.isArray(category.settings)) continue;
+          for (const setting of category.settings) {
+            if (setting.path === path) return setting;
+          }
+        }
+        return null;
+      }
+
+      function getBaseValue(path) {
+        const spec = getSpecByPath(path);
+        if (!spec) return "";
+        return spec.current_value;
+      }
+
+      function comparableValue(value, spec) {
+        if (!spec) return normalizeScalar(value);
+        if (spec.value_type === "bool") {
+          return asBool(value) ? "true" : "false";
+        }
+        return normalizeScalar(value);
+      }
+
+      function setPendingValue(path, value) {
+        const spec = getSpecByPath(path);
+        if (!spec) return;
+        const base = getBaseValue(path);
+        if (comparableValue(value, spec) === comparableValue(base, spec)) {
+          delete configState.pending[path];
+        } else {
+          configState.pending[path] = value;
+        }
+      }
+
+      function renderConfigCategoryTabs() {
+        const root = document.getElementById("configCategoryTabs");
+        if (!configState.schema || !Array.isArray(configState.schema.categories) || !configState.schema.categories.length) {
+          root.innerHTML = "";
+          return;
+        }
+        root.innerHTML = configState.schema.categories.map((category) => {
+          const active = category.id === configState.selectedCategoryId;
+          return `<button type="button" class="tab-btn ${active ? "active" : ""}" data-category-id="${esc(category.id)}">${esc(category.label)}</button>`;
+        }).join("");
+      }
+
+      function renderConfigRows() {
+        const root = document.getElementById("configRows");
+        if (!configState.schema || !Array.isArray(configState.schema.categories) || !configState.schema.categories.length) {
+          root.innerHTML = "<tr><td colspan='5' class='meta'>No configurator schema available.</td></tr>";
+          return;
+        }
+        const category = configState.schema.categories.find((item) => item.id === configState.selectedCategoryId) || configState.schema.categories[0];
+        if (!category || !Array.isArray(category.settings) || !category.settings.length) {
+          root.innerHTML = "<tr><td colspan='5' class='meta'>No settings in this category.</td></tr>";
+          return;
+        }
+
+        root.innerHTML = category.settings.map((setting) => {
+          const path = String(setting.path || "");
+          const pending = Object.prototype.hasOwnProperty.call(configState.pending, path);
+          const currentValue = pending ? configState.pending[path] : setting.current_value;
+          const source = pending ? "pending" : (setting.current_source || "default");
+          const valueType = String(setting.value_type || "str");
+          let valueEditor = "";
+
+          if (valueType === "bool") {
+            valueEditor = `<input class="cfg-check" type="checkbox" data-config-path="${esc(path)}" ${asBool(currentValue) ? "checked" : ""}>`;
+          } else if (valueType === "enum") {
+            const currentText = normalizeScalar(currentValue);
+            const options = (setting.choices || []).map((choice) => {
+              const c = normalizeScalar(choice);
+              return `<option value="${esc(c)}" ${c === currentText ? "selected" : ""}>${esc(c)}</option>`;
+            }).join("");
+            valueEditor = `<select class="cfg-select" data-config-path="${esc(path)}">${options}</select>`;
+          } else {
+            const inputType = valueType === "secret" ? "password" : (valueType === "int" || valueType === "float" ? "number" : "text");
+            const step = valueType === "float" ? "any" : (valueType === "int" ? "1" : "");
+            const minAttr = setting.min_value !== null && setting.min_value !== undefined ? ` min="${esc(setting.min_value)}"` : "";
+            const maxAttr = setting.max_value !== null && setting.max_value !== undefined ? ` max="${esc(setting.max_value)}"` : "";
+            const stepAttr = step ? ` step="${step}"` : "";
+            valueEditor = `<input class="cfg-input" type="${inputType}" data-config-path="${esc(path)}" value="${esc(normalizeScalar(currentValue))}"${minAttr}${maxAttr}${stepAttr}>`;
+          }
+
+          const restartBadge = setting.restart_required ? "<span class='badge'>restart</span>" : "";
+          const rowClass = pending ? "cfg-row pending" : "cfg-row";
+          return `
+            <tr class="${rowClass}">
+              <td>
+                <div><strong>${esc(setting.label || setting.id || path)}</strong>${restartBadge}</div>
+                <div class="cfg-path"><code>${esc(path)}</code></div>
+              </td>
+              <td>${valueEditor}</td>
+              <td class="cfg-source">${esc(valueType)}</td>
+              <td class="cfg-source">${esc(source)}</td>
+              <td>${esc(setting.description || "")}</td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      function renderConfigPanel() {
+        renderConfigCategoryTabs();
+        renderConfigRows();
+        const pendingCount = Object.keys(configState.pending).length;
+        if (pendingCount > 0) {
+          setConfigStatus(`${pendingCount} pending change(s)`, false);
+        }
+      }
+
+      async function loadConfigSchema() {
+        try {
+          const res = await fetch(withSession("/config/schema"), { cache: "no-store" });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            if (res.status === 401) {
+              setConfigStatus("Authenticate to access configurator settings.", true);
+              return;
+            }
+            setConfigStatus(`Config schema error: ${data.message || res.status}`, true);
+            return;
+          }
+          configState.schema = data.config || { categories: [] };
+          configState.pending = {};
+          const categories = configState.schema.categories || [];
+          configState.selectedCategoryId = categories.length ? String(categories[0].id) : "";
+          renderConfigPanel();
+          setConfigStatus("Configurator loaded.", false);
+        } catch (err) {
+          setConfigStatus(`Config schema request failed: ${err}`, true);
+        }
+      }
+
+      async function saveConfigChanges() {
+        const pendingPaths = Object.keys(configState.pending);
+        if (!pendingPaths.length) {
+          setConfigStatus("No pending changes to save.", false);
+          return;
+        }
+        try {
+          const res = await fetch(withSession("/config/save"), {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({changes: configState.pending}),
+          });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            const errorText = data.errors ? JSON.stringify(data.errors) : (data.message || res.status);
+            setConfigStatus(`Save failed: ${errorText}`, true);
+            return;
+          }
+          await loadConfigSchema();
+          const restartNote = data.restart_required ? " Restart required for one or more changes." : "";
+          setConfigStatus(`Saved ${data.saved_paths ? data.saved_paths.length : pendingPaths.length} change(s).${restartNote}`, false);
+        } catch (err) {
+          setConfigStatus(`Save request failed: ${err}`, true);
+        }
+      }
+
+      function discardConfigChanges() {
+        configState.pending = {};
+        renderConfigPanel();
+        setConfigStatus("Pending changes discarded.", false);
       }
 
       async function authenticate() {
@@ -2304,7 +3044,7 @@ INDEX_HTML = """
         sessionKey = data.session_key;
         localStorage.setItem("camera_router_session_key", sessionKey);
         document.getElementById("statusLine").textContent = `Authenticated. Timeout ${data.timeout}s`;
-        await refreshList();
+        await Promise.all([refreshList(), loadConfigSchema()]);
       }
 
       async function refreshHealth() {
@@ -2346,6 +3086,7 @@ INDEX_HTML = """
             if (res.status === 401) {
               sessionKey = "";
               localStorage.removeItem("camera_router_session_key");
+              setConfigStatus("Session expired; authenticate to edit config.", true);
             }
             return;
           }
@@ -2356,11 +3097,34 @@ INDEX_HTML = """
         }
       }
 
+      document.getElementById("tabHealthBtn").addEventListener("click", () => showTab("health"));
+      document.getElementById("tabConfigBtn").addEventListener("click", () => showTab("config"));
+      document.getElementById("configReloadBtn").addEventListener("click", loadConfigSchema);
+      document.getElementById("configSaveBtn").addEventListener("click", saveConfigChanges);
+      document.getElementById("configDiscardBtn").addEventListener("click", discardConfigChanges);
+      document.getElementById("configCategoryTabs").addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-category-id]");
+        if (!button) return;
+        configState.selectedCategoryId = String(button.dataset.categoryId || "");
+        renderConfigPanel();
+      });
+      document.getElementById("configRows").addEventListener("change", (event) => {
+        const target = event.target;
+        if (!target || !target.dataset || !target.dataset.configPath) return;
+        const path = String(target.dataset.configPath);
+        const spec = getSpecByPath(path);
+        if (!spec) return;
+        const value = spec.value_type === "bool" ? !!target.checked : target.value;
+        setPendingValue(path, value);
+        renderConfigPanel();
+      });
       document.getElementById("connectBtn").addEventListener("click", authenticate);
       document.getElementById("refreshBtn").addEventListener("click", refreshList);
+      showTab("health");
       refreshHealth();
       setInterval(refreshHealth, 3000);
       refreshList();
+      loadConfigSchema();
     </script>
   </body>
 </html>
@@ -2387,6 +3151,80 @@ def auth():
         return jsonify({"status": "success", "session_key": session_key, "timeout": SESSION_TIMEOUT})
     log("Authentication failed: invalid password")
     return jsonify({"status": "error", "message": "Invalid password"}), 401
+
+
+@app.route("/config/schema", methods=["GET"])
+@require_session
+def config_schema():
+    payload, status_code = _camera_config_schema_payload(load_config())
+    return jsonify(payload), status_code
+
+
+@app.route("/config/save", methods=["POST"])
+@require_session
+def config_save():
+    if not _config_spec_available():
+        return jsonify({"status": "error", "message": "Configurator unavailable"}), 503
+
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return jsonify({"status": "error", "message": "Payload must be an object"}), 400
+
+    changes = payload.get("changes", payload)
+    if not isinstance(changes, dict) or not changes:
+        return jsonify({"status": "error", "message": "No config changes provided"}), 400
+
+    spec = _build_camera_config_spec()
+    if spec is None:
+        return jsonify({"status": "error", "message": "Configurator spec unavailable"}), 503
+
+    path_to_spec = {}
+    for category in spec.categories:
+        for setting in category.settings:
+            path_to_spec[setting.path] = setting
+
+    coerced_changes = {}
+    errors = {}
+    restart_required = False
+    for path, raw_value in changes.items():
+        path = str(path or "").strip()
+        if not path:
+            continue
+        setting_spec = path_to_spec.get(path)
+        if setting_spec is None:
+            errors[path] = "Unknown setting path"
+            continue
+        try:
+            coerced_value = _coerce_config_value(raw_value, setting_spec)
+            coerced_changes[path] = coerced_value
+            if setting_spec.restart_required:
+                restart_required = True
+        except ValueError as exc:
+            errors[path] = str(exc)
+
+    if errors:
+        return jsonify({"status": "error", "message": "Validation failed", "errors": errors}), 400
+
+    if not coerced_changes:
+        return jsonify({"status": "error", "message": "No valid config changes provided"}), 400
+
+    config_data = load_config()
+    for path, value in coerced_changes.items():
+        _set_nested(config_data, path, value)
+
+    # Normalize and promote all config values using the same loader as runtime bootstrap.
+    _load_camera_settings(config_data)
+    save_config(config_data)
+    apply_runtime_security(config_data)
+
+    return jsonify(
+        {
+            "status": "success",
+            "message": "Config saved",
+            "saved_paths": sorted(coerced_changes.keys()),
+            "restart_required": restart_required,
+        }
+    )
 
 
 @app.route("/health", methods=["GET"])
@@ -2454,6 +3292,8 @@ def list_cameras():
                 "auth": "/auth",
                 "health": "/health",
                 "list": "/list",
+                "config_schema": "/config/schema",
+                "config_save": "/config/save",
                 "imu": "/imu",
                 "snapshot": "/camera/<camera_id>",
                 "jpeg": "/jpeg/<camera_id>",
@@ -2478,9 +3318,72 @@ def stream_options_for_camera(camera_id):
 
     available_profiles, profile_error = feed.get_available_profiles()
     current_profile, current_revision = feed.get_capture_profile()
+    rule_keys = _rotation_rule_keys_for_feed(feed)
+    configured_rotation_key = None
+    configured_rotation = None
+    with camera_rotation_rules_lock:
+        for candidate_key in rule_keys:
+            if candidate_key in camera_rotation_rules:
+                configured_rotation_key = candidate_key
+                configured_rotation = camera_rotation_rules[candidate_key]
+                break
+    effective_rotation = get_feed_rotation_degrees(feed)
 
     if request.method == "POST":
-        if feed.source_type != "default":
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"status": "error", "message": "Payload must be an object"}), 400
+
+        rotation_key_present = False
+        rotation_input = None
+        for candidate in ("rotation_degrees", "rotate_degrees", "rotation"):
+            if candidate in payload:
+                rotation_key_present = True
+                rotation_input = payload.get(candidate)
+                break
+        if not rotation_key_present and isinstance(payload.get("stream"), dict):
+            stream_payload = payload.get("stream")
+            for candidate in ("rotation_degrees", "rotate_degrees", "rotation"):
+                if candidate in stream_payload:
+                    rotation_key_present = True
+                    rotation_input = stream_payload.get(candidate)
+                    break
+        if not rotation_key_present and "rotate_clockwise" in payload:
+            rotation_key_present = True
+            rotation_input = 90 if _as_bool(payload.get("rotate_clockwise"), default=False) else 0
+
+        rotation_changed = False
+        if rotation_key_present:
+            if rotation_input is None:
+                changed_keys = [clear_camera_rotation_rule(key, persist=False) for key in rule_keys]
+                rotation_changed = any(changed_keys)
+                if rotation_changed:
+                    _persist_camera_rotation_rules()
+                configured_rotation = None
+                configured_rotation_key = None
+            else:
+                normalized_rotation = _parse_rotation_degrees(rotation_input)
+                if normalized_rotation is None:
+                    return jsonify(
+                        {
+                            "status": "error",
+                            "message": "rotation_degrees must be one of 0, 90, 180, 270",
+                            "camera_id": camera_id,
+                        }
+                    ), 400
+                previous_rotation = configured_rotation
+                for key in rule_keys:
+                    set_camera_rotation_rule(key, normalized_rotation, persist=False)
+                _persist_camera_rotation_rules()
+                rotation_changed = normalized_rotation != previous_rotation
+                configured_rotation = normalized_rotation
+                configured_rotation_key = rule_keys[0] if rule_keys else str(camera_id)
+            effective_rotation = get_feed_rotation_degrees(feed)
+
+        profile_requested = "profile" in payload or any(
+            key in payload for key in ("pixel_format", "width", "height", "fps")
+        )
+        if profile_requested and feed.source_type != "default":
             return jsonify(
                 {
                     "status": "error",
@@ -2488,53 +3391,74 @@ def stream_options_for_camera(camera_id):
                     "camera_id": camera_id,
                 }
             ), 400
-        payload = request.get_json(silent=True) or {}
-        requested = payload.get("profile", payload)
-        if not isinstance(requested, dict):
-            return jsonify({"status": "error", "message": "Profile payload must be an object"}), 400
 
-        candidate = {
-            "pixel_format": _normalize_pixel_format_code(requested.get("pixel_format", current_profile["pixel_format"])),
-            "width": _as_int(requested.get("width"), current_profile["width"], minimum=1, maximum=7680),
-            "height": _as_int(requested.get("height"), current_profile["height"], minimum=1, maximum=4320),
-            "fps": float(
-                _as_int(
-                    requested.get("fps"),
-                    int(max(1, round(float(current_profile.get("fps", source_options["camera_capture_fps"]))))),
-                    minimum=1,
-                    maximum=240,
-                )
-            ),
-        }
+        changed = False
+        applied_profile = current_profile
+        next_revision = current_revision
+        if profile_requested:
+            requested = payload.get("profile", payload)
+            if not isinstance(requested, dict):
+                return jsonify({"status": "error", "message": "Profile payload must be an object"}), 400
 
-        if available_profiles:
-            matched = find_matching_profile(available_profiles, candidate)
-            if not matched:
-                return jsonify(
-                    {
-                        "status": "error",
-                        "message": "Requested profile is not available for this camera",
-                        "camera_id": camera_id,
-                        "current_profile": current_profile,
-                        "available_profiles": available_profiles,
-                    }
-                ), 400
             candidate = {
-                "pixel_format": _normalize_pixel_format_code(matched.get("pixel_format", "")),
-                "width": int(matched.get("width", current_profile["width"])),
-                "height": int(matched.get("height", current_profile["height"])),
-                "fps": float(matched.get("fps", current_profile["fps"])),
+                "pixel_format": _normalize_pixel_format_code(
+                    requested.get("pixel_format", current_profile["pixel_format"])
+                ),
+                "width": _as_int(requested.get("width"), current_profile["width"], minimum=1, maximum=7680),
+                "height": _as_int(requested.get("height"), current_profile["height"], minimum=1, maximum=4320),
+                "fps": float(
+                    _as_int(
+                        requested.get("fps"),
+                        int(max(1, round(float(current_profile.get("fps", source_options["camera_capture_fps"]))))),
+                        minimum=1,
+                        maximum=240,
+                    )
+                ),
             }
 
-        changed, applied_profile, next_revision = feed.set_capture_profile(candidate)
+            if available_profiles:
+                matched = find_matching_profile(available_profiles, candidate)
+                if not matched:
+                    return jsonify(
+                        {
+                            "status": "error",
+                            "message": "Requested profile is not available for this camera",
+                            "camera_id": camera_id,
+                            "current_profile": current_profile,
+                            "available_profiles": available_profiles,
+                        }
+                    ), 400
+                candidate = {
+                    "pixel_format": _normalize_pixel_format_code(matched.get("pixel_format", "")),
+                    "width": int(matched.get("width", current_profile["width"])),
+                    "height": int(matched.get("height", current_profile["height"])),
+                    "fps": float(matched.get("fps", current_profile["fps"])),
+                }
+
+            changed, applied_profile, next_revision = feed.set_capture_profile(candidate)
+
+        if not rotation_key_present and not profile_requested:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "No changes requested. Provide profile fields and/or rotation_degrees.",
+                    "camera_id": camera_id,
+                }
+            ), 400
+
         return jsonify(
             {
                 "status": "success",
                 "camera_id": camera_id,
-                "changed": bool(changed),
+                "changed": bool(changed or rotation_changed),
+                "profile_changed": bool(changed),
                 "profile_revision": int(next_revision),
                 "profile": applied_profile,
-                "message": "Capture profile updated" if changed else "Capture profile unchanged",
+                "rotation_changed": bool(rotation_changed),
+                "configured_rotation_degrees": configured_rotation,
+                "configured_rotation_key": configured_rotation_key,
+                "effective_rotation_degrees": int(effective_rotation),
+                "message": "Camera options updated",
             }
         )
 
@@ -2549,6 +3473,12 @@ def stream_options_for_camera(camera_id):
             "profile_revision": int(current_revision),
             "available_profiles": available_profiles,
             "profile_query_error": profile_error,
+            "default_rotation_degrees": int(
+                _rotation_or_default(stream_options.get("default_rotation_degrees"), DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES)
+            ),
+            "configured_rotation_degrees": configured_rotation,
+            "configured_rotation_key": configured_rotation_key,
+            "effective_rotation_degrees": int(effective_rotation),
         }
     )
 
@@ -2930,8 +3860,20 @@ def apply_runtime_security(saved_config):
         ui.log("Applied live security updates from config save")
 
 
+def _install_runtime_signal_handlers():
+    def _handle_signal(signum, _frame):
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _handle_signal)
+        except Exception:
+            pass
+
+
 def main():
     global ui, SESSION_TIMEOUT
+    _install_runtime_signal_handlers()
 
     config = load_config()
     settings, changed = _load_camera_settings(config)
@@ -2951,9 +3893,13 @@ def main():
             "webrtc_target_fps": settings["webrtc_target_fps"],
             "mpegts_target_fps": settings["mpegts_target_fps"],
             "mpegts_jpeg_quality": settings["mpegts_jpeg_quality"],
+            "default_rotation_degrees": settings["default_rotation_degrees"],
             "rotate_clockwise": settings["rotate_clockwise"],
         }
     )
+    with camera_rotation_rules_lock:
+        camera_rotation_rules.clear()
+        camera_rotation_rules.update(settings["camera_rotation_degrees"])
     source_options.update(
         {
             "default_cameras_enabled": settings["default_cameras_enabled"],
@@ -3128,56 +4074,87 @@ def run_with_supervisor():
     crash_times = []
     backoff = 1.0
     safe_mode_next = False
+    stop_requested = threading.Event()
+    child_ref = {"process": None}
 
-    while True:
-        child_env = os.environ.copy()
-        child_env[SUPERVISOR_ENV_CHILD] = "1"
-        if safe_mode_next:
-            child_env[SUPERVISOR_ENV_SAFE_MODE] = "1"
-        else:
-            child_env.pop(SUPERVISOR_ENV_SAFE_MODE, None)
-
-        popen_kwargs = {"env": child_env}
-        if os.name == "nt":
-            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            popen_kwargs["start_new_session"] = True
-
-        child = subprocess.Popen([sys.executable] + sys.argv, **popen_kwargs)
-        try:
-            exit_code = child.wait()
-        except KeyboardInterrupt:
+    def _request_stop(signum, _frame):
+        stop_requested.set()
+        child = child_ref.get("process")
+        if child is not None:
             terminate_process_tree(child)
-            return
 
-        # Ensure lingering child processes (e.g., cloudflared) are torn down.
-        terminate_process_tree(child)
+    previous_handlers = {}
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[sig] = signal.getsignal(sig)
+            signal.signal(sig, _request_stop)
+        except Exception:
+            pass
 
-        # Clean exits should not be restarted.
-        if exit_code in (0, 130, -signal.SIGINT, -signal.SIGTERM):
-            return
+    try:
+        while True:
+            if stop_requested.is_set():
+                return
 
-        now = time.time()
-        crash_times = [ts for ts in crash_times if (now - ts) <= SUPERVISOR_CRASH_WINDOW_SECONDS]
-        crash_times.append(now)
+            child_env = os.environ.copy()
+            child_env[SUPERVISOR_ENV_CHILD] = "1"
+            if safe_mode_next:
+                child_env[SUPERVISOR_ENV_SAFE_MODE] = "1"
+            else:
+                child_env.pop(SUPERVISOR_ENV_SAFE_MODE, None)
 
-        if len(crash_times) >= SUPERVISOR_SAFE_MODE_AFTER_CRASHES and not safe_mode_next:
-            safe_mode_next = True
+            popen_kwargs = {"env": child_env}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            else:
+                popen_kwargs["start_new_session"] = True
+
+            child = subprocess.Popen([sys.executable] + sys.argv, **popen_kwargs)
+            child_ref["process"] = child
+            exit_code = child.wait()
+            child_ref["process"] = None
+
+            # Ensure lingering child processes (e.g., cloudflared) are torn down.
+            terminate_process_tree(child)
+
+            if stop_requested.is_set():
+                return
+
+            # Clean exits should not be restarted.
+            if exit_code in (0, 130, -signal.SIGINT, -signal.SIGTERM):
+                return
+
+            now = time.time()
+            crash_times = [ts for ts in crash_times if (now - ts) <= SUPERVISOR_CRASH_WINDOW_SECONDS]
+            crash_times.append(now)
+
+            if len(crash_times) >= SUPERVISOR_SAFE_MODE_AFTER_CRASHES and not safe_mode_next:
+                safe_mode_next = True
+                print(
+                    f"[WATCHDOG] Enabling safe mode after {len(crash_times)} crashes in "
+                    f"{SUPERVISOR_CRASH_WINDOW_SECONDS:.0f}s. "
+                    "RealSense IR will be disabled and CUDA device visibility masked."
+                )
+
             print(
-                f"[WATCHDOG] Enabling safe mode after {len(crash_times)} crashes in "
-                f"{SUPERVISOR_CRASH_WINDOW_SECONDS:.0f}s. "
-                "RealSense IR will be disabled and CUDA device visibility masked."
+                f"[WATCHDOG] camera_route child exited with code {exit_code}; "
+                f"restarting in {backoff:.1f}s..."
             )
-
-        print(
-            f"[WATCHDOG] camera_route child exited with code {exit_code}; "
-            f"restarting in {backoff:.1f}s..."
-        )
-        time.sleep(backoff)
-        if len(crash_times) <= 1:
-            backoff = 1.0
-        else:
-            backoff = min(SUPERVISOR_BACKOFF_MAX_SECONDS, backoff * 2.0)
+            if stop_requested.wait(backoff):
+                return
+            if len(crash_times) <= 1:
+                backoff = 1.0
+            else:
+                backoff = min(SUPERVISOR_BACKOFF_MAX_SECONDS, backoff * 2.0)
+    finally:
+        child = child_ref.get("process")
+        if child is not None:
+            terminate_process_tree(child)
+        for sig, handler in previous_handlers.items():
+            try:
+                signal.signal(sig, handler)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

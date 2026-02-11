@@ -6,5 +6,8 @@
 .vscode/
 /teleoperation/*/__pycache__/
 /teleoperation/__pycache__/
-/teleoperation/router/router_venv/
+/teleoperation/.*/
+/teleoperation/*_venv/
+/teleoperation/*/*_venv/
+/teleoperation/*/config.json
 /teleoperation/router/nkn_sidecar/

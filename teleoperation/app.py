@@ -64,6 +64,7 @@ from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
 
 WATCHDOG_RUNTIME_DIR_NAME = ".watchdog_runtime"
+WATCHDOG_STATE_FILE_NAME = "service_state.json"
 MONITOR_INTERVAL_SECONDS = 0.25
 STOP_SIGINT_GRACE_SECONDS = 5.0
 STOP_SIGTERM_GRACE_SECONDS = 10.0
@@ -102,6 +103,10 @@ class ServiceRuntime:
     stopped_at: float = 0.0
     last_event: str = ""
     last_error: str = ""
+    start_count: int = 0
+    stop_count: int = 0
+    crash_count: int = 0
+    restart_count: int = 0
 
 
 class WatchdogManager:
@@ -109,6 +114,7 @@ class WatchdogManager:
         self.base_dir = base_dir
         self.runtime_dir = self.base_dir / WATCHDOG_RUNTIME_DIR_NAME
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        self.state_file = self.runtime_dir / WATCHDOG_STATE_FILE_NAME
 
         self.services: List[ServiceSpec] = [
             ServiceSpec("adapter", "Adapter", "adapter/adapter.py"),
@@ -125,15 +131,20 @@ class WatchdogManager:
         self._monitor_thread: Optional[threading.Thread] = None
         self._logs: Deque[str] = deque(maxlen=300)
         self._selected_index = 0
+        self._run_started_at = time.time()
 
         self._os_name = platform.system().lower()
         self._terminal_emulator = self._detect_terminal_emulator()
         if self._os_name not in ("windows", "darwin") and not self._terminal_emulator:
             self._log("[WARN] No terminal emulator detected; Linux service launch will fail")
 
+        desired_overrides = self._load_desired_state()
         now = time.time()
         for svc in self.services:
-            runtime = ServiceRuntime(desired_enabled=svc.auto_start, state="stopped")
+            desired_enabled = desired_overrides.get(svc.service_id)
+            if desired_enabled is None:
+                desired_enabled = svc.auto_start
+            runtime = ServiceRuntime(desired_enabled=bool(desired_enabled), state="stopped")
             script_path = svc.script_path(self.base_dir)
             if not script_path.exists():
                 runtime.desired_enabled = False
@@ -151,6 +162,53 @@ class WatchdogManager:
 
         self._log("Watchdog initialized")
         self._log("Keys: Up/Down select, Space toggle, R restart, A toggle all, Q quit")
+
+    def _load_desired_state(self) -> Dict[str, bool]:
+        if not self.state_file.exists():
+            return {}
+        try:
+            payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            self._log(f"[WARN] Failed to read watchdog state: {exc}")
+            return {}
+
+        if isinstance(payload, dict):
+            raw_services = payload.get("services", payload)
+        else:
+            raw_services = {}
+        if not isinstance(raw_services, dict):
+            return {}
+
+        service_ids = set(self.service_by_id.keys())
+        loaded = {}
+        for service_id, value in raw_services.items():
+            if service_id in service_ids and isinstance(value, bool):
+                loaded[service_id] = value
+        return loaded
+
+    def _save_desired_state(self):
+        payload = {
+            "version": 1,
+            "updated_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "services": {},
+        }
+        for svc in self.services:
+            runtime = self.runtime_by_id.get(svc.service_id)
+            if runtime is None:
+                continue
+            payload["services"][svc.service_id] = bool(runtime.desired_enabled)
+
+        tmp_path = self.state_file.with_suffix(".tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            tmp_path.replace(self.state_file)
+        except Exception as exc:
+            self._log(f"[WARN] Failed to persist watchdog state: {exc}")
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -237,6 +295,15 @@ class WatchdogManager:
                 check=False,
             )
             return
+
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, sig)
+            return
+        except ProcessLookupError:
+            return
+        except Exception:
+            pass
 
         try:
             os.kill(pid, sig)
@@ -336,6 +403,7 @@ class WatchdogManager:
                 runtime.pid = proc.pid
                 runtime.state = "running"
                 runtime.started_at = now
+                runtime.start_count += 1
                 runtime.stop_stage = 0
                 runtime.stop_requested_at = 0.0
                 runtime.last_error = ""
@@ -426,6 +494,7 @@ class WatchdogManager:
                     runtime.started_at = now
                 if runtime.state != "running":
                     runtime.state = "running"
+                    runtime.start_count += 1
                     runtime.last_event = f"Running (pid {pid_from_file})"
                     runtime.last_error = ""
                     runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
@@ -435,6 +504,7 @@ class WatchdogManager:
 
     def _begin_stop(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
         runtime.state = "stopping"
+        runtime.stop_count += 1
         runtime.stop_stage = 1
         runtime.stop_requested_at = now
         runtime.last_event = "Stopping (SIGINT)"
@@ -499,6 +569,7 @@ class WatchdogManager:
             self._remove_pid_file(svc)
             if runtime.desired_enabled:
                 runtime.state = "error"
+                runtime.crash_count += 1
                 runtime.last_error = "Exited unexpectedly"
                 runtime.last_event = "Waiting to restart"
                 runtime.next_restart_at = now + runtime.restart_backoff_seconds
@@ -521,6 +592,7 @@ class WatchdogManager:
                 runtime.desired_enabled = True
                 runtime.next_restart_at = now
                 runtime.last_event = "Restart queued"
+                self._save_desired_state()
             return
 
         if runtime.state == "stopping":
@@ -615,12 +687,14 @@ class WatchdogManager:
             runtime.next_restart_at = time.time()
             runtime.last_event = "Enabled by user"
             self._log(f"[USER] Enabled {svc.label}")
+        self._save_desired_state()
 
     def restart_selected(self):
         svc = self.services[self._selected_index]
         runtime = self.runtime_by_id[svc.service_id]
         if runtime.state == "missing":
             return
+        runtime.restart_count += 1
         runtime.restart_after_stop = True
         runtime.desired_enabled = False
         runtime.last_event = "Restart requested"
@@ -641,6 +715,7 @@ class WatchdogManager:
                 runtime.desired_enabled = target_enabled
                 runtime.last_event = "Enabled all" if target_enabled else "Disabled all"
             self._log(f"[USER] {'Enabled' if target_enabled else 'Disabled'} all services")
+            self._save_desired_state()
 
     # ------------------------------------------------------------------
     # Curses UI
@@ -656,6 +731,69 @@ class WatchdogManager:
         if hrs > 0:
             return f"{hrs:02d}:{mins:02d}:{secs:02d}"
         return f"{mins:02d}:{secs:02d}"
+
+    def _build_exit_report(self, interrupted: bool = False) -> str:
+        now = time.time()
+        with self._lock:
+            rows = []
+            for svc in self.services:
+                runtime = self.runtime_by_id[svc.service_id]
+                if runtime.stopped_at > runtime.started_at > 0 and runtime.state != "running":
+                    active_for = runtime.stopped_at - runtime.started_at
+                elif runtime.started_at > 0:
+                    active_for = now - runtime.started_at
+                else:
+                    active_for = 0.0
+                rows.append(
+                    {
+                        "label": svc.label,
+                        "desired": "ON" if runtime.desired_enabled else "OFF",
+                        "state": runtime.state.upper(),
+                        "pid": runtime.pid or "-",
+                        "uptime": self._format_duration(active_for),
+                        "starts": runtime.start_count,
+                        "stops": runtime.stop_count,
+                        "restarts": runtime.restart_count,
+                        "crashes": runtime.crash_count,
+                        "detail": runtime.last_error if runtime.last_error else runtime.last_event,
+                    }
+                )
+            recent_logs = list(self._logs)[-30:]
+
+        run_seconds = max(0.0, now - self._run_started_at)
+        header = (
+            "Service         Desired  State      PID      Uptime    Starts  Stops  Restarts  Crashes  Last Event / Error"
+        )
+        lines = []
+        lines.append("=" * len(header))
+        lines.append("Teleoperation Watchdog Exit Summary")
+        lines.append(f"Ended: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Interrupted: {'yes' if interrupted else 'no'}")
+        lines.append(f"Session runtime: {self._format_duration(run_seconds)}")
+        lines.append("-" * len(header))
+        lines.append(header)
+        lines.append("-" * len(header))
+        for row in rows:
+            lines.append(
+                f"{row['label'][:14]:14}  "
+                f"{row['desired'][:3]:>3}      "
+                f"{row['state'][:9]:9}  "
+                f"{str(row['pid'])[:8]:8}  "
+                f"{row['uptime']:8}  "
+                f"{int(row['starts']):6}  "
+                f"{int(row['stops']):5}  "
+                f"{int(row['restarts']):8}  "
+                f"{int(row['crashes']):7}  "
+                f"{row['detail']}"
+            )
+        lines.append("-" * len(header))
+        lines.append("Recent Watchdog Logs:")
+        if recent_logs:
+            lines.extend(recent_logs)
+        else:
+            lines.append("(no logs)")
+        lines.append("=" * len(header))
+        return "\n".join(lines)
 
     def _draw_ui(self, stdscr):
         stdscr.erase()
@@ -711,6 +849,7 @@ class WatchdogManager:
 
     def run_curses(self):
         self.start()
+        interrupted = False
 
         def _inner(stdscr):
             curses.curs_set(0)
@@ -752,9 +891,15 @@ class WatchdogManager:
 
         try:
             curses.wrapper(_inner)
+        except KeyboardInterrupt:
+            interrupted = True
+            with self._lock:
+                self._log("[USER] Ctrl+C interrupt received")
         finally:
             self.request_shutdown()
             self.await_shutdown()
+            report = self._build_exit_report(interrupted=interrupted)
+            print("\n" + report, flush=True)
 
 
 def main():

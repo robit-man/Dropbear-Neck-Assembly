@@ -12,10 +12,14 @@ Provides a full-featured dashboard with:
 """
 
 import curses
+import base64
 import threading
 import time
 import json
 import os
+import shutil
+import subprocess
+import sys
 from collections import deque, OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -145,7 +149,7 @@ def _coerce_value(raw, spec):
 class TerminalUI:
     """Full-featured curses dashboard."""
 
-    def __init__(self, title, config_spec=None, config_path="config.json"):
+    def __init__(self, title, config_spec=None, config_path="config.json", refresh_interval_ms=200):
         self.title = title
         self.config_spec = config_spec
         self.config_path = config_path
@@ -159,6 +163,11 @@ class TerminalUI:
         self.status_time = 0
         self._on_save_callback = None
         self._on_restart_callback = None
+        self._click_regions = []
+        try:
+            self.refresh_interval_ms = max(50, int(refresh_interval_ms))
+        except (TypeError, ValueError):
+            self.refresh_interval_ms = 200
 
     # -- Public API --
 
@@ -188,6 +197,99 @@ class TerminalUI:
     def set_status(self, msg):
         self.status_message = msg
         self.status_time = time.time()
+
+    def _register_click_region(self, row, col_start, col_end, action, payload):
+        self._click_regions.append(
+            {
+                "row": int(row),
+                "col_start": int(min(col_start, col_end)),
+                "col_end": int(max(col_start, col_end)),
+                "action": str(action),
+                "payload": payload,
+            }
+        )
+
+    def _copy_to_clipboard(self, payload):
+        text = str(payload or "").strip()
+        if not text or text == "N/A":
+            return False, "value is empty"
+
+        commands = []
+        if os.name == "nt":
+            clip_bin = shutil.which("clip.exe") or shutil.which("clip")
+            if clip_bin:
+                commands.append(([clip_bin], "clip.exe"))
+            powershell_bin = shutil.which("powershell.exe") or shutil.which("powershell")
+            if powershell_bin:
+                commands.append(
+                    (
+                        [powershell_bin, "-NoProfile", "-Command", "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+                        "powershell",
+                    )
+                )
+        else:
+            wl_copy = shutil.which("wl-copy")
+            if wl_copy:
+                commands.append(([wl_copy], "wl-copy"))
+            xclip = shutil.which("xclip")
+            if xclip:
+                commands.append(([xclip, "-selection", "clipboard"], "xclip"))
+            xsel = shutil.which("xsel")
+            if xsel:
+                commands.append(([xsel, "--clipboard", "--input"], "xsel"))
+            pbcopy = shutil.which("pbcopy")
+            if pbcopy:
+                commands.append(([pbcopy], "pbcopy"))
+
+        for command, label in commands:
+            try:
+                subprocess.run(command, input=text, text=True, capture_output=True, check=True)
+                return True, label
+            except Exception:
+                continue
+
+        # Last fallback for terminals that support OSC52 clipboard control.
+        try:
+            encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            sys.__stdout__.write(f"\033]52;c;{encoded}\a")
+            sys.__stdout__.flush()
+            return True, "OSC52"
+        except Exception as exc:
+            return False, str(exc) or "no clipboard backend available"
+
+    def _copy_metric_value(self, metric_name):
+        with self.lock:
+            value = str(self.metrics.get(metric_name, "")).strip()
+        ok, method = self._copy_to_clipboard(value)
+        if ok:
+            self.set_status(f"Copied {metric_name} via {method}")
+        else:
+            self.set_status(f"Copy failed: {method}")
+
+    def _handle_mouse_event(self):
+        try:
+            _, mx, my, _, bstate = curses.getmouse()
+        except curses.error:
+            return False
+
+        click_mask = (
+            getattr(curses, "BUTTON1_CLICKED", 0)
+            | getattr(curses, "BUTTON1_RELEASED", 0)
+            | getattr(curses, "BUTTON1_PRESSED", 0)
+            | getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0)
+        )
+        if click_mask and not (bstate & click_mask):
+            return False
+
+        for region in reversed(self._click_regions):
+            if my != region["row"]:
+                continue
+            if not (region["col_start"] <= mx <= region["col_end"]):
+                continue
+            if region["action"] == "copy_metric":
+                self._copy_metric_value(region["payload"])
+                return True
+        return False
 
     def start(self):
         """Start the curses UI (blocking)."""
@@ -283,7 +385,7 @@ class TerminalUI:
             elif ch == 27:  # Esc
                 curses.noecho()
                 curses.curs_set(0)
-                stdscr.timeout(200)
+                stdscr.timeout(self.refresh_interval_ms)
                 return None
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 if buf:
@@ -299,7 +401,7 @@ class TerminalUI:
 
         curses.noecho()
         curses.curs_set(0)
-        stdscr.timeout(200)
+        stdscr.timeout(self.refresh_interval_ms)
         return "".join(buf)
 
     def _prompt_bool(self, stdscr, label, current):
@@ -309,7 +411,7 @@ class TerminalUI:
     def _select_option(self, stdscr, title, options, current_idx=0):
         """Let user pick from a list of options. Returns index or -1."""
         sel = max(0, min(current_idx, len(options) - 1))
-        stdscr.timeout(200)
+        stdscr.timeout(self.refresh_interval_ms)
 
         while True:
             stdscr.clear()
@@ -356,14 +458,24 @@ class TerminalUI:
             label1 = f"  {key1}:"
             val1_str = f" {val1}"
             _safe_addstr(stdscr, row, 1, label1, curses.A_BOLD)
-            _safe_addstr(stdscr, row, 1 + len(label1), val1_str)
+            val1_col = 1 + len(label1)
+            val1_attr = 0
+            if key1 == "Address" and str(val1).strip() and str(val1).strip() != "N/A":
+                val1_attr = curses.color_pair(4) | curses.A_UNDERLINE
+                self._register_click_region(row, 1, val1_col + len(val1_str) - 1, "copy_metric", "Address")
+            _safe_addstr(stdscr, row, val1_col, val1_str, val1_attr)
 
             if i + 1 < len(items):
                 key2, val2 = items[i + 1]
                 label2 = f"{key2}:"
                 val2_str = f" {val2}"
                 _safe_addstr(stdscr, row, col1_w + 2, label2, curses.A_BOLD)
-                _safe_addstr(stdscr, row, col1_w + 2 + len(label2), val2_str)
+                val2_col = col1_w + 2 + len(label2)
+                val2_attr = 0
+                if key2 == "Address" and str(val2).strip() and str(val2).strip() != "N/A":
+                    val2_attr = curses.color_pair(4) | curses.A_UNDERLINE
+                    self._register_click_region(row, col1_w + 2, val2_col + len(val2_str) - 1, "copy_metric", "Address")
+                _safe_addstr(stdscr, row, val2_col, val2_str, val2_attr)
 
             row += 1
 
@@ -391,7 +503,7 @@ class TerminalUI:
         row += 1
 
         # Controls line
-        controls = "↑/↓ navigate  Enter edit  s save  d discard  r reset  q quit"
+        controls = "↑/↓ navigate  Enter edit  c copy address  s save  d discard  r reset  q quit"
         _safe_addstr(stdscr, row, 2, controls, curses.A_DIM)
         row += 1
 
@@ -484,7 +596,7 @@ class TerminalUI:
         if self.status_message and time.time() - self.status_time < 5:
             msg = self.status_message
         else:
-            msg = "Ctrl+C to exit"
+            msg = "Click Address or press c to copy  |  Ctrl+C to exit"
 
         bar = " " * (max_x - 1)
         _safe_addstr(stdscr, max_y - 1, 0, bar, curses.A_REVERSE)
@@ -590,7 +702,7 @@ class TerminalUI:
 
         curses.curs_set(0)
         stdscr.keypad(True)
-        stdscr.timeout(200)
+        stdscr.timeout(self.refresh_interval_ms)
 
         # Colors
         curses.start_color()
@@ -599,6 +711,11 @@ class TerminalUI:
         curses.init_pair(2, curses.COLOR_GREEN, -1)       # pending/good
         curses.init_pair(3, curses.COLOR_RED, -1)         # warnings
         curses.init_pair(4, curses.COLOR_CYAN, -1)        # info
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            curses.mouseinterval(0)
+        except curses.error:
+            pass
 
         selected_cat = 0
         selected_setting = 0
@@ -614,6 +731,7 @@ class TerminalUI:
                     continue
 
                 stdscr.clear()
+                self._click_regions = []
 
                 config = self._load_config()
 
@@ -645,6 +763,10 @@ class TerminalUI:
                 # Handle input
                 ch = stdscr.getch()
                 if ch == -1:
+                    continue
+
+                if ch == curses.KEY_MOUSE:
+                    self._handle_mouse_event()
                     continue
 
                 if ch in (ord('q'), ord('Q')):
@@ -684,6 +806,10 @@ class TerminalUI:
                     if self.config_spec:
                         selected_cat = (selected_cat + 1) % len(self.config_spec.categories)
                         selected_setting = 0
+
+                # Copy current Address metric value
+                elif ch in (ord('c'), ord('C')):
+                    self._copy_metric_value("Address")
 
                 # Edit
                 elif ch in (curses.KEY_ENTER, 10, 13):

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from threading import Lock
 
 
@@ -121,6 +122,10 @@ DEFAULT_AUTO_INSTALL_NKN_SDK = True
 
 PENDING_REQUEST_TTL_SECONDS = 30
 SERVICE_REFRESH_INTERVAL_SECONDS = 3.0
+DEFAULT_UI_REFRESH_INTERVAL_MS = 700
+DASHBOARD_HISTORY_MAX_POINTS = 720
+DASHBOARD_LOG_MAX_ENTRIES = 800
+DASHBOARD_SAMPLE_INTERVAL_SECONDS = 1.0
 
 _MISSING = object()
 request_counter = {"value": 0}
@@ -167,8 +172,293 @@ nkn_runtime_lock = Lock()
 pending_resolves = {}
 pending_resolves_lock = Lock()
 
+telemetry_lock = Lock()
+telemetry_state = {
+    "inbound_messages": 0,
+    "outbound_messages": 0,
+    "inbound_bytes": 0,
+    "outbound_bytes": 0,
+    "resolve_requests_in": 0,
+    "resolve_requests_out": 0,
+    "resolve_success_out": 0,
+    "resolve_fail_out": 0,
+    "endpoint_usage_totals": {},
+    "peer_usage": {},
+    "history": deque(maxlen=DASHBOARD_HISTORY_MAX_POINTS),
+}
+activity_logs_lock = Lock()
+activity_logs = deque(maxlen=DASHBOARD_LOG_MAX_ENTRIES)
+
+
+def _append_activity_log(message, category="system", peer="", direction="", event="", extra=None):
+    entry = {
+        "timestamp_ms": int(time.time() * 1000),
+        "time": datetime.datetime.now().strftime("%H:%M:%S"),
+        "category": str(category or "system"),
+        "direction": str(direction or ""),
+        "peer": str(peer or ""),
+        "event": str(event or ""),
+        "message": str(message or ""),
+        "extra": extra if isinstance(extra, dict) else {},
+    }
+    with activity_logs_lock:
+        activity_logs.append(entry)
+
+
+def _increment_counter(mapping, key, amount=1):
+    key = str(key or "").strip()
+    if not key:
+        return
+    mapping[key] = int(mapping.get(key, 0)) + int(amount)
+
+
+def _payload_size_bytes(payload):
+    if payload is None:
+        return 0
+    if isinstance(payload, bytes):
+        return len(payload)
+    if isinstance(payload, str):
+        return len(payload.encode("utf-8", errors="replace"))
+    try:
+        encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        return len(encoded.encode("utf-8", errors="replace"))
+    except Exception:
+        return len(str(payload).encode("utf-8", errors="replace"))
+
+
+def _collect_endpoint_labels(resolved):
+    labels = []
+    if not isinstance(resolved, dict):
+        return labels
+    for service_name in ("adapter", "camera"):
+        service_data = resolved.get(service_name)
+        if not isinstance(service_data, dict):
+            continue
+        for field_name, field_value in service_data.items():
+            value = str(field_value or "").strip()
+            if value:
+                labels.append((f"{service_name}.{field_name}", value))
+    return labels
+
+
+def _record_nkn_traffic(direction, peer, payload, event_name="", endpoint_labels=None):
+    direction = "in" if direction == "in" else "out"
+    peer = str(peer or "").strip()
+    event_name = str(event_name or "").strip().lower()
+    size_bytes = _payload_size_bytes(payload)
+    now_ms = int(time.time() * 1000)
+
+    with telemetry_lock:
+        if direction == "in":
+            telemetry_state["inbound_messages"] += 1
+            telemetry_state["inbound_bytes"] += size_bytes
+        else:
+            telemetry_state["outbound_messages"] += 1
+            telemetry_state["outbound_bytes"] += size_bytes
+
+        peer_usage = telemetry_state["peer_usage"].setdefault(
+            peer or "(unknown)",
+            {
+                "peer": peer or "(unknown)",
+                "inbound_messages": 0,
+                "outbound_messages": 0,
+                "inbound_bytes": 0,
+                "outbound_bytes": 0,
+                "events_in": {},
+                "events_out": {},
+                "endpoint_hits": {},
+                "last_endpoints": {},
+                "last_seen_ms": 0,
+                "last_event": "",
+            },
+        )
+        peer_usage["last_seen_ms"] = now_ms
+        if event_name:
+            peer_usage["last_event"] = event_name
+
+        if direction == "in":
+            peer_usage["inbound_messages"] += 1
+            peer_usage["inbound_bytes"] += size_bytes
+            if event_name:
+                _increment_counter(peer_usage["events_in"], event_name, 1)
+        else:
+            peer_usage["outbound_messages"] += 1
+            peer_usage["outbound_bytes"] += size_bytes
+            if event_name:
+                _increment_counter(peer_usage["events_out"], event_name, 1)
+
+        if endpoint_labels:
+            for endpoint_key, endpoint_value in endpoint_labels:
+                _increment_counter(peer_usage["endpoint_hits"], endpoint_key, 1)
+                peer_usage["last_endpoints"][endpoint_key] = str(endpoint_value)
+                _increment_counter(telemetry_state["endpoint_usage_totals"], endpoint_key, 1)
+
+
+def _record_endpoint_usage(peer, endpoint_labels):
+    if not endpoint_labels:
+        return
+    peer = str(peer or "").strip()
+    now_ms = int(time.time() * 1000)
+    with telemetry_lock:
+        peer_usage = telemetry_state["peer_usage"].setdefault(
+            peer or "(unknown)",
+            {
+                "peer": peer or "(unknown)",
+                "inbound_messages": 0,
+                "outbound_messages": 0,
+                "inbound_bytes": 0,
+                "outbound_bytes": 0,
+                "events_in": {},
+                "events_out": {},
+                "endpoint_hits": {},
+                "last_endpoints": {},
+                "last_seen_ms": 0,
+                "last_event": "",
+            },
+        )
+        peer_usage["last_seen_ms"] = now_ms
+        for endpoint_key, endpoint_value in endpoint_labels:
+            _increment_counter(peer_usage["endpoint_hits"], endpoint_key, 1)
+            peer_usage["last_endpoints"][endpoint_key] = str(endpoint_value)
+            _increment_counter(telemetry_state["endpoint_usage_totals"], endpoint_key, 1)
+
+
+def _record_resolve_outcome(success):
+    with telemetry_lock:
+        telemetry_state["resolve_requests_out"] += 1
+        if success:
+            telemetry_state["resolve_success_out"] += 1
+        else:
+            telemetry_state["resolve_fail_out"] += 1
+
+
+def _record_resolve_request_in():
+    with telemetry_lock:
+        telemetry_state["resolve_requests_in"] += 1
+
+
+def _snapshot_dashboard_data(history_limit=240, log_limit=120, peer_limit=50):
+    history_limit = _as_int(history_limit, 240, minimum=10, maximum=DASHBOARD_HISTORY_MAX_POINTS)
+    log_limit = _as_int(log_limit, 120, minimum=10, maximum=DASHBOARD_LOG_MAX_ENTRIES)
+    peer_limit = _as_int(peer_limit, 50, minimum=1, maximum=200)
+
+    with nkn_runtime_lock:
+        nkn_state = dict(nkn_runtime)
+    with pending_resolves_lock:
+        pending_count = len(pending_resolves)
+    with telemetry_lock:
+        totals = {
+            "inbound_messages": telemetry_state["inbound_messages"],
+            "outbound_messages": telemetry_state["outbound_messages"],
+            "inbound_bytes": telemetry_state["inbound_bytes"],
+            "outbound_bytes": telemetry_state["outbound_bytes"],
+            "resolve_requests_in": telemetry_state["resolve_requests_in"],
+            "resolve_requests_out": telemetry_state["resolve_requests_out"],
+            "resolve_success_out": telemetry_state["resolve_success_out"],
+            "resolve_fail_out": telemetry_state["resolve_fail_out"],
+            "endpoint_usage_totals": dict(telemetry_state["endpoint_usage_totals"]),
+        }
+        history = list(telemetry_state["history"])[-history_limit:]
+        peers = []
+        for item in telemetry_state["peer_usage"].values():
+            peers.append(
+                {
+                    "peer": item.get("peer", ""),
+                    "inbound_messages": int(item.get("inbound_messages", 0)),
+                    "outbound_messages": int(item.get("outbound_messages", 0)),
+                    "inbound_bytes": int(item.get("inbound_bytes", 0)),
+                    "outbound_bytes": int(item.get("outbound_bytes", 0)),
+                    "events_in": dict(item.get("events_in", {})),
+                    "events_out": dict(item.get("events_out", {})),
+                    "endpoint_hits": dict(item.get("endpoint_hits", {})),
+                    "last_endpoints": dict(item.get("last_endpoints", {})),
+                    "last_seen_ms": int(item.get("last_seen_ms", 0)),
+                    "last_event": str(item.get("last_event", "")),
+                }
+            )
+
+    peers.sort(
+        key=lambda item: int(item.get("inbound_bytes", 0)) + int(item.get("outbound_bytes", 0)),
+        reverse=True,
+    )
+    peers = peers[:peer_limit]
+    with activity_logs_lock:
+        logs = list(activity_logs)[-log_limit:]
+
+    process_running = False
+    with nkn_process_lock:
+        if nkn_process and nkn_process.poll() is None:
+            process_running = True
+
+    return {
+        "status": "success",
+        "timestamp_ms": int(time.time() * 1000),
+        "uptime_seconds": round(time.time() - startup_time, 2),
+        "requests_served": int(request_counter["value"]),
+        "pending_resolves": int(pending_count),
+        "nkn": {
+            "running": process_running,
+            "ready": bool(nkn_state["ready"]),
+            "address": nkn_state["address"],
+            "pubkey_hex": nkn_state["pubkey_hex"],
+            "last_error": nkn_state["last_error"],
+            "inbound_count": int(nkn_state["inbound_count"]),
+            "outbound_count": int(nkn_state["outbound_count"]),
+        },
+        "totals": totals,
+        "history": history,
+        "peers": peers,
+        "logs": logs,
+        "snapshot": get_service_snapshot(),
+    }
+
+
+def _sample_telemetry_loop():
+    with telemetry_lock:
+        last_in_bytes = telemetry_state["inbound_bytes"]
+        last_out_bytes = telemetry_state["outbound_bytes"]
+        last_in_msgs = telemetry_state["inbound_messages"]
+        last_out_msgs = telemetry_state["outbound_messages"]
+    last_time = time.time()
+
+    while service_refresh_running.is_set():
+        now = time.time()
+        elapsed = max(0.001, now - last_time)
+        with telemetry_lock:
+            in_bytes = telemetry_state["inbound_bytes"]
+            out_bytes = telemetry_state["outbound_bytes"]
+            in_msgs = telemetry_state["inbound_messages"]
+            out_msgs = telemetry_state["outbound_messages"]
+
+            delta_in_bytes = max(0, in_bytes - last_in_bytes)
+            delta_out_bytes = max(0, out_bytes - last_out_bytes)
+            delta_in_msgs = max(0, in_msgs - last_in_msgs)
+            delta_out_msgs = max(0, out_msgs - last_out_msgs)
+
+            telemetry_state["history"].append(
+                {
+                    "timestamp_ms": int(now * 1000),
+                    "inbound_bps": round(delta_in_bytes / elapsed, 3),
+                    "outbound_bps": round(delta_out_bytes / elapsed, 3),
+                    "inbound_mps": round(delta_in_msgs / elapsed, 3),
+                    "outbound_mps": round(delta_out_msgs / elapsed, 3),
+                    "inbound_bytes_total": in_bytes,
+                    "outbound_bytes_total": out_bytes,
+                    "inbound_messages_total": in_msgs,
+                    "outbound_messages_total": out_msgs,
+                }
+            )
+
+        last_in_bytes = in_bytes
+        last_out_bytes = out_bytes
+        last_in_msgs = in_msgs
+        last_out_msgs = out_msgs
+        last_time = now
+        time.sleep(DASHBOARD_SAMPLE_INTERVAL_SECONDS)
+
 
 def log(message):
+    _append_activity_log(message, category="system")
     if ui and UI_AVAILABLE:
         ui.log(message)
     else:
@@ -565,10 +855,13 @@ def _set_nkn_error(message):
 
 
 def _set_nkn_ready(address):
+    address = str(address or "").strip()
+    if not address:
+        return
     pubkey = parse_nkn_pubkey(address)
     with nkn_runtime_lock:
         nkn_runtime["ready"] = True
-        nkn_runtime["address"] = str(address or "")
+        nkn_runtime["address"] = address
         nkn_runtime["pubkey_hex"] = pubkey
         nkn_runtime["last_error"] = ""
 
@@ -609,6 +902,10 @@ def send_nkn_dm(destination, payload, tries=None):
         process.stdin.write(json.dumps(cmd) + "\n")
         process.stdin.flush()
         _increment_nkn_counter("out", destination)
+        event_name = ""
+        if isinstance(payload, dict):
+            event_name = str(payload.get("event") or payload.get("type") or "").strip().lower()
+        _record_nkn_traffic("out", destination, payload, event_name=event_name)
         return True, ""
     except Exception as exc:
         return False, str(exc)
@@ -726,11 +1023,22 @@ async function sendDM(client, to, data, retries){
     numSubClients: SUBCLIENTS,
   });
 
-  client.on('connect', () => {
-    sendToPy({ type: 'ready', address: client.addr });
-  });
+  function emitReady() {
+    const address = String(client.addr || '').trim();
+    if (!address) return;
+    sendToPy({ type: 'ready', address });
+  }
 
-  client.on('message', (a, b) => {
+  if (typeof client.onConnect === 'function') {
+    client.onConnect(emitReady);
+  }
+  if (typeof client.on === 'function') {
+    client.on('connect', emitReady);
+  }
+  // Address is deterministic from seed+identifier; emit once immediately when available.
+  emitReady();
+
+  const onMessage = (a, b) => {
     try {
       let src = '';
       let payload = '';
@@ -745,9 +1053,21 @@ async function sendDM(client, to, data, retries){
     } catch (err) {
       sendToPy({ type: 'error', error: String(err) });
     }
-  });
+  };
+  if (typeof client.onMessage === 'function') {
+    client.onMessage(onMessage);
+  }
+  if (typeof client.on === 'function') {
+    client.on('message', onMessage);
+  }
 
-  client.on('wsError', (err) => sendToPy({ type: 'error', error: String(err) }));
+  const onWsError = (err) => sendToPy({ type: 'error', error: String(err) });
+  if (typeof client.onWsError === 'function') {
+    client.onWsError(onWsError);
+  }
+  if (typeof client.on === 'function') {
+    client.on('wsError', onWsError);
+  }
 
   const rl = readline.createInterface({ input: process.stdin });
   rl.on('line', async (line) => {
@@ -1083,13 +1403,33 @@ def _handle_nkn_message(source, payload_text):
 
     event_name = str(payload.get("event") or payload.get("type") or "").strip().lower()
     request_id = str(payload.get("request_id") or "").strip()
+    _record_nkn_traffic("in", source, payload, event_name=event_name)
 
     if request_id:
         if _complete_pending_resolve(request_id, source, payload):
+            _append_activity_log(
+                f"Resolve response received from {source}",
+                category="nkn",
+                direction="in",
+                peer=source,
+                event=event_name or "resolve_tunnels_result",
+                extra={"request_id": request_id},
+            )
             return
 
     if event_name in ("resolve_tunnels", "get_tunnels", "router_info", "router_discover"):
         snapshot = get_service_snapshot(force_refresh=True)
+        endpoint_labels = _collect_endpoint_labels(snapshot.get("resolved", {}))
+        _record_resolve_request_in()
+        _record_endpoint_usage(source, endpoint_labels)
+        _append_activity_log(
+            f"Resolve request from {source} ({len(endpoint_labels)} endpoint(s) served)",
+            category="nkn",
+            direction="in",
+            peer=source,
+            event=event_name,
+            extra={"request_id": request_id, "endpoint_count": len(endpoint_labels)},
+        )
         with nkn_runtime_lock:
             router_address = nkn_runtime["address"]
             router_pubkey_hex = nkn_runtime["pubkey_hex"]
@@ -1104,11 +1444,26 @@ def _handle_nkn_message(source, payload_text):
         ok, err = send_nkn_dm(source, reply, tries=2)
         if not ok:
             log(f"[WARN] Failed to reply to {source}: {err}")
+            _append_activity_log(
+                f"Failed resolve reply to {source}: {err}",
+                category="nkn",
+                direction="out",
+                peer=source,
+                event="resolve_tunnels_result",
+                extra={"request_id": request_id},
+            )
         return
 
     if event_name == "ping":
         with nkn_runtime_lock:
             router_address = nkn_runtime["address"]
+        _append_activity_log(
+            f"Ping from {source}",
+            category="nkn",
+            direction="in",
+            peer=source,
+            event="ping",
+        )
         send_nkn_dm(
             source,
             {
@@ -1138,6 +1493,10 @@ def metrics_update_loop():
         resolved = snapshot.get("resolved", {})
         adapter = resolved.get("adapter", {})
         camera = resolved.get("camera", {})
+        with telemetry_lock:
+            in_bytes = telemetry_state["inbound_bytes"]
+            out_bytes = telemetry_state["outbound_bytes"]
+            latest_sample = telemetry_state["history"][-1] if telemetry_state["history"] else {}
 
         with nkn_runtime_lock:
             ui.update_metric("NKN", "Ready" if nkn_runtime["ready"] else "Waiting")
@@ -1148,6 +1507,10 @@ def metrics_update_loop():
             if nkn_runtime["last_error"]:
                 ui.update_metric("NKN Error", nkn_runtime["last_error"])
 
+        ui.update_metric("In Data", f"{round(in_bytes / 1024, 2)} KiB")
+        ui.update_metric("Out Data", f"{round(out_bytes / 1024, 2)} KiB")
+        ui.update_metric("In Rate", f"{round(float(latest_sample.get('inbound_bps', 0.0)), 2)} B/s")
+        ui.update_metric("Out Rate", f"{round(float(latest_sample.get('outbound_bps', 0.0)), 2)} B/s")
         with pending_resolves_lock:
             ui.update_metric("Pending", str(len(pending_resolves)))
         ui.update_metric("Requests", str(request_counter["value"]))
@@ -1158,6 +1521,468 @@ def metrics_update_loop():
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+ROUTER_DASHBOARD_HTML = """
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>NKN Router Dashboard</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #111;
+        color: #fff;
+        font-family: monospace;
+      }
+      .wrap {
+        max-width: 1280px;
+        margin: 0 auto;
+        padding: 1rem;
+      }
+      .panel {
+        background: #1b1b1b;
+        border: 1px solid #333;
+        border-radius: 10px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .title {
+        margin: 0;
+      }
+      .muted {
+        opacity: 0.85;
+      }
+      .ok { color: #00d08a; }
+      .warn { color: #ffcc66; }
+      .bad { color: #ff5c5c; }
+      code { color: #ffcc66; }
+      .addr {
+        border: 1px solid #444;
+        border-radius: 6px;
+        background: #222;
+        color: #fff;
+        padding: 0.5rem;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      button {
+        background: #222;
+        color: #fff;
+        border: 1px solid #444;
+        border-radius: 6px;
+        padding: 0.5rem;
+        cursor: pointer;
+      }
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.75rem;
+      }
+      .card {
+        background: #1b1b1b;
+        border: 1px solid #333;
+        border-radius: 10px;
+        padding: 0.8rem;
+      }
+      .card .label {
+        opacity: 0.85;
+        font-size: 0.78rem;
+      }
+      .card .value {
+        margin-top: 4px;
+        font-size: 1.05rem;
+      }
+      #rateChart {
+        width: 100%;
+        height: 220px;
+        display: block;
+        border-radius: 8px;
+        border: 1px solid #333;
+        background: #161616;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      pre {
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th, td {
+        text-align: left;
+        padding: 6px;
+        border-bottom: 1px solid #333;
+        vertical-align: top;
+      }
+      th { opacity: 0.85; font-weight: 600; }
+      .small { font-size: 0.82rem; }
+      .logs {
+        max-height: 320px;
+        overflow: auto;
+        background: #161616;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 8px;
+      }
+      .log-row {
+        padding: 4px 0;
+        border-bottom: 1px dotted #333;
+      }
+      .log-row:last-child { border-bottom: 0; }
+      @media (max-width: 980px) {
+        .split { grid-template-columns: 1fr; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="panel">
+        <div class="row">
+          <h2 class="title">Teleop NKN Router Dashboard</h2>
+          <span id="readyState" class="muted">loading...</span>
+          <span class="muted" id="refreshState"></span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <span class="muted">Address:</span>
+          <code id="routerAddress" class="addr">N/A</code>
+          <button id="copyAddressBtn" type="button">Copy Address</button>
+          <button id="refreshNowBtn" type="button">Refresh Now</button>
+          <span class="small muted" id="copyStatus"></span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="cards">
+          <div class="card"><div class="label">Inbound Messages</div><div id="inMsgs" class="value">0</div></div>
+          <div class="card"><div class="label">Outbound Messages</div><div id="outMsgs" class="value">0</div></div>
+          <div class="card"><div class="label">Inbound Data</div><div id="inBytes" class="value">0 B</div></div>
+          <div class="card"><div class="label">Outbound Data</div><div id="outBytes" class="value">0 B</div></div>
+          <div class="card"><div class="label">Inbound Rate</div><div id="inRate" class="value">0 B/s</div></div>
+          <div class="card"><div class="label">Outbound Rate</div><div id="outRate" class="value">0 B/s</div></div>
+          <div class="card"><div class="label">Pending Resolves</div><div id="pendingResolves" class="value">0</div></div>
+          <div class="card"><div class="label">Requests Served</div><div id="requestsServed" class="value">0</div></div>
+          <div class="card"><div class="label">Resolve In</div><div id="resolveIn" class="value">0</div></div>
+          <div class="card"><div class="label">Resolve Out</div><div id="resolveOut" class="value">0</div></div>
+          <div class="card"><div class="label">Resolve Success</div><div id="resolveSuccess" class="value">0</div></div>
+          <div class="card"><div class="label">Resolve Fail</div><div id="resolveFail" class="value">0</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">Utilization</h3>
+          <span class="small muted">Inbound: <span style="color:#00d08a">green</span> | Outbound: <span style="color:#5ca8ff">blue</span></span>
+        </div>
+        <canvas id="rateChart" width="1200" height="220"></canvas>
+      </div>
+
+      <div class="split">
+        <div class="panel">
+          <h3 style="margin-top:0">Per-Address Usage</h3>
+          <div style="overflow:auto; max-height: 360px;">
+            <table>
+              <thead>
+                <tr>
+                  <th>Peer Address</th>
+                  <th>In / Out Msg</th>
+                  <th>In / Out Data</th>
+                  <th>Endpoint Usage</th>
+                  <th>Last Event</th>
+                </tr>
+              </thead>
+              <tbody id="peerRows"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <h3 style="margin-top:0">Resolved Endpoints Snapshot</h3>
+          <pre id="resolvedOut" class="small muted">loading...</pre>
+          <h3>Endpoint Usage Totals</h3>
+          <pre id="endpointTotals" class="small muted">loading...</pre>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h3 style="margin-top:0">NKN + HTTP Activity Log</h3>
+        <div id="logRows" class="logs small muted">loading...</div>
+      </div>
+    </div>
+
+    <script>
+      const state = {
+        history: [],
+        refreshEveryMs: 1000,
+        lastAddress: "",
+      };
+
+      function normalizeAddress(value) {
+        const text = String(value ?? "").trim();
+        return text ? text : "";
+      }
+
+      function esc(value) {
+        return String(value ?? "").replace(/[&<>\"']/g, (m) => (
+          m === "&" ? "&amp;" : m === "<" ? "&lt;" : m === ">" ? "&gt;" : m === "\"" ? "&quot;" : "&#39;"
+        ));
+      }
+
+      function fmtBytes(bytes) {
+        const n = Number(bytes || 0);
+        if (!Number.isFinite(n)) return "0 B";
+        const abs = Math.abs(n);
+        if (abs < 1024) return `${n.toFixed(0)} B`;
+        if (abs < 1024 * 1024) return `${(n / 1024).toFixed(2)} KiB`;
+        if (abs < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MiB`;
+        return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+      }
+
+      function fmtRate(bytesPerSec) {
+        return `${fmtBytes(bytesPerSec)}/s`;
+      }
+
+      function pickRateSample(history) {
+        if (!Array.isArray(history) || !history.length) {
+          return { inbound_bps: 0, outbound_bps: 0 };
+        }
+        return history[history.length - 1] || { inbound_bps: 0, outbound_bps: 0 };
+      }
+
+      function drawChart(history) {
+        const canvas = document.getElementById("rateChart");
+        if (!canvas) return;
+        const ctx = canvas.getContext("2d");
+        const width = canvas.clientWidth || canvas.width;
+        const height = canvas.clientHeight || canvas.height;
+        const dpr = window.devicePixelRatio || 1;
+        canvas.width = Math.floor(width * dpr);
+        canvas.height = Math.floor(height * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        ctx.fillStyle = "#161616";
+        ctx.fillRect(0, 0, width, height);
+
+        const pad = 28;
+        const drawW = width - pad * 2;
+        const drawH = height - pad * 2;
+        ctx.strokeStyle = "#333";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(pad, pad, drawW, drawH);
+
+        if (!Array.isArray(history) || history.length < 2) return;
+
+        let maxRate = 1;
+        for (const p of history) {
+          maxRate = Math.max(maxRate, Number(p.inbound_bps || 0), Number(p.outbound_bps || 0));
+        }
+
+        const drawSeries = (color, key) => {
+          ctx.beginPath();
+          ctx.strokeStyle = color;
+          ctx.lineWidth = 2;
+          for (let i = 0; i < history.length; i += 1) {
+            const x = pad + (i / (history.length - 1)) * drawW;
+            const v = Number(history[i][key] || 0);
+            const y = pad + drawH - (Math.min(maxRate, v) / maxRate) * drawH;
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        };
+
+        drawSeries("#00d08a", "inbound_bps");
+        drawSeries("#5ca8ff", "outbound_bps");
+
+        ctx.fillStyle = "#d0d0d0";
+        ctx.font = "12px monospace";
+        ctx.fillText(`max ${fmtRate(maxRate)}`, pad + 6, pad + 16);
+      }
+
+      async function copyAddress() {
+        const addr = state.lastAddress || "";
+        const status = document.getElementById("copyStatus");
+        if (!addr || addr === "N/A") {
+          status.textContent = "Address not ready";
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(addr);
+          status.textContent = "Copied";
+          return;
+        } catch (_) {}
+
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = addr;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+          status.textContent = "Copied";
+        } catch (err) {
+          status.textContent = `Copy failed: ${err}`;
+        }
+      }
+
+      async function hydrateAddressFromInfo() {
+        try {
+          const res = await fetch(`/nkn/info?t=${Date.now()}`, { cache: "no-store" });
+          const info = await res.json();
+          if (!res.ok || info.status !== "success") {
+            return "";
+          }
+          const address = normalizeAddress(info?.nkn?.address || "");
+          if (address) {
+            state.lastAddress = address;
+            document.getElementById("routerAddress").textContent = address;
+          }
+          return address;
+        } catch (_) {
+          return "";
+        }
+      }
+
+      function renderPeers(peers) {
+        const root = document.getElementById("peerRows");
+        if (!Array.isArray(peers) || !peers.length) {
+          root.innerHTML = "<tr><td colspan='5' class='muted'>No peer activity yet</td></tr>";
+          return;
+        }
+        root.innerHTML = peers.map((peer) => {
+          const endpointHits = peer.endpoint_hits || {};
+          const endpointLine = Object.entries(endpointHits)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 6)
+            .map(([k, v]) => `${esc(k)}:${v}`)
+            .join(" ");
+          return `
+            <tr>
+              <td class="small"><code>${esc(peer.peer || "(unknown)")}</code></td>
+              <td class="small">${Number(peer.inbound_messages || 0)} / ${Number(peer.outbound_messages || 0)}</td>
+              <td class="small">${fmtBytes(peer.inbound_bytes || 0)} / ${fmtBytes(peer.outbound_bytes || 0)}</td>
+              <td class="small">${endpointLine || "<span class='muted'>none</span>"}</td>
+              <td class="small">${esc(peer.last_event || "")}</td>
+            </tr>
+          `;
+        }).join("");
+      }
+
+      function renderLogs(logs) {
+        const root = document.getElementById("logRows");
+        if (!Array.isArray(logs) || !logs.length) {
+          root.textContent = "No activity logs yet";
+          return;
+        }
+        root.innerHTML = logs.slice().reverse().map((row) => {
+          const cat = esc(row.category || "system");
+          const dir = esc(row.direction || "");
+          const peer = esc(row.peer || "");
+          const event = esc(row.event || "");
+          const msg = esc(row.message || "");
+          const prefix = `[${esc(row.time || "")}] [${cat}]`;
+          const suffix = [dir, peer, event].filter(Boolean).join(" ");
+          return `<div class="log-row"><code>${prefix}${suffix ? " " + suffix : ""}</code> ${msg}</div>`;
+        }).join("");
+      }
+
+      function updateDom(data) {
+        const nkn = data.nkn || {};
+        const totals = data.totals || {};
+        const history = Array.isArray(data.history) ? data.history : [];
+        state.history = history;
+        const latest = pickRateSample(history);
+
+        const currentAddress = normalizeAddress(nkn.address || "");
+        state.lastAddress = currentAddress || "N/A";
+        document.getElementById("routerAddress").textContent = state.lastAddress;
+        document.getElementById("readyState").textContent = nkn.ready ? "NKN ready" : "NKN waiting";
+        document.getElementById("readyState").className = nkn.ready ? "ok" : "warn";
+
+        document.getElementById("inMsgs").textContent = Number(totals.inbound_messages || 0);
+        document.getElementById("outMsgs").textContent = Number(totals.outbound_messages || 0);
+        document.getElementById("inBytes").textContent = fmtBytes(totals.inbound_bytes || 0);
+        document.getElementById("outBytes").textContent = fmtBytes(totals.outbound_bytes || 0);
+        document.getElementById("inRate").textContent = fmtRate(latest.inbound_bps || 0);
+        document.getElementById("outRate").textContent = fmtRate(latest.outbound_bps || 0);
+        document.getElementById("pendingResolves").textContent = Number(data.pending_resolves || 0);
+        document.getElementById("requestsServed").textContent = Number(data.requests_served || 0);
+        document.getElementById("resolveIn").textContent = Number(totals.resolve_requests_in || 0);
+        document.getElementById("resolveOut").textContent = Number(totals.resolve_requests_out || 0);
+        document.getElementById("resolveSuccess").textContent = Number(totals.resolve_success_out || 0);
+        document.getElementById("resolveFail").textContent = Number(totals.resolve_fail_out || 0);
+
+        const resolved = (data.snapshot && data.snapshot.resolved) || {};
+        document.getElementById("resolvedOut").textContent = JSON.stringify(resolved, null, 2);
+        document.getElementById("endpointTotals").textContent = JSON.stringify(totals.endpoint_usage_totals || {}, null, 2);
+
+        renderPeers(data.peers || []);
+        renderLogs(data.logs || []);
+        drawChart(history);
+      }
+
+      async function refreshDashboard() {
+        const started = Date.now();
+        const marker = document.getElementById("refreshState");
+        marker.textContent = "updating...";
+        try {
+          const res = await fetch(`/dashboard/data?history=300&logs=150&peers=60&t=${Date.now()}`, { cache: "no-store" });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            marker.textContent = `update failed (${res.status})`;
+            return;
+          }
+          updateDom(data);
+          if (!normalizeAddress(data?.nkn?.address || "")) {
+            await hydrateAddressFromInfo();
+          }
+          marker.textContent = `updated ${new Date().toLocaleTimeString()} (${Date.now() - started} ms)`;
+        } catch (err) {
+          marker.textContent = `update error: ${err}`;
+        }
+      }
+
+      document.getElementById("copyAddressBtn").addEventListener("click", copyAddress);
+      document.getElementById("routerAddress").addEventListener("click", copyAddress);
+      document.getElementById("refreshNowBtn").addEventListener("click", refreshDashboard);
+      window.addEventListener("resize", () => drawChart(state.history));
+      refreshDashboard();
+      setInterval(refreshDashboard, state.refreshEveryMs);
+    </script>
+  </body>
+</html>
+"""
+
+
+def _index_payload():
+    return {
+        "status": "ok",
+        "service": "nkn_router",
+        "routes": {
+            "dashboard": "/dashboard",
+            "dashboard_data": "/dashboard/data",
+            "health": "/health",
+            "nkn_info": "/nkn/info",
+            "nkn_resolve": "/nkn/resolve",
+            "services": "/services/snapshot",
+        },
+    }
+
 
 @app.before_request
 def _count_requests():
@@ -1166,18 +1991,32 @@ def _count_requests():
 
 @app.route("/", methods=["GET"])
 def index():
-    return jsonify(
-        {
-            "status": "ok",
-            "service": "nkn_router",
-            "routes": {
-                "health": "/health",
-                "nkn_info": "/nkn/info",
-                "nkn_resolve": "/nkn/resolve",
-                "services": "/services/snapshot",
-            },
-        }
+    if request.args.get("format", "").lower() == "json":
+        return jsonify(_index_payload())
+    accept = str(request.headers.get("Accept") or "").lower()
+    if "application/json" in accept and "text/html" not in accept:
+        return jsonify(_index_payload())
+    return ROUTER_DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    return ROUTER_DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/dashboard/data", methods=["GET"])
+def dashboard_data():
+    data = _snapshot_dashboard_data(
+        history_limit=request.args.get("history", 240),
+        log_limit=request.args.get("logs", 120),
+        peer_limit=request.args.get("peers", 50),
     )
+    return jsonify(data)
+
+
+@app.route("/api", methods=["GET"])
+def api_index():
+    return jsonify(_index_payload())
 
 
 @app.route("/health", methods=["GET"])
@@ -1187,6 +2026,18 @@ def health():
         nkn_state = dict(nkn_runtime)
     with pending_resolves_lock:
         pending_count = len(pending_resolves)
+    with telemetry_lock:
+        totals = {
+            "inbound_messages": telemetry_state["inbound_messages"],
+            "outbound_messages": telemetry_state["outbound_messages"],
+            "inbound_bytes": telemetry_state["inbound_bytes"],
+            "outbound_bytes": telemetry_state["outbound_bytes"],
+            "resolve_requests_in": telemetry_state["resolve_requests_in"],
+            "resolve_requests_out": telemetry_state["resolve_requests_out"],
+            "resolve_success_out": telemetry_state["resolve_success_out"],
+            "resolve_fail_out": telemetry_state["resolve_fail_out"],
+            "active_peers": len(telemetry_state["peer_usage"]),
+        }
     process_running = False
     with nkn_process_lock:
         if nkn_process and nkn_process.poll() is None:
@@ -1207,6 +2058,7 @@ def health():
                 "inbound_count": nkn_state["inbound_count"],
                 "outbound_count": nkn_state["outbound_count"],
             },
+            "telemetry": totals,
             "snapshot": snapshot,
         }
     )
@@ -1258,6 +2110,13 @@ def nkn_resolve():
         self_address = nkn_runtime["address"]
         ready = nkn_runtime["ready"]
 
+    _append_activity_log(
+        f"HTTP /nkn/resolve request target={target_address or '(local)'} from {request.remote_addr or 'unknown'}",
+        category="http",
+        event="nkn_resolve",
+        extra={"target_address": target_address},
+    )
+
     if not target_address or (self_address and target_address == self_address):
         snapshot = get_service_snapshot(force_refresh=force_refresh)
         return jsonify(
@@ -1271,6 +2130,7 @@ def nkn_resolve():
         )
 
     if not ready:
+        _record_resolve_outcome(False)
         return jsonify({"status": "error", "message": "NKN sidecar not ready"}), 503
 
     pending = _create_pending_resolve(target_address)
@@ -1284,10 +2144,28 @@ def nkn_resolve():
     ok, err = send_nkn_dm(target_address, payload, tries=nkn_settings["dm_retries"])
     if not ok:
         _pop_pending_resolve(pending["request_id"])
+        _record_resolve_outcome(False)
+        _append_activity_log(
+            f"Failed outbound resolve request to {target_address}: {err}",
+            category="nkn",
+            direction="out",
+            peer=target_address,
+            event="resolve_tunnels",
+            extra={"request_id": pending["request_id"]},
+        )
         return jsonify({"status": "error", "message": f"Failed to send DM: {err}"}), 500
 
     if not pending["event"].wait(timeout_seconds):
         _pop_pending_resolve(pending["request_id"])
+        _record_resolve_outcome(False)
+        _append_activity_log(
+            f"Resolve timeout waiting for {target_address}",
+            category="nkn",
+            direction="out",
+            peer=target_address,
+            event="resolve_tunnels",
+            extra={"request_id": pending["request_id"], "timeout_seconds": timeout_seconds},
+        )
         return (
             jsonify(
                 {
@@ -1301,6 +2179,7 @@ def nkn_resolve():
 
     complete = _pop_pending_resolve(pending["request_id"])
     if not complete or not complete.get("response"):
+        _record_resolve_outcome(False)
         return (
             jsonify(
                 {
@@ -1319,6 +2198,17 @@ def nkn_resolve():
         snapshot = {}
 
     resolved = snapshot.get("resolved", {})
+    endpoint_labels = _collect_endpoint_labels(resolved)
+    _record_endpoint_usage(source_address, endpoint_labels)
+    _record_resolve_outcome(True)
+    _append_activity_log(
+        f"Resolved remote tunnels from {source_address} ({len(endpoint_labels)} endpoint(s))",
+        category="nkn",
+        direction="in",
+        peer=source_address,
+        event="resolve_tunnels_result",
+        extra={"request_id": pending["request_id"], "target_address": target_address},
+    )
     return jsonify(
         {
             "status": "success",
@@ -1355,12 +2245,18 @@ def main():
     nkn_settings["auto_install_sdk"] = settings["auto_install_sdk"]
 
     if UI_AVAILABLE:
-        ui = TerminalUI("NKN Router", config_spec=_build_router_config_spec(), config_path=CONFIG_PATH)
+        ui = TerminalUI(
+            "NKN Router",
+            config_spec=_build_router_config_spec(),
+            config_path=CONFIG_PATH,
+            refresh_interval_ms=DEFAULT_UI_REFRESH_INTERVAL_MS,
+        )
         ui.log("Starting NKN Router...")
 
     service_refresh_running.set()
     collect_service_snapshot()
     threading.Thread(target=service_refresh_loop, daemon=True).start()
+    threading.Thread(target=_sample_telemetry_loop, daemon=True).start()
 
     if nkn_settings["enable"]:
         if not start_nkn_sidecar():
