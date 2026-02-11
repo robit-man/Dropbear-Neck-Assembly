@@ -65,8 +65,8 @@ body {
     padding: 2rem;
     max-width: 500px;
     width: 90%;
-    max-height: calc(100% - 2rem);
-    overflow: auto;
+    max-height: calc(100vh - 2rem);
+    overflow-y: auto;
 }
 
 .modal-header {
