@@ -281,6 +281,8 @@ active_capture_handles = {}
 active_capture_handles_lock = Lock()
 camera_rotation_rules = {}
 camera_rotation_rules_lock = Lock()
+camera_enable_rules = {}
+camera_enable_rules_lock = Lock()
 
 imu_state = {}
 imu_lock = Lock()
@@ -369,6 +371,60 @@ def get_feed_rotation_degrees(feed):
         stream_options.get("default_rotation_degrees", DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES),
         DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES,
     )
+
+
+def get_feed_enabled(feed):
+    keys = _rotation_rule_keys_for_feed(feed)
+    with camera_enable_rules_lock:
+        for key in keys:
+            if key in camera_enable_rules:
+                return bool(camera_enable_rules[key])
+    return True
+
+
+def get_feed_enable_rule(feed):
+    keys = _rotation_rule_keys_for_feed(feed)
+    with camera_enable_rules_lock:
+        for key in keys:
+            if key in camera_enable_rules:
+                return key, bool(camera_enable_rules[key])
+    return None, None
+
+
+def _persist_camera_enable_rules():
+    config = load_config()
+    with camera_enable_rules_lock:
+        rules_copy = dict(camera_enable_rules)
+    _set_nested(config, "camera_router.sources.camera_enabled", rules_copy)
+    save_config(config)
+
+
+def set_camera_enable_rule(rule_key, enabled, persist=True):
+    key = str(rule_key or "").strip()
+    if not key:
+        raise ValueError("Missing rule key")
+    normalized = _as_bool(enabled, default=None)
+    if normalized is None:
+        raise ValueError("enabled must be true or false")
+    with camera_enable_rules_lock:
+        camera_enable_rules[key] = bool(normalized)
+    if persist:
+        _persist_camera_enable_rules()
+    return bool(normalized)
+
+
+def clear_camera_enable_rule(rule_key, persist=True):
+    key = str(rule_key or "").strip()
+    if not key:
+        return False
+    changed = False
+    with camera_enable_rules_lock:
+        if key in camera_enable_rules:
+            camera_enable_rules.pop(key, None)
+            changed = True
+    if changed and persist:
+        _persist_camera_enable_rules()
+    return changed
 
 
 def _persist_camera_rotation_rules():
@@ -501,6 +557,26 @@ def _normalize_rotation_rules(value):
         if not rule_key:
             continue
         clean[rule_key] = normalized
+    return clean
+
+
+def _normalize_camera_enable_rules(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    if not isinstance(value, dict):
+        return {}
+    clean = {}
+    for key, rule_value in value.items():
+        normalized = _as_bool(rule_value, default=None)
+        if normalized is None:
+            continue
+        rule_key = str(key or "").strip()
+        if not rule_key:
+            continue
+        clean[rule_key] = bool(normalized)
     return clean
 
 
@@ -807,6 +883,14 @@ def _load_camera_settings(config):
     camera_rotation_degrees = _normalize_rotation_rules(camera_rotation_rules_value)
     promote("camera_router.stream.camera_rotation_degrees", camera_rotation_degrees)
 
+    camera_enabled_value = _read_config_value(
+        config,
+        "camera_router.sources.camera_enabled",
+        {},
+    )
+    camera_enabled = _normalize_camera_enable_rules(camera_enabled_value)
+    promote("camera_router.sources.camera_enabled", camera_enabled)
+
     return {
         "listen_host": listen_host,
         "listen_port": listen_port,
@@ -833,6 +917,7 @@ def _load_camera_settings(config):
         "rotate_clockwise": rotate_clockwise,
         "default_rotation_degrees": default_rotation_degrees,
         "camera_rotation_degrees": camera_rotation_degrees,
+        "camera_enabled": camera_enabled,
     }, changed
 
 
@@ -1247,6 +1332,16 @@ def create_session():
     with sessions_lock:
         sessions[session_key] = {"created_at": now, "last_used": now}
     return session_key
+
+
+def rotate_sessions():
+    now = time.time()
+    next_session_key = secrets.token_urlsafe(32)
+    with sessions_lock:
+        invalidated = len(sessions)
+        sessions.clear()
+        sessions[next_session_key] = {"created_at": now, "last_used": now}
+    return next_session_key, invalidated
 
 
 def validate_session(session_key):
@@ -1669,6 +1764,7 @@ class FrameFeed:
             self.client_count = max(0, self.client_count - 1)
 
     def status(self):
+        configured_enabled_key, configured_enabled = get_feed_enable_rule(self)
         with self.lock:
             return {
                 "id": self.camera_id,
@@ -1688,6 +1784,9 @@ class FrameFeed:
                 "available_profiles": [dict(item) for item in self.available_profiles],
                 "profile_query_error": self.profile_query_error,
                 "rotation_degrees": int(get_feed_rotation_degrees(self)),
+                "enabled": bool(get_feed_enabled(self)),
+                "configured_enabled": configured_enabled if configured_enabled is not None else None,
+                "configured_enabled_key": configured_enabled_key or "",
             }
 
 
@@ -2243,8 +2342,18 @@ def default_camera_worker(feed, device_path):
     open_failures = 0
     open_retry_delay = DEFAULT_DEFAULT_CAMERA_OPEN_RETRY_INITIAL_SECONDS
     last_recovery_attempt_ts = 0.0
+    disabled_reported = False
 
     while service_running.is_set():
+        if not get_feed_enabled(feed):
+            if not disabled_reported:
+                feed.mark_error("Camera disabled by policy")
+                feed.mark_offline()
+                disabled_reported = True
+            time.sleep(0.25)
+            continue
+        disabled_reported = False
+
         requested_profile, requested_revision = feed.get_capture_profile()
         cap, backend_label = open_default_camera(
             device_path,
@@ -2290,6 +2399,12 @@ def default_camera_worker(feed, device_path):
         next_emit = 0.0
         read_failures = 0
         while service_running.is_set():
+            if not get_feed_enabled(feed):
+                feed.mark_error("Camera disabled by policy")
+                feed.mark_offline()
+                log(f"[INFO] Camera disabled; closing capture for {device_path}")
+                break
+
             latest_profile, latest_revision = feed.get_capture_profile()
             if latest_revision != requested_revision:
                 log(f"[INFO] Capture profile updated for {device_path}; restarting camera worker")
@@ -2330,6 +2445,16 @@ def _is_realsense_ir_profile_error(exc):
     )
 
 
+def _any_realsense_feed_enabled(rs_ids):
+    for feed_id in rs_ids.values():
+        if not feed_id:
+            continue
+        feed = get_feed(feed_id)
+        if feed and get_feed_enabled(feed):
+            return True
+    return False
+
+
 def realsense_worker(rs_ids):
     if not REALSENSE_AVAILABLE:
         return
@@ -2339,6 +2464,15 @@ def realsense_worker(rs_ids):
     start_retry_delay = 1.0
 
     while service_running.is_set():
+        if not _any_realsense_feed_enabled(rs_ids):
+            for feed_id in rs_ids.values():
+                feed = get_feed(feed_id)
+                if feed:
+                    feed.mark_error("Camera disabled by policy")
+                    feed.mark_offline()
+            time.sleep(0.25)
+            continue
+
         cap = RealsenseCapture(stream_ir=include_ir)
         try:
             cap.start(max_retries=DEFAULT_REALSENSE_START_ATTEMPTS)
@@ -2369,6 +2503,15 @@ def realsense_worker(rs_ids):
         next_emit = 0.0
         read_failures = 0
         while service_running.is_set():
+            if not _any_realsense_feed_enabled(rs_ids):
+                for feed_id in rs_ids.values():
+                    feed = get_feed(feed_id)
+                    if feed:
+                        feed.mark_error("Camera disabled by policy")
+                        feed.mark_offline()
+                log("[INFO] RealSense feeds disabled; stopping current capture loop")
+                break
+
             try:
                 ok, payload = cap.read(include_ir=include_ir)
             except Exception as exc:
@@ -2402,20 +2545,32 @@ def realsense_worker(rs_ids):
 
             feed = get_feed(rs_ids["color"])
             if feed:
-                feed.publish(color, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                if get_feed_enabled(feed):
+                    feed.publish(color, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                else:
+                    feed.mark_offline()
 
             if source_options["realsense_stream_depth"]:
                 feed = get_feed(rs_ids["depth"])
                 if feed:
-                    feed.publish(depth_vis, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                    if get_feed_enabled(feed):
+                        feed.publish(depth_vis, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                    else:
+                        feed.mark_offline()
 
             if include_ir and source_options["realsense_stream_ir"]:
                 feed = get_feed(rs_ids["ir_left"])
                 if feed:
-                    feed.publish(ir_left, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                    if get_feed_enabled(feed):
+                        feed.publish(ir_left, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                    else:
+                        feed.mark_offline()
                 feed = get_feed(rs_ids["ir_right"])
                 if feed:
-                    feed.publish(ir_right, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                    if get_feed_enabled(feed):
+                        feed.publish(ir_right, stream_options, rotation_degrees=get_feed_rotation_degrees(feed))
+                    else:
+                        feed.mark_offline()
 
         try:
             cap.release()
@@ -2525,6 +2680,9 @@ if WEBRTC_AVAILABLE:
 
         async def recv(self):
             while True:
+                if not get_feed_enabled(self.feed):
+                    await asyncio.sleep(0.05)
+                    continue
                 with self.feed.cond:
                     if self.feed.frame_id == self.last_frame_id:
                         self.feed.cond.wait(timeout=0.25)
@@ -2650,6 +2808,8 @@ def mpegts_stream(feed):
         last_frame_id = -1
         try:
             while not stop_event.is_set():
+                if not get_feed_enabled(feed):
+                    break
                 with feed.cond:
                     if feed.frame_id == last_frame_id:
                         feed.cond.wait(timeout=1.0)
@@ -2682,6 +2842,8 @@ def mpegts_stream(feed):
 
     try:
         while True:
+            if not get_feed_enabled(feed):
+                break
             chunk = process.stdout.read(8192)
             if not chunk:
                 break
@@ -2738,6 +2900,19 @@ INDEX_HTML = """
       .rotation-select { min-width: 90px; }
       .rotation-manifest { margin-top: 0.25rem; }
       .rotation-manifest code { color: #dfe8ff; }
+      .enable-controls { margin-top: 0.45rem; }
+      .enable-manifest { margin-top: 0.25rem; }
+      .camera-enable-btn.enabled { border-color: #397f57; color: #d6ffe7; }
+      .camera-enable-btn.disabled { border-color: #7f4b39; color: #ffe1d6; }
+      .disabled-preview {
+        margin-top: 0.45rem;
+        padding: 0.85rem;
+        border: 1px dashed #555;
+        border-radius: 8px;
+        color: #b8b8b8;
+        background: #151515;
+        text-align: center;
+      }
       .card a, .card a:visited, .card a:hover, .card a:focus {
         color: #fff !important;
         font-weight: 700;
@@ -2774,6 +2949,7 @@ INDEX_HTML = """
           <input id="password" type="password" placeholder="Enter password">
           <button id="connectBtn">Authenticate</button>
           <button id="refreshBtn">Refresh /list</button>
+          <button id="rotateSessionBtn" type="button">Rotate Session Key</button>
         </div>
         <div id="statusLine" class="meta">Not authenticated.</div>
         <div class="meta">Tip: append <code>?session_key=...</code> to <code>/video/&lt;camera_id&gt;</code> for OpenCV clients.</div>
@@ -2822,6 +2998,7 @@ INDEX_HTML = """
       const rotationManifestByCamera = {};
       const rotationManifestFetchInFlight = {};
       const rotationUpdateInFlight = {};
+      const cameraEnableUpdateInFlight = {};
       const ROTATION_VALUES = [0, 90, 180, 270];
       const configState = {
         schema: null,
@@ -3075,6 +3252,47 @@ INDEX_HTML = """
         await Promise.all([refreshList(), loadConfigSchema()]);
       }
 
+      async function rotateSessionKey() {
+        if (!sessionKey) {
+          document.getElementById("statusLine").textContent = "Authenticate first to rotate the session key";
+          return;
+        }
+        const button = document.getElementById("rotateSessionBtn");
+        if (button) button.disabled = true;
+        document.getElementById("statusLine").textContent = "Rotating session key...";
+        try {
+          const res = await fetch(withSession("/session/rotate"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({}),
+          });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            document.getElementById("statusLine").textContent = `Session rotation failed: ${data.message || res.status}`;
+            if (res.status === 401) {
+              sessionKey = "";
+              localStorage.removeItem("camera_router_session_key");
+              setConfigStatus("Session expired; authenticate to edit config.", true);
+            }
+            return;
+          }
+          sessionKey = String(data.session_key || "").trim();
+          if (!sessionKey) {
+            localStorage.removeItem("camera_router_session_key");
+            document.getElementById("statusLine").textContent = "Session rotation failed: missing session key in response";
+            return;
+          }
+          localStorage.setItem("camera_router_session_key", sessionKey);
+          document.getElementById("statusLine").textContent =
+            `Session key rotated. Invalidated ${Number(data.invalidated_sessions) || 0} session(s).`;
+          await refreshList();
+        } catch (err) {
+          document.getElementById("statusLine").textContent = `Session rotation error: ${err}`;
+        } finally {
+          if (button) button.disabled = false;
+        }
+      }
+
       async function refreshHealth() {
         try {
           const res = await fetch("/health");
@@ -3090,6 +3308,12 @@ INDEX_HTML = """
         if (!Number.isFinite(n)) return null;
         const rounded = Math.round(n);
         return ROTATION_VALUES.includes(rounded) ? rounded : null;
+      }
+
+      function normalizeEnabled(value, defaultValue = true) {
+        if (value === null || value === undefined) return !!defaultValue;
+        if (typeof value === "boolean") return value;
+        return asBool(value);
       }
 
       function readRotationManifest(cameraId) {
@@ -3191,6 +3415,17 @@ INDEX_HTML = """
         root.innerHTML = "";
         cameras.forEach((cam) => {
           const cameraId = String(cam.id || "");
+          const enabled = normalizeEnabled(cam.enabled, true);
+          const configuredEnabled = cam.configured_enabled;
+          const configuredEnabledText = configuredEnabled === null || configuredEnabled === undefined
+            ? "default"
+            : (normalizeEnabled(configuredEnabled, true) ? "enabled" : "disabled");
+          const configuredEnabledKey = cam.configured_enabled_key ? String(cam.configured_enabled_key) : "default";
+          const stateText = enabled ? (cam.online ? "online" : "offline") : "disabled";
+          const enableBusy = !!cameraEnableUpdateInFlight[cameraId];
+          const enableButtonLabel = enabled ? "Disable" : "Enable";
+          const enableButtonClass = enabled ? "disabled" : "enabled";
+          const nextEnabled = enabled ? "false" : "true";
           const streamUrl = withSession(cam.video_url);
           const snapUrl = withSession(cam.snapshot_url);
           const manifest = readRotationManifest(cameraId);
@@ -3201,13 +3436,28 @@ INDEX_HTML = """
           }).join("");
           const rotationManifestText = buildRotationManifestText(cam, manifest);
           const rotationBusy = !!rotationUpdateInFlight[cameraId];
+          const previewBlock = enabled
+            ? `<img src="${streamUrl}" alt="${esc(cam.label)}">`
+            : `<div class="disabled-preview">Stream disabled by policy. Enable this camera to resume preview.</div>`;
           const card = document.createElement("div");
           card.className = "card";
           card.innerHTML = `
             <h3 style="margin-top:0">${esc(cam.label)}</h3>
-            <div class="meta ${cam.online ? "ok" : "bad"}">status: ${cam.online ? "online" : "offline"}</div>
+            <div class="meta ${enabled ? (cam.online ? "ok" : "bad") : "bad"}">status: ${esc(stateText)}</div>
             <div class="meta">id: ${esc(cameraId)}</div>
             <div class="meta">fps: ${cam.fps} | kbps: ${cam.kbps} | clients: ${cam.clients}</div>
+            <div class="row enable-controls">
+              <label style="min-width:64px;">camera</label>
+              <button
+                type="button"
+                class="camera-enable-btn ${enableButtonClass}"
+                data-camera-id="${esc(cameraId)}"
+                data-enabled-target="${nextEnabled}"
+                ${enableBusy ? "disabled" : ""}
+              >${enableButtonLabel}</button>
+              <span class="meta">configured: ${esc(configuredEnabledText)}</span>
+            </div>
+            <div class="meta enable-manifest"><code>enable_manifest: effective=${enabled ? "enabled" : "disabled"} | configured=${esc(configuredEnabledText)} | key=${esc(configuredEnabledKey)}</code></div>
             <div class="row rotation-controls">
               <label style="min-width:64px;">rotate</label>
               <select class="rotation-select" data-camera-id="${esc(cameraId)}">${rotationOptions}</select>
@@ -3215,7 +3465,7 @@ INDEX_HTML = """
               <button type="button" class="rotation-clear-btn" data-camera-id="${esc(cameraId)}" ${rotationBusy ? "disabled" : ""}>Default</button>
             </div>
             <div class="meta rotation-manifest"><code>${esc(rotationManifestText)}</code></div>
-            <img src="${streamUrl}" alt="${esc(cam.label)}">
+            ${previewBlock}
             <div class="meta card-links"><a href="${snapUrl}" target="_blank">snapshot</a> | <a href="${streamUrl}" target="_blank">stream</a></div>
           `;
           root.appendChild(card);
@@ -3272,6 +3522,43 @@ INDEX_HTML = """
         }
       }
 
+      async function updateCameraEnabled(cameraId, enabledValue) {
+        const key = String(cameraId || "").trim();
+        if (!key) return;
+        if (!sessionKey) {
+          document.getElementById("statusLine").textContent = "Authenticate first to change camera state";
+          return;
+        }
+        if (cameraEnableUpdateInFlight[key]) return;
+        cameraEnableUpdateInFlight[key] = true;
+        const statusNode = document.getElementById("statusLine");
+        const targetEnabled = normalizeEnabled(enabledValue, true);
+        statusNode.textContent = `${targetEnabled ? "Enabling" : "Disabling"} ${key}...`;
+        try {
+          const res = await fetch(withSession(`/camera_state/${encodeURIComponent(key)}`), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: targetEnabled }),
+          });
+          const data = await res.json();
+          if (!res.ok || data.status !== "success") {
+            statusNode.textContent = `Camera state update failed for ${key}: ${data.message || res.status}`;
+            if (res.status === 401) {
+              sessionKey = "";
+              localStorage.removeItem("camera_router_session_key");
+              setConfigStatus("Session expired; authenticate to edit config.", true);
+            }
+            return;
+          }
+          statusNode.textContent = `Camera ${key} ${data.enabled ? "enabled" : "disabled"}`;
+          await refreshList();
+        } catch (err) {
+          statusNode.textContent = `Camera state update error for ${key}: ${err}`;
+        } finally {
+          cameraEnableUpdateInFlight[key] = false;
+        }
+      }
+
       async function refreshList() {
         if (listRefreshInFlight) return;
         listRefreshInFlight = true;
@@ -3298,7 +3585,8 @@ INDEX_HTML = """
               source: existing && existing.source ? existing.source : "list",
             });
           });
-          document.getElementById("statusLine").textContent = `Loaded ${latestCards.cameras.length} feeds`;
+          const enabledCount = latestCards.cameras.filter((cam) => normalizeEnabled(cam && cam.enabled, true)).length;
+          document.getElementById("statusLine").textContent = `Loaded ${latestCards.cameras.length} feeds (${enabledCount} enabled)`;
           renderCards(latestCards.cameras);
           ensureRotationManifestForCameras(latestCards.cameras);
         } catch (err) {
@@ -3336,6 +3624,7 @@ INDEX_HTML = """
       });
       document.getElementById("connectBtn").addEventListener("click", authenticate);
       document.getElementById("refreshBtn").addEventListener("click", refreshList);
+      document.getElementById("rotateSessionBtn").addEventListener("click", rotateSessionKey);
       document.getElementById("cards").addEventListener("change", (event) => {
         const selectNode = event.target && event.target.closest ? event.target.closest("select.rotation-select") : null;
         if (!selectNode) return;
@@ -3346,6 +3635,15 @@ INDEX_HTML = """
         upsertRotationManifest(cameraId, { selected_rotation_degrees: selectedRotation });
       });
       document.getElementById("cards").addEventListener("click", (event) => {
+        const enableBtn = event.target && event.target.closest ? event.target.closest("button.camera-enable-btn") : null;
+        if (enableBtn) {
+          const cameraId = String(enableBtn.dataset.cameraId || "").trim();
+          const targetRaw = String(enableBtn.dataset.enabledTarget || "").trim().toLowerCase();
+          const targetEnabled = ["1", "true", "yes", "on"].includes(targetRaw);
+          if (!cameraId) return;
+          updateCameraEnabled(cameraId, targetEnabled);
+          return;
+        }
         const applyBtn = event.target && event.target.closest ? event.target.closest("button.rotation-apply-btn") : null;
         if (applyBtn) {
           const cameraId = String(applyBtn.dataset.cameraId || "").trim();
@@ -3397,6 +3695,22 @@ def auth():
         return jsonify({"status": "success", "session_key": session_key, "timeout": SESSION_TIMEOUT})
     log("Authentication failed: invalid password")
     return jsonify({"status": "error", "message": "Invalid password"}), 401
+
+
+@app.route("/session/rotate", methods=["POST"])
+@require_session
+def rotate_session():
+    next_session_key, invalidated = rotate_sessions()
+    log(f"Camera session keys rotated: invalidated={invalidated}")
+    return jsonify(
+        {
+            "status": "success",
+            "message": "Session keys rotated",
+            "session_key": next_session_key,
+            "timeout": SESSION_TIMEOUT,
+            "invalidated_sessions": int(invalidated),
+        }
+    )
 
 
 @app.route("/config/schema", methods=["GET"])
@@ -3477,6 +3791,7 @@ def config_save():
 def health():
     statuses = all_feed_statuses()
     online_count = sum(1 for s in statuses if s["online"])
+    enabled_count = sum(1 for s in statuses if s.get("enabled", True))
     clients = sum(s["clients"] for s in statuses)
     with sessions_lock:
         sessions_active = len(sessions)
@@ -3494,6 +3809,7 @@ def health():
             "tunnel_error": tunnel_last_error,
             "feeds_total": len(statuses),
             "feeds_online": online_count,
+            "feeds_enabled": enabled_count,
             "clients": clients,
             "sessions_active": sessions_active,
             "requests_served": request_count["value"],
@@ -3536,6 +3852,7 @@ def list_cameras():
             "tunnel_url": current_tunnel,
             "routes": {
                 "auth": "/auth",
+                "session_rotate": "/session/rotate",
                 "health": "/health",
                 "list": "/list",
                 "config_schema": "/config/schema",
@@ -3549,8 +3866,111 @@ def list_cameras():
                 "webrtc_offer": "/webrtc/offer/<camera_id>",
                 "webrtc_player": "/webrtc/player/<camera_id>",
                 "stream_options": "/stream_options/<camera_id>",
+                "camera_state": "/camera_state/<camera_id>",
                 "router_info": "/router_info",
             },
+        }
+    )
+
+
+@app.route("/camera_state/<camera_id>", methods=["GET", "POST"])
+@require_session
+def camera_state_for_camera(camera_id):
+    feed = get_feed(camera_id)
+    if not feed:
+        return jsonify({"status": "error", "message": "Camera not found"}), 404
+
+    rule_keys = _rotation_rule_keys_for_feed(feed)
+    configured_enabled_key, configured_enabled = get_feed_enable_rule(feed)
+    effective_enabled = bool(get_feed_enabled(feed))
+
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        if not isinstance(payload, dict):
+            return jsonify({"status": "error", "message": "Payload must be an object"}), 400
+
+        enabled_key_present = False
+        enabled_input = None
+        for candidate in ("enabled", "camera_enabled", "allow"):
+            if candidate in payload:
+                enabled_key_present = True
+                enabled_input = payload.get(candidate)
+                break
+        if not enabled_key_present and isinstance(payload.get("camera"), dict):
+            camera_payload = payload.get("camera")
+            for candidate in ("enabled", "camera_enabled", "allow"):
+                if candidate in camera_payload:
+                    enabled_key_present = True
+                    enabled_input = camera_payload.get(candidate)
+                    break
+        if not enabled_key_present:
+            return jsonify(
+                {
+                    "status": "error",
+                    "message": "No state change requested. Provide enabled=true/false (or null to clear override).",
+                    "camera_id": camera_id,
+                }
+            ), 400
+
+        changed = False
+        if enabled_input is None:
+            changed_keys = [clear_camera_enable_rule(key, persist=False) for key in rule_keys]
+            changed = any(changed_keys)
+            if changed:
+                _persist_camera_enable_rules()
+            configured_enabled_key = None
+            configured_enabled = None
+        else:
+            normalized_enabled = _as_bool(enabled_input, default=None)
+            if normalized_enabled is None:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "message": "enabled must be true or false",
+                        "camera_id": camera_id,
+                    }
+                ), 400
+            normalized_enabled = bool(normalized_enabled)
+            with camera_enable_rules_lock:
+                previous_values = {
+                    key: camera_enable_rules[key] if key in camera_enable_rules else _MISSING
+                    for key in rule_keys
+                }
+            for key in rule_keys:
+                set_camera_enable_rule(key, normalized_enabled, persist=False)
+            _persist_camera_enable_rules()
+            changed = any(
+                previous_values.get(key, _MISSING) is _MISSING
+                or bool(previous_values.get(key)) != normalized_enabled
+                for key in rule_keys
+            )
+            configured_enabled_key = rule_keys[0] if rule_keys else str(camera_id)
+            configured_enabled = normalized_enabled
+
+        effective_enabled = bool(get_feed_enabled(feed))
+        if not effective_enabled:
+            feed.mark_error("Camera disabled by policy")
+            feed.mark_offline()
+
+        return jsonify(
+            {
+                "status": "success",
+                "camera_id": camera_id,
+                "changed": bool(changed),
+                "enabled": effective_enabled,
+                "configured_enabled": configured_enabled if configured_enabled is not None else None,
+                "configured_enabled_key": configured_enabled_key or "",
+                "message": "Camera state updated",
+            }
+        )
+
+    return jsonify(
+        {
+            "status": "success",
+            "camera_id": camera_id,
+            "enabled": effective_enabled,
+            "configured_enabled": configured_enabled if configured_enabled is not None else None,
+            "configured_enabled_key": configured_enabled_key or "",
         }
     )
 
@@ -3749,6 +4169,8 @@ def snapshot(camera_id):
     feed = get_feed(camera_id)
     if not feed:
         return Response(b"Camera not found", status=404)
+    if not get_feed_enabled(feed):
+        return Response(b"Camera disabled", status=403)
     jpeg = feed.snapshot()
     if not jpeg:
         return Response(b"No frame", status=503)
@@ -3766,6 +4188,8 @@ def mjpeg_stream(feed):
     try:
         last_frame_id = -1
         while True:
+            if not get_feed_enabled(feed):
+                break
             with feed.cond:
                 if feed.frame_id == last_frame_id:
                     feed.cond.wait(timeout=1.0)
@@ -3791,6 +4215,8 @@ def video(camera_id):
     feed = get_feed(camera_id)
     if not feed:
         return Response(b"Camera not found", status=404)
+    if not get_feed_enabled(feed):
+        return Response(b"Camera disabled", status=403)
     return Response(
         mjpeg_stream(feed),
         mimetype="multipart/x-mixed-replace; boundary=frame",
@@ -3817,6 +4243,8 @@ def mpegts(camera_id):
     feed = get_feed(camera_id)
     if not feed:
         return Response(b"Camera not found", status=404)
+    if not get_feed_enabled(feed):
+        return jsonify({"status": "error", "message": "Camera disabled", "camera_id": camera_id}), 403
 
     generator = mpegts_stream(feed)
     if generator is None:
@@ -3849,6 +4277,8 @@ def webrtc_offer(camera_id):
     feed = get_feed(camera_id)
     if not feed:
         return jsonify({"status": "error", "message": "Camera not found"}), 404
+    if not get_feed_enabled(feed):
+        return jsonify({"status": "error", "message": "Camera disabled", "camera_id": camera_id}), 403
 
     payload = request.get_json(silent=True) or {}
     offer_sdp = str(payload.get("sdp", "")).strip()
@@ -3870,6 +4300,8 @@ def webrtc_player(camera_id):
     feed = get_feed(camera_id)
     if not feed:
         return Response("Camera not found", status=404, mimetype="text/plain")
+    if not get_feed_enabled(feed):
+        return Response("Camera disabled", status=403, mimetype="text/plain")
 
     html = f"""
 <!doctype html>
@@ -4152,6 +4584,9 @@ def main():
     with camera_rotation_rules_lock:
         camera_rotation_rules.clear()
         camera_rotation_rules.update(settings["camera_rotation_degrees"])
+    with camera_enable_rules_lock:
+        camera_enable_rules.clear()
+        camera_enable_rules.update(settings["camera_enabled"])
     source_options.update(
         {
             "default_cameras_enabled": settings["default_cameras_enabled"],

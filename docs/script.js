@@ -1510,6 +1510,7 @@ const cameraPreview = {
 };
 let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
+let cameraSessionRotateInFlight = false;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
 let pinnedPreviewState = {
@@ -2101,6 +2102,74 @@ async function authenticateCameraRouter() {
   }
 }
 
+async function rotateCameraRouterSessionKey() {
+  if (cameraSessionRotateInFlight) {
+    return;
+  }
+  if (!cameraRouterBaseUrl) {
+    setStreamStatus("Set camera router URL first", true);
+    return;
+  }
+  if (!cameraRouterSessionKey) {
+    setStreamStatus("Authenticate with camera router before rotating session keys", true);
+    return;
+  }
+
+  cameraSessionRotateInFlight = true;
+  const rotateBtn = document.getElementById("cameraRouterRotateSessionBtn");
+  if (rotateBtn) {
+    rotateBtn.disabled = true;
+  }
+  setStreamStatus("Rotating camera session key...");
+
+  try {
+    const response = await cameraRouterFetch(
+      "/session/rotate",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      true
+    );
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      if (response.status === 401) {
+        cameraRouterSessionKey = "";
+        localStorage.removeItem("cameraRouterSessionKey");
+        syncPinnedPreviewSource();
+        if (cameraPreview.desired) {
+          stopCameraPreview();
+        }
+      }
+      setStreamStatus(`Session rotate failed: ${data.message || response.status}`, true);
+      return;
+    }
+
+    const nextSessionKey = String(data.session_key || "").trim();
+    if (!nextSessionKey) {
+      setStreamStatus("Session rotate failed: response missing session key", true);
+      return;
+    }
+
+    cameraRouterSessionKey = nextSessionKey;
+    localStorage.setItem("cameraRouterSessionKey", cameraRouterSessionKey);
+    syncPinnedPreviewSource({ forceRefresh: true });
+    await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    if (cameraPreview.desired) {
+      await startCameraPreview({ autoRestart: true, reason: "session rotated" });
+    }
+    setStreamStatus(`Session key rotated. Invalidated ${Number(data.invalidated_sessions) || 0} session(s).`);
+  } catch (err) {
+    setStreamStatus(`Session rotate error: ${err}`, true);
+  } finally {
+    cameraSessionRotateInFlight = false;
+    if (rotateBtn) {
+      rotateBtn.disabled = false;
+    }
+  }
+}
+
 function renderCameraFeedOptions() {
   const feedSelect = document.getElementById("cameraFeedSelect");
   const feedList = document.getElementById("cameraFeedList");
@@ -2542,6 +2611,7 @@ function setupStreamConfigUi() {
   const passInput = document.getElementById("cameraRouterPasswordInput");
   const authBtn = document.getElementById("cameraRouterAuthBtn");
   const refreshBtn = document.getElementById("cameraRouterRefreshBtn");
+  const rotateSessionBtn = document.getElementById("cameraRouterRotateSessionBtn");
   const startBtn = document.getElementById("cameraPreviewStartBtn");
   const stopBtn = document.getElementById("cameraPreviewStopBtn");
   const profileApplyBtn = document.getElementById("cameraProfileApplyBtn");
@@ -2577,6 +2647,9 @@ function setupStreamConfigUi() {
   }
   if (refreshBtn) {
     refreshBtn.addEventListener("click", refreshCameraFeeds);
+  }
+  if (rotateSessionBtn) {
+    rotateSessionBtn.addEventListener("click", rotateCameraRouterSessionKey);
   }
   if (startBtn) {
     startBtn.addEventListener("click", startCameraPreview);
