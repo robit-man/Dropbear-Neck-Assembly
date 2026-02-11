@@ -1511,6 +1511,7 @@ const cameraPreview = {
 let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
 let cameraSessionRotateInFlight = false;
+let cameraSelectInteractionUntilMs = 0;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
 let pinnedPreviewState = {
@@ -1582,6 +1583,22 @@ function setStreamStatus(message, error = false) {
   }
   statusEl.textContent = message;
   statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function markCameraSelectInteraction(durationMs = 1800) {
+  const safeDuration = Number(durationMs) || 0;
+  const deadline = Date.now() + Math.max(0, safeDuration);
+  if (deadline > cameraSelectInteractionUntilMs) {
+    cameraSelectInteractionUntilMs = deadline;
+  }
+}
+
+function isCameraSelectInteractionActive() {
+  const activeEl = document.activeElement;
+  if (activeEl && (activeEl.id === "cameraFeedSelect" || activeEl.id === "cameraProfileSelect")) {
+    return true;
+  }
+  return Date.now() < cameraSelectInteractionUntilMs;
 }
 
 function loadPinnedPreviewStateFromStorage() {
@@ -2170,7 +2187,8 @@ async function rotateCameraRouterSessionKey() {
   }
 }
 
-function renderCameraFeedOptions() {
+function renderCameraFeedOptions(options = {}) {
+  const preserveSelectors = !!options.preserveSelectors;
   const feedSelect = document.getElementById("cameraFeedSelect");
   const feedList = document.getElementById("cameraFeedList");
   const profileSelect = document.getElementById("cameraProfileSelect");
@@ -2183,16 +2201,25 @@ function renderCameraFeedOptions() {
     cameraPreview.targetCameraId ||
     localStorage.getItem("cameraRouterSelectedFeed") ||
     "";
-  feedSelect.innerHTML = "";
-  cameraRouterFeeds.forEach((feed) => {
-    const opt = document.createElement("option");
-    opt.value = feed.id;
-    opt.textContent = `${feed.label} (${feed.online ? "online" : "offline"})`;
-    feedSelect.appendChild(opt);
-  });
+  if (!preserveSelectors) {
+    feedSelect.innerHTML = "";
+    cameraRouterFeeds.forEach((feed) => {
+      const opt = document.createElement("option");
+      opt.value = feed.id;
+      opt.textContent = `${feed.label} (${feed.online ? "online" : "offline"})`;
+      feedSelect.appendChild(opt);
+    });
+  }
 
   if (cameraRouterFeeds.length > 0) {
-    if (previousValue && cameraRouterFeeds.some((feed) => feed.id === previousValue)) {
+    const hasPrevious = previousValue && cameraRouterFeeds.some((feed) => feed.id === previousValue);
+    if (!preserveSelectors) {
+      if (hasPrevious) {
+        feedSelect.value = previousValue;
+      } else if (!feedSelect.value) {
+        feedSelect.value = cameraRouterFeeds[0].id;
+      }
+    } else if (!feedSelect.value && hasPrevious) {
       feedSelect.value = previousValue;
     } else if (!feedSelect.value) {
       feedSelect.value = cameraRouterFeeds[0].id;
@@ -2209,7 +2236,7 @@ function renderCameraFeedOptions() {
     feedList.appendChild(line);
   });
 
-  if (profileSelect) {
+  if (profileSelect && !preserveSelectors) {
     renderCameraProfileOptions(feedSelect.value || "");
   }
 }
@@ -2396,7 +2423,8 @@ async function refreshCameraFeeds(options = {}) {
 
     cameraRouterFeeds = Array.isArray(data.cameras) ? data.cameras : [];
     cameraRouterProtocols = data.protocols || cameraRouterProtocols;
-    renderCameraFeedOptions();
+    const preserveSelectors = silent && isCameraSelectInteractionActive();
+    renderCameraFeedOptions({ preserveSelectors });
     syncPinnedPreviewSource();
     if (!silent) {
       setStreamStatus(`Loaded ${cameraRouterFeeds.length} feeds`);
@@ -2614,6 +2642,7 @@ function setupStreamConfigUi() {
   const rotateSessionBtn = document.getElementById("cameraRouterRotateSessionBtn");
   const startBtn = document.getElementById("cameraPreviewStartBtn");
   const stopBtn = document.getElementById("cameraPreviewStopBtn");
+  const profileSelect = document.getElementById("cameraProfileSelect");
   const profileApplyBtn = document.getElementById("cameraProfileApplyBtn");
   const modeSelect = document.getElementById("cameraModeSelect");
   const feedSelect = document.getElementById("cameraFeedSelect");
@@ -2661,6 +2690,18 @@ function setupStreamConfigUi() {
     });
   }
   if (feedSelect) {
+    feedSelect.addEventListener("pointerdown", () => {
+      markCameraSelectInteraction(2500);
+    });
+    feedSelect.addEventListener("focus", () => {
+      markCameraSelectInteraction(2500);
+    });
+    feedSelect.addEventListener("keydown", () => {
+      markCameraSelectInteraction(1800);
+    });
+    feedSelect.addEventListener("blur", () => {
+      markCameraSelectInteraction(350);
+    });
     feedSelect.addEventListener("change", () => {
       const nextFeed = feedSelect.value || "";
       localStorage.setItem("cameraRouterSelectedFeed", nextFeed);
@@ -2671,6 +2712,23 @@ function setupStreamConfigUi() {
       } else {
         updateMetrics();
       }
+    });
+  }
+  if (profileSelect) {
+    profileSelect.addEventListener("pointerdown", () => {
+      markCameraSelectInteraction(2500);
+    });
+    profileSelect.addEventListener("focus", () => {
+      markCameraSelectInteraction(2500);
+    });
+    profileSelect.addEventListener("keydown", () => {
+      markCameraSelectInteraction(1800);
+    });
+    profileSelect.addEventListener("blur", () => {
+      markCameraSelectInteraction(350);
+    });
+    profileSelect.addEventListener("change", () => {
+      markCameraSelectInteraction(350);
     });
   }
   if (modeSelect) {
