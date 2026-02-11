@@ -572,13 +572,11 @@ function showConnectionModal() {
     const passInput = document.getElementById('passwordInput');
     const wsInput = document.getElementById('wsUrlInput');
     const httpInput = document.getElementById('httpUrlInput');
-    const routerApiInput = document.getElementById("routerApiBaseInput");
     const routerTargetInput = document.getElementById("routerNknAddressInput");
 
     if (passInput) passInput.value = PASSWORD || '';
     if (wsInput) wsInput.value = WS_URL || '';
     if (httpInput) httpInput.value = HTTP_URL || '';
-    if (routerApiInput) routerApiInput.value = routerApiBaseUrl || '';
     if (routerTargetInput) routerTargetInput.value = routerTargetNknAddress || '';
     ensureBrowserNknIdentity();
     hydrateEndpointInputs("http");
@@ -819,7 +817,6 @@ function parseConnectionFromQuery() {
   // &password=<secret> or &pass=<secret>
   const adapterParam = getFirstParam(["adapter", "server"]);
   const passwordParam = getFirstParam(["password", "pass"]);
-  const routerApiParam = getFirstParam(["router_api", "routerapi"]);
   const routerNknParam = getFirstParam(["router_nkn", "nkn_router", "router_nkn_address"]);
 
   let adapterConfigured = false;
@@ -846,12 +843,6 @@ function parseConnectionFromQuery() {
     passwordProvided = true;
   }
 
-  if (routerApiParam) {
-    try {
-      routerApiBaseUrl = normalizeRouterApiBase(routerApiParam);
-      localStorage.setItem("routerApiBaseUrl", routerApiBaseUrl);
-    } catch (err) {}
-  }
   if (routerNknParam) {
     routerTargetNknAddress = routerNknParam;
     localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
@@ -860,32 +851,23 @@ function parseConnectionFromQuery() {
   return { adapterConfigured, passwordProvided };
 }
 
-const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
-
-function isLocalHostname(hostname) {
-  return LOCALHOST_HOSTNAMES.has(String(hostname || "").trim().toLowerCase());
-}
-
-function isLocalPageContext() {
-  return isLocalHostname((window.location && window.location.hostname) || "");
-}
-
-function isLoopbackRouterApiBase(baseUrl) {
-  try {
-    const parsed = new URL(baseUrl);
-    return isLocalHostname(parsed.hostname || "");
-  } catch (err) {
-    return false;
-  }
-}
-
-const ROUTER_API_DEFAULT_BASE =
-  localStorage.getItem("routerApiBaseUrl") || (isLocalPageContext() ? "http://127.0.0.1:5070" : "");
-let routerApiBaseUrl = ROUTER_API_DEFAULT_BASE;
 let routerTargetNknAddress = localStorage.getItem("routerTargetNknAddress") || "";
 let browserNknSeedHex = localStorage.getItem("browserNknSeedHex") || "";
 let browserNknPubHex = localStorage.getItem("browserNknPubHex") || "";
+const ROUTER_NKN_IDENTIFIER = "web";
+const ROUTER_NKN_SUBCLIENTS = 4;
+const ROUTER_NKN_READY_TIMEOUT_MS = 16000;
+const ROUTER_NKN_RESOLVE_TIMEOUT_MS = 14000;
+const ROUTER_NKN_AUTO_RESOLVE_INTERVAL_MS = 45000;
+
 let nknUiInitialized = false;
+let browserNknClient = null;
+let browserNknClientReady = false;
+let browserNknClientAddress = "";
+let nknClientInitPromise = null;
+let nknResolveInFlight = false;
+let routerAutoResolveTimer = null;
+const pendingNknResolveRequests = new Map();
 
 function bytesToHex(bytes) {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -917,6 +899,15 @@ function setRouterResolveStatus(message, error = false) {
   statusEl.style.color = error ? "#ff4444" : "var(--accent)";
 }
 
+function setBrowserNknSeedStatus(message, error = false) {
+  const statusEl = document.getElementById("browserNknSeedStatus");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = message;
+  statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
 function renderBrowserNknQr(text) {
   const qrEl = document.getElementById("browserNknQr");
   if (!qrEl) {
@@ -939,7 +930,6 @@ function renderBrowserNknQr(text) {
 }
 
 function ensureBrowserNknIdentity() {
-  const statusEl = document.getElementById("browserNknSeedStatus");
   const pubEl = document.getElementById("browserNknPubkey");
 
   if (!/^[0-9a-f]{64}$/i.test(browserNknSeedHex)) {
@@ -947,9 +937,7 @@ function ensureBrowserNknIdentity() {
     localStorage.setItem("browserNknSeedHex", browserNknSeedHex);
   }
 
-  if (statusEl) {
-    statusEl.textContent = "Persisted in local storage";
-  }
+  setBrowserNknSeedStatus("Persisted in local storage");
 
   if (typeof nacl === "undefined" || !nacl.sign || !nacl.sign.keyPair) {
     browserNknPubHex = "";
@@ -987,9 +975,251 @@ function ensureBrowserNknIdentity() {
   }
 }
 
-function normalizeRouterApiBase(rawValue) {
-  const normalized = normalizeOrigin(rawValue || "");
-  return normalized;
+function sleepMs(durationMs) {
+  return new Promise((resolve) => setTimeout(resolve, durationMs));
+}
+
+function isLikelyNknAddress(address) {
+  const value = String(address || "").trim();
+  if (!value) {
+    return false;
+  }
+  return /^[a-zA-Z0-9._-]+\.[0-9a-fA-F]{64}$/.test(value) || /^[0-9a-fA-F]{64}$/.test(value);
+}
+
+function payloadValueToText(payload) {
+  if (typeof payload === "string") {
+    return payload;
+  }
+  if (payload instanceof Uint8Array) {
+    try {
+      return new TextDecoder().decode(payload);
+    } catch (err) {
+      return "";
+    }
+  }
+  if (payload instanceof ArrayBuffer) {
+    try {
+      return new TextDecoder().decode(new Uint8Array(payload));
+    } catch (err) {
+      return "";
+    }
+  }
+  if (payload && payload.buffer instanceof ArrayBuffer && payload.byteLength !== undefined) {
+    try {
+      return new TextDecoder().decode(new Uint8Array(payload.buffer, payload.byteOffset || 0, payload.byteLength || 0));
+    } catch (err) {
+      return "";
+    }
+  }
+  if (payload === null || payload === undefined) {
+    return "";
+  }
+  return String(payload);
+}
+
+function parseIncomingNknMessage(a, b) {
+  let source = "";
+  let payload = "";
+  if (a && typeof a === "object" && Object.prototype.hasOwnProperty.call(a, "payload")) {
+    source = String(a.src || a.from || "");
+    payload = payloadValueToText(a.payload);
+  } else {
+    source = String(a || "");
+    payload = payloadValueToText(b);
+  }
+  return { source, payload };
+}
+
+function extractResolvedFromPayload(data) {
+  return (
+    data.resolved ||
+    (((data.snapshot || {}).resolved) || {}) ||
+    ((((data.reply || {}).snapshot || {}).resolved) || {})
+  );
+}
+
+function buildResolveRequestPayload(requestId) {
+  return {
+    event: "resolve_tunnels",
+    request_id: requestId,
+    from: browserNknClientAddress || browserNknPubHex || "",
+    browser_pubkey_hex: browserNknPubHex || "",
+    timestamp_ms: Date.now(),
+  };
+}
+
+function clearPendingNknResolveRequests(reason) {
+  for (const [requestId, pending] of pendingNknResolveRequests.entries()) {
+    clearTimeout(pending.timeoutHandle);
+    if (typeof pending.reject === "function") {
+      pending.reject(new Error(reason || `Resolve ${requestId} cancelled`));
+    }
+  }
+  pendingNknResolveRequests.clear();
+}
+
+function closeBrowserNknClient() {
+  const client = browserNknClient;
+  browserNknClient = null;
+  browserNknClientReady = false;
+  browserNknClientAddress = "";
+  if (client && typeof client.close === "function") {
+    try {
+      client.close();
+    } catch (err) {}
+  }
+  clearPendingNknResolveRequests("Browser NKN client restarted");
+}
+
+function handleNknResolveMessage(source, data) {
+  const requestId = String((data || {}).request_id || "").trim();
+  if (requestId) {
+    const pending = pendingNknResolveRequests.get(requestId);
+    if (pending) {
+      clearTimeout(pending.timeoutHandle);
+      pendingNknResolveRequests.delete(requestId);
+      pending.resolve({
+        source: String(source || ""),
+        payload: data,
+        resolved: extractResolvedFromPayload(data),
+      });
+      return;
+    }
+  }
+
+  const resolved = extractResolvedFromPayload(data);
+  const applied = applyResolvedEndpoints(resolved);
+  if (applied) {
+    setRouterResolveStatus(`Received endpoint update from ${source || "router"} via NKN`);
+    updateMetrics();
+  }
+}
+
+function handleBrowserNknMessage(a, b) {
+  const incoming = parseIncomingNknMessage(a, b);
+  if (!incoming.payload) {
+    return;
+  }
+
+  let data = null;
+  try {
+    data = JSON.parse(incoming.payload);
+  } catch (err) {
+    return;
+  }
+  if (!data || typeof data !== "object") {
+    return;
+  }
+
+  const eventName = String(data.event || data.type || "").trim().toLowerCase();
+  if (eventName === "resolve_tunnels_result" || eventName === "router_info_result") {
+    handleNknResolveMessage(incoming.source, data);
+  }
+}
+
+function attachBrowserNknClientHandlers(client) {
+  const onReady = () => {
+    browserNknClientReady = true;
+    browserNknClientAddress = String(client.addr || "").trim();
+    const statusBits = ["Browser NKN client ready"];
+    if (browserNknClientAddress) {
+      statusBits.push(browserNknClientAddress);
+    }
+    if (routerTargetNknAddress) {
+      statusBits.push(`target ${routerTargetNknAddress}`);
+    }
+    setRouterResolveStatus(statusBits.join(" | "));
+    setBrowserNknSeedStatus("Connected to NKN");
+  };
+
+  const onWarning = (err) => {
+    const message = err && err.message ? err.message : String(err || "unknown");
+    setRouterResolveStatus(`NKN transport warning: ${message}`, true);
+    setBrowserNknSeedStatus("Connection warning", true);
+  };
+
+  if (typeof client.onConnect === "function") {
+    client.onConnect(onReady);
+  }
+  if (typeof client.onConnectFailed === "function") {
+    client.onConnectFailed(() => {
+      browserNknClientReady = false;
+      setRouterResolveStatus("NKN connect failed", true);
+      setBrowserNknSeedStatus("Connect failed", true);
+    });
+  }
+  if (typeof client.onWsError === "function") {
+    client.onWsError(onWarning);
+  }
+  if (typeof client.onMessage === "function") {
+    client.onMessage(handleBrowserNknMessage);
+  }
+
+  if (typeof client.on === "function") {
+    client.on("connect", onReady);
+    client.on("wsError", onWarning);
+    client.on("message", handleBrowserNknMessage);
+  }
+}
+
+async function ensureBrowserNknClient(options = {}) {
+  const forceReconnect = !!options.forceReconnect;
+  if (forceReconnect) {
+    closeBrowserNknClient();
+  }
+  if (browserNknClient) {
+    return browserNknClient;
+  }
+  if (nknClientInitPromise) {
+    return nknClientInitPromise;
+  }
+
+  nknClientInitPromise = (async () => {
+    ensureBrowserNknIdentity();
+
+    if (typeof nkn === "undefined" || !nkn || typeof nkn.MultiClient !== "function") {
+      throw new Error("nkn-sdk browser library not loaded");
+    }
+    if (!/^[0-9a-f]{64}$/i.test(browserNknSeedHex)) {
+      throw new Error("Browser seed is invalid");
+    }
+
+    browserNknClientReady = false;
+    browserNknClientAddress = "";
+    setRouterResolveStatus("Starting browser NKN client...");
+    setBrowserNknSeedStatus("Connecting to NKN...");
+    const client = new nkn.MultiClient({
+      seed: browserNknSeedHex,
+      identifier: ROUTER_NKN_IDENTIFIER,
+      numSubClients: ROUTER_NKN_SUBCLIENTS,
+    });
+    browserNknClient = client;
+    attachBrowserNknClientHandlers(client);
+
+    if (client && client.addr) {
+      browserNknClientAddress = String(client.addr).trim();
+    }
+    return client;
+  })();
+
+  try {
+    return await nknClientInitPromise;
+  } finally {
+    nknClientInitPromise = null;
+  }
+}
+
+async function waitForBrowserNknReady(timeoutMs = ROUTER_NKN_READY_TIMEOUT_MS) {
+  const timeout = Math.max(500, Number(timeoutMs) || ROUTER_NKN_READY_TIMEOUT_MS);
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (browserNknClientReady) {
+      return true;
+    }
+    await sleepMs(120);
+  }
+  return browserNknClientReady;
 }
 
 function applyResolvedEndpoints(resolved) {
@@ -1044,111 +1274,143 @@ function applyResolvedEndpoints(resolved) {
   return changed;
 }
 
-async function fetchLocalRouterInfo() {
-  if (!routerApiBaseUrl) {
-    setRouterResolveStatus("Router API URL not configured");
-    return null;
-  }
-  if (isLoopbackRouterApiBase(routerApiBaseUrl) && !isLocalPageContext()) {
-    setRouterResolveStatus(
-      "Local router API is not reachable from this hosted page. Use a reachable router URL or run this UI locally."
-    );
-    return null;
+async function requestResolvedEndpointsViaNkn(targetAddress, timeoutMs = ROUTER_NKN_RESOLVE_TIMEOUT_MS) {
+  const client = await ensureBrowserNknClient();
+  const ready = await waitForBrowserNknReady(timeoutMs + 3000);
+  if (!ready) {
+    throw new Error("Browser NKN client is not ready");
   }
 
+  const requestId = `web-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const payload = buildResolveRequestPayload(requestId);
+
+  return new Promise(async (resolve, reject) => {
+    const timeoutHandle = setTimeout(() => {
+      pendingNknResolveRequests.delete(requestId);
+      reject(new Error("Timed out waiting for NKN resolve reply"));
+    }, Math.max(1000, Number(timeoutMs) || ROUTER_NKN_RESOLVE_TIMEOUT_MS));
+
+    pendingNknResolveRequests.set(requestId, { resolve, reject, timeoutHandle });
+    try {
+      await client.send(String(targetAddress || "").trim(), JSON.stringify(payload), { noReply: true });
+    } catch (err) {
+      clearTimeout(timeoutHandle);
+      pendingNknResolveRequests.delete(requestId);
+      reject(err);
+    }
+  });
+}
+
+function startRouterAutoResolveTimer() {
+  if (routerAutoResolveTimer) {
+    clearInterval(routerAutoResolveTimer);
+  }
+  routerAutoResolveTimer = setInterval(() => {
+    resolveEndpointsViaNkn({ auto: true }).catch(() => {});
+  }, ROUTER_NKN_AUTO_RESOLVE_INTERVAL_MS);
+}
+
+async function refreshNknClientInfo(options = {}) {
+  const forceReconnect = !!options.forceReconnect;
+  const resolveNow = !!options.resolveNow;
+  const quiet = !!options.quiet;
+
   try {
-    const response = await fetch(`${routerApiBaseUrl}/nkn/info`, { method: "GET" });
-    const data = await response.json();
-    if (!response.ok || data.status !== "success") {
-      throw new Error(data.message || `HTTP ${response.status}`);
-    }
-    const address = (((data || {}).nkn || {}).address || "").trim();
-    const localReady = Boolean(((data || {}).nkn || {}).ready);
-    const statusBits = [];
-    statusBits.push(localReady ? "Local router ready" : "Local router starting");
-    if (address) {
-      statusBits.push(`Local address: ${address}`);
-      const targetInput = document.getElementById("routerNknAddressInput");
-      if (targetInput && !(targetInput.value || "").trim()) {
-        targetInput.placeholder = address;
+    await ensureBrowserNknClient({ forceReconnect });
+    const ready = await waitForBrowserNknReady();
+    if (!ready) {
+      if (!quiet) {
+        setRouterResolveStatus("Browser NKN client starting...");
       }
+      return false;
     }
-    setRouterResolveStatus(statusBits.join(" | "));
-    return data;
+
+    const statusBits = ["Browser NKN client ready"];
+    if (browserNknClientAddress) {
+      statusBits.push(browserNknClientAddress);
+    }
+    if (routerTargetNknAddress) {
+      statusBits.push(`target ${routerTargetNknAddress}`);
+    }
+    if (!quiet) {
+      setRouterResolveStatus(statusBits.join(" | "));
+    }
+    if (resolveNow && routerTargetNknAddress) {
+      setTimeout(() => {
+        resolveEndpointsViaNkn({ auto: true }).catch(() => {});
+      }, 200);
+    }
+    return true;
   } catch (err) {
-    setRouterResolveStatus(`Router info error: ${err}`, true);
-    return null;
+    setRouterResolveStatus(`Browser NKN init failed: ${err}`, true);
+    setBrowserNknSeedStatus("NKN unavailable", true);
+    return false;
   }
 }
 
-async function resolveEndpointsViaNkn() {
-  const baseInput = document.getElementById("routerApiBaseInput");
+async function resolveEndpointsViaNkn(options = {}) {
+  const auto = !!options.auto;
   const targetInput = document.getElementById("routerNknAddressInput");
-  if (!baseInput || !targetInput) {
+  if (!targetInput) {
     return;
   }
 
-  try {
-    routerApiBaseUrl = normalizeRouterApiBase(baseInput.value);
-  } catch (err) {
-    setRouterResolveStatus(`Invalid router API URL: ${err}`, true);
-    return;
-  }
   routerTargetNknAddress = (targetInput.value || "").trim();
-
-  localStorage.setItem("routerApiBaseUrl", routerApiBaseUrl);
   localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
-  if (!routerApiBaseUrl) {
-    setRouterResolveStatus("Enter router API URL first", true);
-    return;
-  }
-  if (isLoopbackRouterApiBase(routerApiBaseUrl) && !isLocalPageContext()) {
-    setRouterResolveStatus(
-      "Router API points to localhost, which is unreachable from this hosted page",
-      true
-    );
-    return;
-  }
 
   if (!routerTargetNknAddress) {
-    setRouterResolveStatus("No target NKN address set. Resolving local snapshot...");
-  } else {
-    setRouterResolveStatus(`Resolving via NKN target ${routerTargetNknAddress}...`);
+    if (!auto) {
+      setRouterResolveStatus("Enter Router NKN Address first", true);
+    }
+    return false;
+  }
+  if (!isLikelyNknAddress(routerTargetNknAddress)) {
+    if (!auto) {
+      setRouterResolveStatus("Router NKN address format looks invalid", true);
+    }
+    return false;
+  }
+  if (nknResolveInFlight) {
+    if (!auto) {
+      setRouterResolveStatus("NKN resolve already in progress");
+    }
+    return false;
   }
 
+  nknResolveInFlight = true;
   try {
-    const response = await fetch(`${routerApiBaseUrl}/nkn/resolve`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        target_address: routerTargetNknAddress,
-        timeout_seconds: 14,
-        refresh_local: true,
-      }),
-    });
-    const data = await response.json();
-    if (!response.ok || data.status !== "success") {
-      throw new Error(data.message || `HTTP ${response.status}`);
-    }
+    await refreshNknClientInfo({ quiet: true });
+    setRouterResolveStatus(
+      auto
+        ? `Auto-resolving endpoints via NKN (${routerTargetNknAddress})...`
+        : `Resolving endpoints via NKN (${routerTargetNknAddress})...`
+    );
 
-    const resolved =
-      data.resolved ||
-      (((data.snapshot || {}).resolved) || {}) ||
-      ((((data.reply || {}).snapshot || {}).resolved) || {});
-    const applied = applyResolvedEndpoints(resolved);
+    const result = await requestResolvedEndpointsViaNkn(routerTargetNknAddress, ROUTER_NKN_RESOLVE_TIMEOUT_MS);
+    const resolved = result && result.resolved ? result.resolved : {};
+    const applied = applyResolvedEndpoints(resolved || {});
     if (!applied) {
       setRouterResolveStatus("Resolved response received but no endpoints found", true);
-      return;
+      return false;
     }
 
-    setRouterResolveStatus("Endpoints resolved and applied");
+    const source = (result && result.source) ? result.source : routerTargetNknAddress;
+    setRouterResolveStatus(
+      auto
+        ? `Endpoints auto-updated from ${source} at ${new Date().toLocaleTimeString()}`
+        : `Endpoints resolved from ${source} via NKN`
+    );
     const cameraBaseInput = document.getElementById("cameraRouterBaseInput");
     if (cameraBaseInput && cameraRouterBaseUrl) {
       cameraBaseInput.value = cameraRouterBaseUrl;
     }
     updateMetrics();
+    return true;
   } catch (err) {
     setRouterResolveStatus(`NKN resolve failed: ${err}`, true);
+    return false;
+  } finally {
+    nknResolveInFlight = false;
   }
 }
 
@@ -1158,38 +1420,35 @@ function initNknRouterUi() {
   }
   nknUiInitialized = true;
 
-  const baseInput = document.getElementById("routerApiBaseInput");
   const targetInput = document.getElementById("routerNknAddressInput");
   const resolveBtn = document.getElementById("routerResolveBtn");
   const refreshBtn = document.getElementById("routerRefreshInfoBtn");
-
-  if (baseInput) {
-    baseInput.value = routerApiBaseUrl;
-    baseInput.addEventListener("change", () => {
-      try {
-        routerApiBaseUrl = normalizeRouterApiBase(baseInput.value);
-        localStorage.setItem("routerApiBaseUrl", routerApiBaseUrl);
-      } catch (err) {}
-    });
-  }
 
   if (targetInput) {
     targetInput.value = routerTargetNknAddress;
     targetInput.addEventListener("change", () => {
       routerTargetNknAddress = (targetInput.value || "").trim();
       localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+      if (routerTargetNknAddress) {
+        resolveEndpointsViaNkn({ auto: true }).catch(() => {});
+      }
     });
   }
 
   if (resolveBtn) {
-    resolveBtn.addEventListener("click", resolveEndpointsViaNkn);
+    resolveBtn.addEventListener("click", () => {
+      resolveEndpointsViaNkn({ auto: false }).catch(() => {});
+    });
   }
   if (refreshBtn) {
-    refreshBtn.addEventListener("click", fetchLocalRouterInfo);
+    refreshBtn.addEventListener("click", () => {
+      refreshNknClientInfo({ forceReconnect: true, resolveNow: true }).catch(() => {});
+    });
   }
 
   ensureBrowserNknIdentity();
-  fetchLocalRouterInfo();
+  startRouterAutoResolveTimer();
+  refreshNknClientInfo({ resolveNow: true }).catch(() => {});
 }
 
 const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
@@ -2531,10 +2790,10 @@ function decQuatField(field, step) {
 window.addEventListener('load', async () => {
   initializeRouting();
   const initialRoute = getRouteFromLocation();
+  const queryConnection = parseConnectionFromQuery();
   ensureEndpointInputBindings();
   initNknRouterUi();
   setupStreamConfigUi();
-  const queryConnection = parseConnectionFromQuery();
 
   if (queryConnection.adapterConfigured && queryConnection.passwordProvided) {
     logToConsole("[CONNECT] Adapter and password found in query; attempting auto-connect...");
