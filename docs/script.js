@@ -20,7 +20,8 @@ let socket = null;
 let useWS = false;
 let authenticated = false;
 let suppressCommandDispatch = false;
-const ROUTES = new Set(["connect", "home", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
+const ROUTE_ALIASES = Object.freeze({ home: "neck" });
+const ROUTES = new Set(["connect", "neck", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
 
@@ -229,14 +230,20 @@ function resetSliders(options = {}) {
     }
 }
 
+function normalizeRoute(route) {
+    const normalized = String(route || "").trim().toLowerCase();
+    return ROUTE_ALIASES[normalized] || normalized;
+}
+
 function getRouteFromLocation() {
-    const hashRoute = window.location.hash.replace(/^#\/?/, "").trim().toLowerCase();
+    const hashRoute = normalizeRoute(window.location.hash.replace(/^#\/?/, ""));
     if (ROUTES.has(hashRoute)) {
         return hashRoute;
     }
     const pathRoute = window.location.pathname.split("/").filter(Boolean).pop();
-    if (pathRoute && ROUTES.has(pathRoute.toLowerCase())) {
-        return pathRoute.toLowerCase();
+    const normalizedPathRoute = normalizeRoute(pathRoute || "");
+    if (normalizedPathRoute && ROUTES.has(normalizedPathRoute)) {
+        return normalizedPathRoute;
     }
     return "connect";
 }
@@ -278,7 +285,8 @@ function applyRoute(route) {
 }
 
 function setRoute(route, updateHash = true) {
-    const normalized = ROUTES.has(route) ? route : "connect";
+    const normalizedRoute = normalizeRoute(route);
+    const normalized = ROUTES.has(normalizedRoute) ? normalizedRoute : "connect";
     applyRoute(normalized);
     if (updateHash && window.location.hash !== `#${normalized}`) {
         window.location.hash = `#${normalized}`;
@@ -569,18 +577,11 @@ function showConnectionModal() {
     modal.classList.add('active');
     ensureEndpointInputBindings();
     initNknRouterUi();
-    // Pre-fill only saved values, no defaults
-    const passInput = document.getElementById('passwordInput');
-    const wsInput = document.getElementById('wsUrlInput');
-    const httpInput = document.getElementById('httpUrlInput');
     const routerTargetInput = document.getElementById("routerNknAddressInput");
 
-    if (passInput) passInput.value = PASSWORD || '';
-    if (wsInput) wsInput.value = WS_URL || '';
-    if (httpInput) httpInput.value = HTTP_URL || '';
+    syncAdapterConnectionInputs();
     if (routerTargetInput) routerTargetInput.value = routerTargetNknAddress || '';
     ensureBrowserNknIdentity();
-    hydrateEndpointInputs("http");
   }
 }
 
@@ -704,23 +705,69 @@ function buildAdapterEndpoints(baseInput) {
   return { httpUrl, wsUrl, origin: baseOrigin };
 }
 
-function hydrateEndpointInputs(prefer = "http") {
+function setAdapterEndpointPreview(httpUrl = "", wsUrl = "") {
+  const previewEl = document.getElementById("adapterEndpointPreview");
+  if (!previewEl) {
+    return;
+  }
+  const cleanHttp = String(httpUrl || "").trim();
+  const cleanWs = String(wsUrl || "").trim();
+  if (!cleanHttp && !cleanWs) {
+    previewEl.textContent = "No adapter endpoint resolved yet.";
+    return;
+  }
+  previewEl.textContent = `HTTP ${cleanHttp || "(empty)"} | WS ${cleanWs || "(empty)"}`;
+}
+
+function syncAdapterConnectionInputs(options = {}) {
+  const preserveUserInput = !!options.preserveUserInput;
+  const passInput = document.getElementById("passwordInput");
+  const httpInput = document.getElementById("httpUrlInput");
+  const wsInput = document.getElementById("wsUrlInput");
+
+  if (passInput && (!preserveUserInput || !passInput.value.trim())) {
+    passInput.value = PASSWORD || "";
+  }
+  if (httpInput && (!preserveUserInput || !httpInput.value.trim())) {
+    httpInput.value = HTTP_URL || "";
+  }
+  if (wsInput && (!preserveUserInput || !wsInput.value.trim())) {
+    wsInput.value = WS_URL || "";
+  }
+  hydrateEndpointInputs("http");
+}
+
+function hydrateEndpointInputs(prefer = "address") {
+  const adapterAddressInput = document.getElementById("adapterAddressInput");
   const httpInput = document.getElementById("httpUrlInput");
   const wsInput = document.getElementById("wsUrlInput");
   if (!httpInput || !wsInput) {
     return null;
   }
 
+  const addressRaw = adapterAddressInput ? adapterAddressInput.value.trim() : "";
   const httpRaw = httpInput.value.trim();
   const wsRaw = wsInput.value.trim();
-  const source = prefer === "ws" ? (wsRaw || httpRaw) : (httpRaw || wsRaw);
+  let source = "";
+  if (prefer === "ws") {
+    source = wsRaw || httpRaw || addressRaw;
+  } else if (prefer === "http") {
+    source = httpRaw || wsRaw || addressRaw;
+  } else {
+    source = addressRaw || httpRaw || wsRaw;
+  }
   const endpoints = buildAdapterEndpoints(source);
   if (!endpoints) {
+    setAdapterEndpointPreview(httpRaw, wsRaw);
     return null;
   }
 
   httpInput.value = endpoints.httpUrl;
   wsInput.value = endpoints.wsUrl;
+  if (adapterAddressInput) {
+    adapterAddressInput.value = endpoints.origin;
+  }
+  setAdapterEndpointPreview(endpoints.httpUrl, endpoints.wsUrl);
   return endpoints;
 }
 
@@ -729,22 +776,18 @@ function ensureEndpointInputBindings() {
     return;
   }
 
+  const adapterAddressInput = document.getElementById("adapterAddressInput");
   const httpInput = document.getElementById("httpUrlInput");
   const wsInput = document.getElementById("wsUrlInput");
-  if (!httpInput || !wsInput) {
+  if (!adapterAddressInput || !httpInput || !wsInput) {
     return;
   }
 
   endpointInputBindingsInstalled = true;
 
-  const hydrateFromHttp = () => {
-    if (httpInput.value.trim()) {
-      hydrateEndpointInputs("http");
-    }
-  };
-  const hydrateFromWs = () => {
-    if (wsInput.value.trim()) {
-      hydrateEndpointInputs("ws");
+  const hydrateFromAddress = () => {
+    if (adapterAddressInput.value.trim()) {
+      hydrateEndpointInputs("address");
     }
   };
   const scheduleHydrate = (prefer) => {
@@ -754,20 +797,15 @@ function ensureEndpointInputBindings() {
     endpointHydrateTimer = setTimeout(() => hydrateEndpointInputs(prefer), 120);
   };
 
-  httpInput.addEventListener("input", () => scheduleHydrate("http"));
-  httpInput.addEventListener("blur", hydrateFromHttp);
-  httpInput.addEventListener("change", hydrateFromHttp);
-  httpInput.addEventListener("paste", () => setTimeout(hydrateFromHttp, 0));
-
-  wsInput.addEventListener("input", () => scheduleHydrate("ws"));
-  wsInput.addEventListener("blur", hydrateFromWs);
-  wsInput.addEventListener("change", hydrateFromWs);
-  wsInput.addEventListener("paste", () => setTimeout(hydrateFromWs, 0));
+  adapterAddressInput.addEventListener("input", () => scheduleHydrate("address"));
+  adapterAddressInput.addEventListener("blur", hydrateFromAddress);
+  adapterAddressInput.addEventListener("change", hydrateFromAddress);
+  adapterAddressInput.addEventListener("paste", () => setTimeout(hydrateFromAddress, 0));
 }
 
 // Fill HTTP/WS inputs from a provided adapter/tunnel URL.
 function fetchTunnelUrl() {
-  const endpoints = hydrateEndpointInputs("http");
+  const endpoints = hydrateEndpointInputs("address");
   if (!endpoints) {
     alert("Enter a valid adapter URL first (for example https://example.trycloudflare.com).");
     return;
@@ -778,18 +816,23 @@ function fetchTunnelUrl() {
 
 // Handle connection form submission
 async function connectToAdapter() {
-  const password = document.getElementById('passwordInput').value.trim();
+  const passwordInput = document.getElementById('passwordInput');
+  const password = (passwordInput ? passwordInput.value.trim() : "") || PASSWORD;
+  const addressInputEl = document.getElementById("adapterAddressInput");
   const httpInputEl = document.getElementById('httpUrlInput');
   const wsInputEl = document.getElementById('wsUrlInput');
+  const addressRaw = addressInputEl ? addressInputEl.value.trim() : "";
   const httpInputRaw = httpInputEl ? httpInputEl.value.trim() : "";
   const wsInputRaw = wsInputEl ? wsInputEl.value.trim() : "";
 
-  if (!password || (!httpInputRaw && !wsInputRaw)) {
+  if (!password || (!addressRaw && !httpInputRaw && !wsInputRaw && !HTTP_URL && !WS_URL)) {
     alert("Please enter password and adapter URL");
     return;
   }
 
-  const normalized = hydrateEndpointInputs("http");
+  const normalized =
+    hydrateEndpointInputs(addressRaw ? "address" : "http") ||
+    buildAdapterEndpoints(httpInputRaw || wsInputRaw || HTTP_URL || WS_URL);
   if (!normalized) {
     alert("Please enter a valid adapter URL");
     return;
@@ -803,8 +846,11 @@ async function connectToAdapter() {
   // Authenticate first
   const success = await authenticate(password, wsUrl, httpUrl);
   if (success) {
+    PASSWORD = password;
+    localStorage.setItem("password", PASSWORD);
     WS_URL = wsUrl;
     HTTP_URL = httpUrl;
+    syncAdapterConnectionInputs({ preserveUserInput: true });
     const activeRoute = getRouteFromLocation();
 
     // Try WebSocket if URL provided
@@ -1249,8 +1295,8 @@ function applyResolvedEndpoints(resolved) {
   const adapter = resolved.adapter || {};
   const camera = resolved.camera || {};
 
-  const httpCandidate = (adapter.http_endpoint || "").trim();
-  const wsCandidate = (adapter.ws_endpoint || "").trim();
+  const httpCandidate = (adapter.http_endpoint || adapter.local_http_endpoint || "").trim();
+  const wsCandidate = (adapter.ws_endpoint || adapter.local_ws_endpoint || "").trim();
   if (httpCandidate) {
     HTTP_URL = httpCandidate;
     localStorage.setItem("httpUrl", HTTP_URL);
@@ -3113,6 +3159,7 @@ window.addEventListener('load', async () => {
   ensureConnectionModalBindings();
   const queryConnection = parseConnectionFromQuery();
   ensureEndpointInputBindings();
+  syncAdapterConnectionInputs({ preserveUserInput: true });
   initNknRouterUi();
   setupStreamConfigUi();
 

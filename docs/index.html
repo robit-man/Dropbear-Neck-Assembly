@@ -24,32 +24,7 @@
 <body>
   <div id="connectionModal" class="modal active">
     <div class="modal-content">
-      <div class="modal-header">Connect to Neck Adapter</div>
-
-      <div class="modal-section">
-        <h3 style="margin-top:0;">Authentication</h3>
-        <div class="column">
-          <label for="passwordInput">Password:</label>
-          <input type="password" id="passwordInput" placeholder="Enter adapter password">
-        </div>
-      </div>
-
-      <div class="modal-section">
-        <h3 style="margin-top:0;">Adapter Endpoints</h3>
-        <div class="column">
-          <label for="httpUrlInput">HTTP URL:</label>
-          <input type="text" id="httpUrlInput" placeholder="http://127.0.0.1:5001/send_command">
-
-          <label for="wsUrlInput">WebSocket URL (optional):</label>
-          <input type="text" id="wsUrlInput" placeholder="ws://127.0.0.1:5001/ws">
-        </div>
-        <button onclick="fetchTunnelUrl()" style="width:100%;margin-top:0.5rem;">
-          Fill Endpoints From Tunnel URL
-        </button>
-        <p style="font-size:0.85rem;opacity:0.7;margin:0.5rem 0 0 0;">
-          Paste a tunnel/base URL, then click above to derive /send_command and /ws endpoints
-        </p>
-      </div>
+      <div class="modal-header">NKN Router Discovery</div>
 
       <div class="modal-section">
         <h3 style="margin-top:0;">NKN Router Discovery</h3>
@@ -72,10 +47,6 @@
         </div>
         <p id="routerResolveStatus" style="overflow:auto;font-size:0.85rem;opacity:0.85;margin:0.5rem 0 0 0;">NKN idle</p>
       </div>
-
-      <button onclick="connectToAdapter()" class="primary" style="width:100%;padding:1rem;font-size:1.1rem;">
-        Connect
-      </button>
     </div>
   </div>
 
@@ -106,7 +77,7 @@
     <nav>
       <div class="nav-container">
         <a href="#connect" class="nav-link" data-route="connect">Connect</a>
-        <a href="#home" class="nav-link" data-route="home">Home</a>
+        <a href="#neck" class="nav-link" data-route="neck">Neck</a>
         <a href="#direct" class="nav-link" data-route="direct">Direct Motor</a>
         <a href="#euler" class="nav-link" data-route="euler">Euler</a>
         <a href="#head" class="nav-link" data-route="head">Full Head</a>
@@ -125,19 +96,40 @@
     <section class="view" data-view="connect">
       <h1>Robotic Neck Control</h1>
       <div class="control-section">
-        <p>Please configure your connection to the adapter in the settings modal.</p>
+        <p>Use Settings to connect to the NKN router, then open Neck to authenticate with the adapter.</p>
         <p style="opacity:0.7;font-size:0.9rem;">
           The adapter must be running and reachable at the specified URL.
           Default password is "neck2025" unless changed in adapter config.
         </p>
       </div>
       <div class="control-section">
-        <button class="primary" onclick="setRoute('home')">Proceed to Controls -&gt;</button>
+        <button class="primary" onclick="setRoute('neck')">Proceed to Controls -&gt;</button>
       </div>
     </section>
 
-    <section class="view" data-view="home">
+    <section class="view" data-view="neck">
       <h1>Stewart Platform Control Interface</h1>
+      <div class="control-section">
+        <h3 style="margin-top:0;">Neck Adapter Connection</h3>
+        <div class="column">
+          <label for="adapterAddressInput">Adapter Address:</label>
+          <input type="text" id="adapterAddressInput" placeholder="https://example.trycloudflare.com or 127.0.0.1:5001">
+          <input type="hidden" id="httpUrlInput">
+          <input type="hidden" id="wsUrlInput">
+          <p style="font-size:0.85rem;opacity:0.75;margin:0;">
+            Resolved NKN adapter endpoint is injected here and normalized to /send_command + /ws.
+          </p>
+          <p id="adapterEndpointPreview" style="font-size:0.82rem;opacity:0.82;margin:0;">No adapter endpoint resolved yet.</p>
+        </div>
+        <div class="column">
+          <label for="passwordInput">Password:</label>
+          <input type="password" id="passwordInput" placeholder="Enter adapter password">
+        </div>
+        <div class="row">
+          <button onclick="connectToAdapter()" class="primary">Connect Adapter</button>
+          <button onclick="fetchTunnelUrl()">Normalize Address</button>
+        </div>
+      </div>
       <div class="control-section">
         <p>Select a control mode from the navigation menu above.</p>
         <ul style="line-height:1.8;">

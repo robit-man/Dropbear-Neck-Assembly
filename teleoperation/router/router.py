@@ -1328,12 +1328,20 @@ def build_resolved_endpoints(services):
     camera_tunnel = camera_data.get("tunnel", {}) if isinstance(camera_data, dict) else {}
 
     adapter_tunnel_url = str(adapter_tunnel.get("tunnel_url") or "").strip()
+    adapter_local_http = str(adapter_local.get("http_endpoint") or "").strip()
+    adapter_local_ws = str(adapter_local.get("ws_endpoint") or "").strip()
     adapter_http = str(adapter_tunnel.get("http_endpoint") or "").strip()
     adapter_ws = str(adapter_tunnel.get("ws_endpoint") or "").strip()
-    if not adapter_http and adapter_tunnel_url:
-        adapter_http = f"{adapter_tunnel_url}/send_command"
-    if not adapter_ws and adapter_tunnel_url:
-        adapter_ws = f"{adapter_tunnel_url.replace('https://', 'wss://')}/ws"
+    if not adapter_http:
+        if adapter_tunnel_url:
+            adapter_http = f"{adapter_tunnel_url}/send_command"
+        else:
+            adapter_http = adapter_local_http
+    if not adapter_ws:
+        if adapter_tunnel_url:
+            adapter_ws = f"{adapter_tunnel_url.replace('https://', 'wss://')}/ws"
+        else:
+            adapter_ws = adapter_local_ws
 
     camera_tunnel_url = str(camera_tunnel.get("tunnel_url") or "").strip()
     camera_base = camera_tunnel_url
@@ -1345,8 +1353,8 @@ def build_resolved_endpoints(services):
             "tunnel_url": adapter_tunnel_url,
             "http_endpoint": adapter_http,
             "ws_endpoint": adapter_ws,
-            "local_http_endpoint": str(adapter_local.get("http_endpoint") or "").strip(),
-            "local_ws_endpoint": str(adapter_local.get("ws_endpoint") or "").strip(),
+            "local_http_endpoint": adapter_local_http,
+            "local_ws_endpoint": adapter_local_ws,
         },
         "camera": {
             "tunnel_url": camera_tunnel_url,
