@@ -1095,12 +1095,164 @@ function parseIncomingNknMessage(a, b) {
   return { source, payload };
 }
 
+function asObject(value) {
+  return (value && typeof value === "object") ? value : {};
+}
+
+function pickFirstNonEmptyString(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (text) {
+      return text;
+    }
+  }
+  return "";
+}
+
+function getServiceData(root, serviceName) {
+  const source = asObject(root);
+  const services = asObject(source.services);
+  const entry = asObject(services[serviceName]);
+  const data = asObject(entry.data);
+  if (Object.keys(data).length > 0) {
+    return data;
+  }
+  return entry;
+}
+
 function extractResolvedFromPayload(data) {
-  return (
-    data.resolved ||
-    (((data.snapshot || {}).resolved) || {}) ||
-    ((((data.reply || {}).snapshot || {}).resolved) || {})
+  const source = asObject(data);
+  const snapshot = asObject(source.snapshot);
+  const reply = asObject(source.reply);
+  const replySnapshot = asObject(reply.snapshot);
+  const resolved = asObject(
+    source.resolved ||
+    snapshot.resolved ||
+    replySnapshot.resolved ||
+    {}
   );
+
+  const resolvedAdapter = asObject(resolved.adapter);
+  const resolvedCamera = asObject(resolved.camera);
+
+  const adapterServiceCandidates = [
+    getServiceData(snapshot, "adapter"),
+    getServiceData(replySnapshot, "adapter"),
+    getServiceData(source, "adapter"),
+  ];
+  const cameraServiceCandidates = [
+    getServiceData(snapshot, "camera"),
+    getServiceData(replySnapshot, "camera"),
+    getServiceData(source, "camera"),
+  ];
+
+  const adapterService = {};
+  for (const candidate of adapterServiceCandidates) {
+    const service = asObject(candidate);
+    const local = asObject(service.local);
+    const tunnel = asObject(service.tunnel);
+    adapterService.tunnel_url = pickFirstNonEmptyString(adapterService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
+    adapterService.http_endpoint = pickFirstNonEmptyString(
+      adapterService.http_endpoint,
+      service.http_endpoint,
+      tunnel.http_endpoint,
+      local.http_endpoint
+    );
+    adapterService.ws_endpoint = pickFirstNonEmptyString(
+      adapterService.ws_endpoint,
+      service.ws_endpoint,
+      tunnel.ws_endpoint,
+      local.ws_endpoint
+    );
+    adapterService.local_http_endpoint = pickFirstNonEmptyString(
+      adapterService.local_http_endpoint,
+      service.local_http_endpoint,
+      local.http_endpoint
+    );
+    adapterService.local_ws_endpoint = pickFirstNonEmptyString(
+      adapterService.local_ws_endpoint,
+      service.local_ws_endpoint,
+      local.ws_endpoint
+    );
+    adapterService.base_url = pickFirstNonEmptyString(adapterService.base_url, service.base_url, local.base_url);
+    if (!adapterService.local && Object.keys(local).length > 0) {
+      adapterService.local = local;
+    }
+    if (!adapterService.tunnel && Object.keys(tunnel).length > 0) {
+      adapterService.tunnel = tunnel;
+    }
+  }
+
+  const cameraService = {};
+  for (const candidate of cameraServiceCandidates) {
+    const service = asObject(candidate);
+    const local = asObject(service.local);
+    const tunnel = asObject(service.tunnel);
+    cameraService.tunnel_url = pickFirstNonEmptyString(cameraService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
+    cameraService.base_url = pickFirstNonEmptyString(
+      cameraService.base_url,
+      service.base_url,
+      tunnel.tunnel_url,
+      local.base_url
+    );
+    cameraService.list_url = pickFirstNonEmptyString(cameraService.list_url, service.list_url, tunnel.list_url, local.list_url);
+    cameraService.health_url = pickFirstNonEmptyString(
+      cameraService.health_url,
+      service.health_url,
+      tunnel.health_url,
+      local.health_url
+    );
+    cameraService.local_base_url = pickFirstNonEmptyString(cameraService.local_base_url, service.local_base_url, local.base_url);
+    if (!cameraService.local && Object.keys(local).length > 0) {
+      cameraService.local = local;
+    }
+    if (!cameraService.tunnel && Object.keys(tunnel).length > 0) {
+      cameraService.tunnel = tunnel;
+    }
+  }
+
+  return {
+    ...resolved,
+    adapter: {
+      ...resolvedAdapter,
+      tunnel_url: pickFirstNonEmptyString(resolvedAdapter.tunnel_url, adapterService.tunnel_url),
+      http_endpoint: pickFirstNonEmptyString(
+        resolvedAdapter.http_endpoint,
+        resolvedAdapter.local_http_endpoint,
+        adapterService.http_endpoint,
+        adapterService.local_http_endpoint
+      ),
+      ws_endpoint: pickFirstNonEmptyString(
+        resolvedAdapter.ws_endpoint,
+        resolvedAdapter.local_ws_endpoint,
+        adapterService.ws_endpoint,
+        adapterService.local_ws_endpoint
+      ),
+      local_http_endpoint: pickFirstNonEmptyString(
+        resolvedAdapter.local_http_endpoint,
+        adapterService.local_http_endpoint,
+        adapterService.http_endpoint
+      ),
+      local_ws_endpoint: pickFirstNonEmptyString(
+        resolvedAdapter.local_ws_endpoint,
+        adapterService.local_ws_endpoint,
+        adapterService.ws_endpoint
+      ),
+      base_url: pickFirstNonEmptyString(resolvedAdapter.base_url, adapterService.base_url),
+      local: Object.keys(asObject(resolvedAdapter.local)).length > 0 ? asObject(resolvedAdapter.local) : asObject(adapterService.local),
+      tunnel: Object.keys(asObject(resolvedAdapter.tunnel)).length > 0 ? asObject(resolvedAdapter.tunnel) : asObject(adapterService.tunnel),
+    },
+    camera: {
+      ...resolvedCamera,
+      tunnel_url: pickFirstNonEmptyString(resolvedCamera.tunnel_url, cameraService.tunnel_url),
+      base_url: pickFirstNonEmptyString(resolvedCamera.base_url, cameraService.base_url),
+      list_url: pickFirstNonEmptyString(resolvedCamera.list_url, cameraService.list_url),
+      health_url: pickFirstNonEmptyString(resolvedCamera.health_url, cameraService.health_url),
+      local_base_url: pickFirstNonEmptyString(resolvedCamera.local_base_url, cameraService.local_base_url),
+      local: Object.keys(asObject(resolvedCamera.local)).length > 0 ? asObject(resolvedCamera.local) : asObject(cameraService.local),
+      tunnel: Object.keys(asObject(resolvedCamera.tunnel)).length > 0 ? asObject(resolvedCamera.tunnel) : asObject(cameraService.tunnel),
+    },
+  };
 }
 
 function buildResolveRequestPayload(requestId) {
