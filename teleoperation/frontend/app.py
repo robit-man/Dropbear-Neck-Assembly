@@ -3032,4 +3032,4 @@ if __name__ == "__main__":
             log("Shutting down...")
     else:
         # Run Flask normally without UI
-        app.run(host=frontend_host, port=frontend_port, debug=True)
+        app.run(host=frontend_host, port=frontend_port, debug=False, use_reloader=False)

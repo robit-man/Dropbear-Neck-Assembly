@@ -72,6 +72,7 @@ STOP_SIGTERM_GRACE_SECONDS = 10.0
 STOP_SIGKILL_GRACE_SECONDS = 14.0
 RESTART_BACKOFF_INITIAL_SECONDS = 1.0
 RESTART_BACKOFF_MAX_SECONDS = 20.0
+LAUNCH_GRACE_SECONDS = 3.0
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,7 @@ class ServiceRuntime:
     stop_requested_at: float = 0.0
     next_restart_at: float = 0.0
     restart_backoff_seconds: float = RESTART_BACKOFF_INITIAL_SECONDS
+    launch_grace_until: float = 0.0
     started_at: float = 0.0
     stopped_at: float = 0.0
     last_event: str = ""
@@ -135,6 +137,7 @@ class WatchdogManager:
         self._selected_index = 0
         self._run_started_at = time.time()
         self._instance_lock_acquired = False
+        self._instance_lock_handle = None
 
         self._os_name = platform.system().lower()
         self._terminal_emulator = self._detect_terminal_emulator()
@@ -266,24 +269,91 @@ class WatchdogManager:
             pass
 
     def _acquire_instance_lock(self):
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        handle = None
         existing_pid = None
-        if self.lock_file.exists():
-            try:
-                existing_pid = int(self.lock_file.read_text(encoding="utf-8").strip())
-            except Exception:
-                existing_pid = None
-        if existing_pid and existing_pid != os.getpid() and self._is_pid_running(existing_pid):
-            raise RuntimeError(f"Another watchdog instance is already running (pid {existing_pid})")
         try:
-            self.lock_file.write_text(str(os.getpid()), encoding="utf-8")
+            handle = open(self.lock_file, "a+", encoding="utf-8")
+            handle.seek(0)
+
+            if os.name == "nt":
+                import msvcrt
+
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    handle.seek(0)
+                    raw = handle.read().strip()
+                    try:
+                        existing_pid = int(raw) if raw else None
+                    except Exception:
+                        existing_pid = None
+                    suffix = f" (pid {existing_pid})" if existing_pid else ""
+                    raise RuntimeError(
+                        f"Another watchdog instance is already running{suffix}"
+                    )
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    handle.seek(0)
+                    raw = handle.read().strip()
+                    try:
+                        existing_pid = int(raw) if raw else None
+                    except Exception:
+                        existing_pid = None
+                    suffix = f" (pid {existing_pid})" if existing_pid else ""
+                    raise RuntimeError(
+                        f"Another watchdog instance is already running{suffix}"
+                    )
+
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()))
+            handle.flush()
             self._instance_lock_acquired = True
+            self._instance_lock_handle = handle
+        except RuntimeError:
+            if handle:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            raise
         except Exception as exc:
+            if handle:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
             raise RuntimeError(f"Failed to acquire watchdog lock: {exc}") from exc
 
     def _release_instance_lock(self):
         if not self._instance_lock_acquired:
             return
         try:
+            handle = self._instance_lock_handle
+            if handle:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                except Exception:
+                    pass
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+                self._instance_lock_handle = None
+
             if not self.lock_file.exists():
                 return
             raw = self.lock_file.read_text(encoding="utf-8").strip()
@@ -380,6 +450,15 @@ class WatchdogManager:
     # ------------------------------------------------------------------
     # Launch helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _is_process_handle_running(process: Optional[subprocess.Popen]) -> bool:
+        if process is None:
+            return False
+        try:
+            return process.poll() is None
+        except Exception:
+            return False
+
     def _detect_terminal_emulator(self) -> str:
         if self._os_name == "windows":
             return "windows-console"
@@ -453,30 +532,32 @@ class WatchdogManager:
             runtime.desired_enabled = False
             return
 
+        child_env = os.environ.copy()
+        # app.py already supervises restarts; disable nested camera self-supervision.
+        if svc.service_id == "camera":
+            child_env["CAMERA_ROUTE_SUPERVISE"] = "0"
+
         if self._os_name == "windows":
             creationflags = (
                 getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
             try:
-                comspec = os.environ.get("COMSPEC", "cmd.exe")
-                cmdline = subprocess.list2cmdline(
-                    [sys.executable, str(script_path)] + list(svc.args)
-                )
                 proc = subprocess.Popen(
-                    [comspec, "/c", cmdline],
+                    [sys.executable, str(script_path)] + list(svc.args),
                     cwd=str(svc.working_dir(self.base_dir)),
                     creationflags=creationflags,
+                    env=child_env,
                 )
                 runtime.terminal_process = proc
                 runtime.pid = proc.pid
-                runtime.state = "running"
+                runtime.state = "starting"
+                runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
                 runtime.started_at = now
-                runtime.start_count += 1
                 runtime.stop_stage = 0
                 runtime.stop_requested_at = 0.0
                 runtime.last_error = ""
-                runtime.last_event = f"Started (pid {proc.pid})"
+                runtime.last_event = f"Launching (pid {proc.pid})"
                 runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
                 self._write_pid_file(svc, proc.pid)
                 self._log(f"[START] {svc.label} pid={proc.pid}")
@@ -485,6 +566,7 @@ class WatchdogManager:
                 runtime.state = "error"
                 runtime.last_error = str(exc)
                 runtime.last_event = "Launch failed"
+                runtime.launch_grace_until = 0.0
                 runtime.next_restart_at = now + runtime.restart_backoff_seconds
                 runtime.restart_backoff_seconds = min(
                     RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
@@ -500,6 +582,7 @@ class WatchdogManager:
                 proc = subprocess.Popen(["osascript", "-e", apple_script])
                 runtime.terminal_process = proc
                 runtime.state = "starting"
+                runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
                 runtime.started_at = 0.0
                 runtime.stop_stage = 0
                 runtime.stop_requested_at = 0.0
@@ -511,6 +594,7 @@ class WatchdogManager:
                 runtime.state = "error"
                 runtime.last_error = str(exc)
                 runtime.last_event = "Launch failed"
+                runtime.launch_grace_until = 0.0
                 runtime.next_restart_at = now + runtime.restart_backoff_seconds
                 runtime.restart_backoff_seconds = min(
                     RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
@@ -524,6 +608,7 @@ class WatchdogManager:
             runtime.state = "error"
             runtime.last_error = "No terminal emulator found"
             runtime.last_event = "Launch failed"
+            runtime.launch_grace_until = 0.0
             runtime.desired_enabled = False
             self._log(f"[ERROR] {svc.label}: no terminal emulator found")
             return
@@ -532,6 +617,7 @@ class WatchdogManager:
             proc = subprocess.Popen(terminal_cmd, cwd=str(self.base_dir))
             runtime.terminal_process = proc
             runtime.state = "starting"
+            runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
             runtime.started_at = 0.0
             runtime.stop_stage = 0
             runtime.stop_requested_at = 0.0
@@ -542,6 +628,7 @@ class WatchdogManager:
             runtime.state = "error"
             runtime.last_error = str(exc)
             runtime.last_event = "Launch failed"
+            runtime.launch_grace_until = 0.0
             runtime.next_restart_at = now + runtime.restart_backoff_seconds
             runtime.restart_backoff_seconds = min(
                 RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
@@ -552,8 +639,14 @@ class WatchdogManager:
     # Runtime synchronization
     # ------------------------------------------------------------------
     def _refresh_pid_state(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
+        if runtime.terminal_process and runtime.terminal_process.poll() is not None:
+            runtime.terminal_process = None
+
         if runtime.pid and not self._is_pid_running(runtime.pid):
             runtime.pid = None
+
+        if runtime.pid is None and self._is_process_handle_running(runtime.terminal_process):
+            runtime.pid = int(runtime.terminal_process.pid)
 
         if runtime.pid is None:
             pid_from_file = self._read_pid_file(svc)
@@ -566,10 +659,22 @@ class WatchdogManager:
                     runtime.start_count += 1
                     runtime.last_event = f"Running (pid {pid_from_file})"
                     runtime.last_error = ""
+                    runtime.launch_grace_until = 0.0
                     runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
                     self._log(f"[RUNNING] {svc.label} pid={pid_from_file}")
             elif pid_from_file:
                 self._remove_pid_file(svc)
+        elif runtime.state in ("starting", "running"):
+            if runtime.started_at <= 0:
+                runtime.started_at = now
+            if runtime.state != "running":
+                runtime.state = "running"
+                runtime.start_count += 1
+                runtime.last_event = f"Running (pid {runtime.pid})"
+                runtime.last_error = ""
+                runtime.launch_grace_until = 0.0
+                runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
+                self._log(f"[RUNNING] {svc.label} pid={runtime.pid}")
 
     def _begin_stop(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
         runtime.state = "stopping"
@@ -590,11 +695,15 @@ class WatchdogManager:
     def _handle_stop_escalation(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
         if runtime.state != "stopping":
             return
-        if not runtime.pid or not self._is_pid_running(runtime.pid):
+        terminal_running = self._is_process_handle_running(runtime.terminal_process)
+        pid_running = bool(runtime.pid and self._is_pid_running(runtime.pid))
+        if not pid_running and not terminal_running:
             runtime.state = "stopped"
             runtime.pid = None
+            runtime.terminal_process = None
             runtime.stop_stage = 0
             runtime.stop_requested_at = 0.0
+            runtime.launch_grace_until = 0.0
             runtime.started_at = 0.0
             runtime.stopped_at = now
             runtime.last_error = ""
@@ -603,6 +712,9 @@ class WatchdogManager:
             self._remove_pid_file(svc)
             self._log(f"[STOPPED] {svc.label}")
             return
+
+        if not runtime.pid and terminal_running and runtime.terminal_process:
+            runtime.pid = int(runtime.terminal_process.pid)
 
         elapsed = now - runtime.stop_requested_at
         if runtime.stop_stage == 1 and elapsed >= STOP_SIGINT_GRACE_SECONDS:
@@ -629,12 +741,17 @@ class WatchdogManager:
             return
 
         self._refresh_pid_state(svc, runtime, now)
-        running = bool(runtime.pid and self._is_pid_running(runtime.pid))
+        terminal_running = self._is_process_handle_running(runtime.terminal_process)
+        if not runtime.pid and terminal_running and runtime.terminal_process:
+            runtime.pid = int(runtime.terminal_process.pid)
+        running = bool((runtime.pid and self._is_pid_running(runtime.pid)) or terminal_running)
 
         if not running and runtime.state == "running":
+            runtime.terminal_process = None
             runtime.pid = None
             runtime.started_at = 0.0
             runtime.stopped_at = now
+            runtime.launch_grace_until = 0.0
             self._remove_pid_file(svc)
             if runtime.desired_enabled:
                 runtime.state = "error"
@@ -673,8 +790,12 @@ class WatchdogManager:
         if running:
             runtime.state = "running"
             runtime.last_error = ""
+            runtime.launch_grace_until = 0.0
             runtime.next_restart_at = 0.0
             runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
+            return
+
+        if runtime.state == "starting" and runtime.launch_grace_until > now:
             return
 
         if runtime.state == "starting":
@@ -683,6 +804,7 @@ class WatchdogManager:
                 runtime.state = "error"
                 runtime.last_error = f"Terminal exited ({code})"
                 runtime.last_event = "Launch failed"
+                runtime.launch_grace_until = 0.0
                 runtime.next_restart_at = now + runtime.restart_backoff_seconds
                 runtime.restart_backoff_seconds = min(
                     RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
