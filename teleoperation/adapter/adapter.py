@@ -1051,83 +1051,7 @@ def main():
         log("Authentication failed: invalid password")
         return jsonify({"status": "error", "message": "Invalid password"}), 401
 
-    @app.route("/tunnel_info", methods=["GET"])
-    def get_tunnel_info():
-        """Get the Cloudflare Tunnel URL if available."""
-        local_base = f"http://127.0.0.1:{listen_port}"
-        local_http = f"{local_base}{listen_route}"
-        local_ws = f"ws://127.0.0.1:{listen_port}/ws"
-        process_running = tunnel_process is not None and tunnel_process.poll() is None
-        with tunnel_url_lock:
-            current_tunnel = tunnel_url if process_running else None
-            stale_tunnel = tunnel_url if (tunnel_url and not process_running) else None
-            current_error = tunnel_last_error
-
-            if current_tunnel:
-                return jsonify(
-                    {
-                        "status": "success",
-                        "running": process_running,
-                        "tunnel_url": current_tunnel,
-                        "http_endpoint": f"{current_tunnel}{listen_route}",
-                        "ws_endpoint": f"{current_tunnel.replace('https://', 'wss://')}/ws",
-                        "local_base_url": local_base,
-                        "local_http_endpoint": local_http,
-                        "local_ws_endpoint": local_ws,
-                        "message": "Tunnel URL available",
-                    }
-                )
-
-            if stale_tunnel:
-                return jsonify(
-                    {
-                        "status": "error",
-                        "running": process_running,
-                        "tunnel_url": "",
-                        "http_endpoint": "",
-                        "ws_endpoint": "",
-                        "stale_tunnel_url": stale_tunnel,
-                        "local_base_url": local_base,
-                        "local_http_endpoint": local_http,
-                        "local_ws_endpoint": local_ws,
-                        "error": current_error or "Tunnel URL expired",
-                        "message": "Tunnel process is not running; URL is stale",
-                    }
-                )
-
-            if current_error:
-                return jsonify(
-                    {
-                        "status": "error",
-                        "running": process_running,
-                        "tunnel_url": "",
-                        "http_endpoint": "",
-                        "ws_endpoint": "",
-                        "local_base_url": local_base,
-                        "local_http_endpoint": local_http,
-                        "local_ws_endpoint": local_ws,
-                        "error": current_error,
-                        "message": "Tunnel failed to start",
-                    }
-                )
-
-            return jsonify(
-                {
-                    "status": "pending",
-                    "running": process_running,
-                    "tunnel_url": "",
-                    "http_endpoint": "",
-                    "ws_endpoint": "",
-                    "local_base_url": local_base,
-                    "local_http_endpoint": local_http,
-                    "local_ws_endpoint": local_ws,
-                    "message": "Tunnel URL not yet available",
-                }
-            )
-
-    @app.route("/router_info", methods=["GET"])
-    def router_info():
-        """Discovery payload for the NKN router sidecar."""
+    def _build_adapter_discovery_payload():
         process_running = tunnel_process is not None and tunnel_process.poll() is None
         with tunnel_url_lock:
             current_tunnel = tunnel_url if process_running else ""
@@ -1135,41 +1059,83 @@ def main():
             current_error = tunnel_last_error
 
         local_base = f"http://127.0.0.1:{listen_port}"
+        local_http = f"{local_base}{listen_route}"
+        local_ws = f"ws://127.0.0.1:{listen_port}/ws"
+        tunnel_http = f"{current_tunnel}{listen_route}" if current_tunnel else ""
+        tunnel_ws = f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else ""
+
         tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
         if stale_tunnel and not process_running:
             tunnel_state = "stale"
         if current_error and not process_running and not current_tunnel and not stale_tunnel:
             tunnel_state = "error"
-        tunnel_data = {
-            "state": tunnel_state,
+
+        return {
+            "service": "adapter",
+            "running": process_running,
             "tunnel_url": current_tunnel,
-            "http_endpoint": f"{current_tunnel}{listen_route}" if current_tunnel else "",
-            "ws_endpoint": f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else "",
+            "http_endpoint": tunnel_http,
+            "ws_endpoint": tunnel_ws,
+            "local_base_url": local_base,
+            "local_http_endpoint": local_http,
+            "local_ws_endpoint": local_ws,
             "stale_tunnel_url": stale_tunnel,
             "error": current_error,
+            "local": {
+                "base_url": local_base,
+                "listen_host": listen_host,
+                "listen_port": int(listen_port),
+                "command_route": listen_route,
+                "auth_route": "/auth",
+                "ws_path": "/ws",
+                "http_endpoint": local_http,
+                "ws_endpoint": local_ws,
+            },
+            "tunnel": {
+                "state": tunnel_state,
+                "tunnel_url": current_tunnel,
+                "http_endpoint": tunnel_http,
+                "ws_endpoint": tunnel_ws,
+                "stale_tunnel_url": stale_tunnel,
+                "error": current_error,
+            },
+            "security": {
+                "require_auth": True,
+                "password_required": True,
+                "session_timeout": int(SESSION_TIMEOUT),
+            },
         }
 
-        return jsonify(
-            {
-                "status": "success",
-                "service": "adapter",
-                "local": {
-                    "base_url": local_base,
-                    "listen_host": listen_host,
-                    "listen_port": int(listen_port),
-                    "command_route": listen_route,
-                    "auth_route": "/auth",
-                    "ws_path": "/ws",
-                    "http_endpoint": f"{local_base}{listen_route}",
-                    "ws_endpoint": f"ws://127.0.0.1:{listen_port}/ws",
-                },
-                "tunnel": tunnel_data,
-                "security": {
-                    "session_timeout": int(SESSION_TIMEOUT),
-                    "password_required": True,
-                },
-            }
-        )
+    @app.route("/tunnel_info", methods=["GET"])
+    def get_tunnel_info():
+        """Get the Cloudflare Tunnel URL if available."""
+        payload = _build_adapter_discovery_payload()
+        current_tunnel = str(payload.get("tunnel_url") or "").strip()
+        stale_tunnel = str(payload.get("stale_tunnel_url") or "").strip()
+        current_error = str(payload.get("error") or "").strip()
+
+        if current_tunnel:
+            payload["status"] = "success"
+            payload["message"] = "Tunnel URL available"
+        elif stale_tunnel:
+            payload["status"] = "error"
+            payload["error"] = current_error or "Tunnel URL expired"
+            payload["message"] = "Tunnel process is not running; URL is stale"
+        elif current_error:
+            payload["status"] = "error"
+            payload["message"] = "Tunnel failed to start"
+        else:
+            payload["status"] = "pending"
+            payload["message"] = "Tunnel URL not yet available"
+
+        return jsonify(payload)
+
+    @app.route("/router_info", methods=["GET"])
+    def router_info():
+        """Discovery payload for the NKN router sidecar."""
+        payload = _build_adapter_discovery_payload()
+        payload["status"] = "success"
+        return jsonify(payload)
 
     @app.route("/serial_reset", methods=["POST"])
     def http_serial_reset():

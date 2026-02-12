@@ -1426,10 +1426,17 @@ def build_resolved_endpoints(services):
     camera_tunnel = camera_data.get("tunnel", {}) if isinstance(camera_data, dict) else {}
 
     adapter_tunnel_url = str(adapter_tunnel.get("tunnel_url") or "").strip()
-    adapter_local_http = str(adapter_local.get("http_endpoint") or "").strip()
-    adapter_local_ws = str(adapter_local.get("ws_endpoint") or "").strip()
-    adapter_http = str(adapter_tunnel.get("http_endpoint") or "").strip()
-    adapter_ws = str(adapter_tunnel.get("ws_endpoint") or "").strip()
+    adapter_local_base = str(adapter_local.get("base_url") or adapter_data.get("local_base_url") or "").strip()
+    adapter_local_http = str(adapter_local.get("http_endpoint") or adapter_data.get("local_http_endpoint") or "").strip()
+    adapter_local_ws = str(adapter_local.get("ws_endpoint") or adapter_data.get("local_ws_endpoint") or "").strip()
+    adapter_http = str(adapter_tunnel.get("http_endpoint") or adapter_data.get("http_endpoint") or "").strip()
+    adapter_ws = str(adapter_tunnel.get("ws_endpoint") or adapter_data.get("ws_endpoint") or "").strip()
+    adapter_base = str(adapter_data.get("base_url") or "").strip()
+    if not adapter_base:
+        if adapter_tunnel_url:
+            adapter_base = adapter_tunnel_url
+        else:
+            adapter_base = adapter_local_base
     if not adapter_http:
         if adapter_tunnel_url:
             adapter_http = f"{adapter_tunnel_url}/send_command"
@@ -1449,6 +1456,8 @@ def build_resolved_endpoints(services):
     return {
         "adapter": {
             "tunnel_url": adapter_tunnel_url,
+            "base_url": adapter_base,
+            "local_base_url": adapter_local_base,
             "http_endpoint": adapter_http,
             "ws_endpoint": adapter_ws,
             "local_http_endpoint": adapter_local_http,
@@ -1635,7 +1644,7 @@ def metrics_update_loop():
         with pending_resolves_lock:
             ui.update_metric("Pending", str(len(pending_resolves)))
         ui.update_metric("Requests", str(request_counter["value"]))
-        ui.update_metric("Adapter Tunnel", adapter.get("tunnel_url") or "N/A")
+        ui.update_metric("Adapter Tunnel", adapter.get("tunnel_url") or adapter.get("base_url") or "N/A")
         ui.update_metric("Camera Tunnel", camera.get("tunnel_url") or camera.get("base_url") or "N/A")
         time.sleep(1)
 
