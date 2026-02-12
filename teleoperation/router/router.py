@@ -1236,6 +1236,51 @@ def _coerce_router_info_shape(name, query_url, data):
         return None
     if "local" in data or "tunnel" in data:
         return data
+    if query_url.endswith("/tunnel_info"):
+        tunnel_url = str(data.get("tunnel_url") or "").strip()
+        base_local = str(data.get("local_base_url") or "").strip() or query_url.rsplit("/", 1)[0]
+        base_ws = base_local.replace("http://", "ws://").replace("https://", "wss://")
+        if name == "adapter":
+            local_http = str(data.get("local_http_endpoint") or "").strip() or f"{base_local}/send_command"
+            local_ws = str(data.get("local_ws_endpoint") or "").strip() or f"{base_ws}/ws"
+            tunnel_http = str(data.get("http_endpoint") or "").strip()
+            tunnel_ws = str(data.get("ws_endpoint") or "").strip()
+            if not tunnel_http and tunnel_url:
+                tunnel_http = f"{tunnel_url}/send_command"
+            if not tunnel_ws and tunnel_url:
+                tunnel_ws = f"{tunnel_url.replace('https://', 'wss://')}/ws"
+            return {
+                "status": data.get("status", "success"),
+                "service": "adapter",
+                "local": {
+                    "base_url": base_local,
+                    "http_endpoint": local_http,
+                    "ws_endpoint": local_ws,
+                    "auth_route": "/auth",
+                },
+                "tunnel": {
+                    "state": "active" if tunnel_url else "inactive",
+                    "tunnel_url": tunnel_url,
+                    "http_endpoint": tunnel_http,
+                    "ws_endpoint": tunnel_ws,
+                },
+            }
+        return {
+            "status": data.get("status", "success"),
+            "service": "camera_router",
+            "local": {
+                "base_url": base_local,
+                "auth_url": f"{base_local}/auth",
+                "list_url": f"{base_local}/list",
+                "health_url": f"{base_local}/health",
+            },
+            "tunnel": {
+                "state": "active" if tunnel_url else "inactive",
+                "tunnel_url": tunnel_url,
+                "list_url": f"{tunnel_url}/list" if tunnel_url else "",
+                "health_url": f"{tunnel_url}/health" if tunnel_url else "",
+            },
+        }
     if "tunnel_url" in data:
         tunnel_url = str(data.get("tunnel_url") or "").strip()
         base_local = query_url.rsplit("/", 1)[0]

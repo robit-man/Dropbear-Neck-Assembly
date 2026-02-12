@@ -997,6 +997,9 @@ def main():
     @app.route("/tunnel_info", methods=["GET"])
     def get_tunnel_info():
         """Get the Cloudflare Tunnel URL if available."""
+        local_base = f"http://127.0.0.1:{listen_port}"
+        local_http = f"{local_base}{listen_route}"
+        local_ws = f"ws://127.0.0.1:{listen_port}/ws"
         with tunnel_url_lock:
             if tunnel_url:
                 return jsonify(
@@ -1005,11 +1008,20 @@ def main():
                         "tunnel_url": tunnel_url,
                         "http_endpoint": f"{tunnel_url}{listen_route}",
                         "ws_endpoint": f"{tunnel_url.replace('https://', 'wss://')}/ws",
+                        "local_base_url": local_base,
+                        "local_http_endpoint": local_http,
+                        "local_ws_endpoint": local_ws,
                     }
                 )
             return jsonify(
                 {
                     "status": "pending",
+                    "tunnel_url": "",
+                    "http_endpoint": "",
+                    "ws_endpoint": "",
+                    "local_base_url": local_base,
+                    "local_http_endpoint": local_http,
+                    "local_ws_endpoint": local_ws,
                     "message": "Tunnel URL not yet available",
                 }
             )
