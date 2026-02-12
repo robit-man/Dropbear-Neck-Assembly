@@ -106,8 +106,10 @@ from flask import Flask, render_template_string, redirect, url_for, jsonify
 
 # ---------- Configuration ----------
 CONFIG_PATH = "config.json"
-DEFAULT_ADAPTER_WS_URL = os.environ.get("ADAPTER_WS_URL", "ws://127.0.0.1:5001/ws")
-DEFAULT_ADAPTER_HTTP_URL = os.environ.get("ADAPTER_HTTP_URL", "http://127.0.0.1:5001/send_command")
+DEFAULT_ADAPTER_WS_URL = os.environ.get("ADAPTER_WS_URL", "ws://127.0.0.1:5060/ws")
+DEFAULT_ADAPTER_HTTP_URL = os.environ.get("ADAPTER_HTTP_URL", "http://127.0.0.1:5060/send_command")
+LEGACY_ADAPTER_WS_URL = "ws://127.0.0.1:5001/ws"
+LEGACY_ADAPTER_HTTP_URL = "http://127.0.0.1:5001/send_command"
 DEFAULT_APP_HOST = "0.0.0.0"
 DEFAULT_APP_PORT = 5000
 DEFAULT_APP_ENABLE_TUNNEL = True
@@ -219,6 +221,8 @@ def _load_app_settings(config):
             legacy_keys=("websocket_url", "ADAPTER_WS_URL"),
         )
     ).strip() or DEFAULT_ADAPTER_WS_URL
+    if websocket_url == LEGACY_ADAPTER_WS_URL:
+        websocket_url = DEFAULT_ADAPTER_WS_URL
     promote("app.adapter.websocket_url", websocket_url)
 
     http_url = str(
@@ -229,6 +233,8 @@ def _load_app_settings(config):
             legacy_keys=("http_url", "ADAPTER_HTTP_URL"),
         )
     ).strip() or DEFAULT_ADAPTER_HTTP_URL
+    if http_url == LEGACY_ADAPTER_HTTP_URL:
+        http_url = DEFAULT_ADAPTER_HTTP_URL
     promote("app.adapter.http_url", http_url)
 
     listen_host = str(

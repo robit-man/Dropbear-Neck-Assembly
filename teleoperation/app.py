@@ -215,7 +215,7 @@ class WatchdogManager:
                 "Adapter",
                 "adapter/adapter.py",
                 health_mode="http",
-                health_port=5001,
+                health_port=5060,
                 health_path="/router_info",
                 config_relpath="adapter/config.json",
                 config_port_paths=("adapter.network.listen_port", "listen_port", "port"),
