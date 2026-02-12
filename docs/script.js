@@ -1474,6 +1474,11 @@ const STREAM_MODE_MJPEG = "mjpeg";
 const STREAM_MODE_JPEG = "jpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
 const CAMERA_FEED_POLL_INTERVAL_MS = 1500;
+const CAMERA_JPEG_POLL_INTERVAL_LOCAL_MS = 180;
+const CAMERA_JPEG_POLL_INTERVAL_TUNNEL_MS = 550;
+const CAMERA_JPEG_REQUEST_STALL_MS = 3500;
+const CAMERA_JPEG_ERROR_RESTART_THRESHOLD_LOCAL = 4;
+const CAMERA_JPEG_ERROR_RESTART_THRESHOLD_TUNNEL = 8;
 const MIN_PINNED_PREVIEW_WIDTH = 180;
 const MIN_PINNED_PREVIEW_HEIGHT = 105;
 const DEFAULT_PINNED_PREVIEW_STATE = {
@@ -2559,27 +2564,55 @@ async function startJpegPreview(cameraId) {
     return;
   }
 
+  const usingTunnel = isTryCloudflareBase(cameraRouterBaseUrl);
+  const pollIntervalMs = usingTunnel ? CAMERA_JPEG_POLL_INTERVAL_TUNNEL_MS : CAMERA_JPEG_POLL_INTERVAL_LOCAL_MS;
+  const restartErrorThreshold = usingTunnel
+    ? CAMERA_JPEG_ERROR_RESTART_THRESHOLD_TUNNEL
+    : CAMERA_JPEG_ERROR_RESTART_THRESHOLD_LOCAL;
+  let jpegFrameInFlight = false;
+  let jpegLastRequestAt = 0;
+  let jpegErrorStreak = 0;
+
+  cameraPreview.activeCameraId = cameraId;
+  cameraPreview.targetCameraId = cameraId;
+  cameraPreview.activeMode = STREAM_MODE_JPEG;
+
   imageEl.onload = () => {
+    jpegFrameInFlight = false;
+    jpegErrorStreak = 0;
     cameraPreview.healthFailStreak = 0;
     cameraPreview.zeroClientStreak = 0;
     updateMetrics();
   };
   imageEl.onerror = () => {
+    jpegFrameInFlight = false;
+    jpegErrorStreak += 1;
     if (cameraPreview.desired && cameraPreview.activeCameraId === cameraId) {
-      scheduleCameraPreviewRestart("jpeg polling error");
+      if (jpegErrorStreak >= restartErrorThreshold) {
+        jpegErrorStreak = 0;
+        scheduleCameraPreviewRestart("jpeg transport unstable");
+      }
     }
   };
   imageEl.onabort = imageEl.onerror;
 
   const refresh = () => {
-    const t = Date.now();
-    imageEl.src = cameraRouterUrl(`/jpeg/${encodeURIComponent(cameraId)}?t=${t}`, true);
+    if (!cameraPreview.desired || cameraPreview.activeMode !== STREAM_MODE_JPEG || cameraPreview.activeCameraId !== cameraId) {
+      return;
+    }
+    const now = Date.now();
+    if (jpegFrameInFlight) {
+      if (now - jpegLastRequestAt < CAMERA_JPEG_REQUEST_STALL_MS) {
+        return;
+      }
+      jpegFrameInFlight = false;
+    }
+    jpegFrameInFlight = true;
+    jpegLastRequestAt = now;
+    imageEl.src = cameraRouterUrl(`/jpeg/${encodeURIComponent(cameraId)}?t=${now}`, true);
   };
   refresh();
-  cameraPreview.jpegTimer = setInterval(refresh, 120);
-  cameraPreview.activeCameraId = cameraId;
-  cameraPreview.targetCameraId = cameraId;
-  cameraPreview.activeMode = STREAM_MODE_JPEG;
+  cameraPreview.jpegTimer = setInterval(refresh, pollIntervalMs);
   syncPinnedPreviewSource({ forceRefresh: true });
   setPinButtonState();
   updateMetrics();
