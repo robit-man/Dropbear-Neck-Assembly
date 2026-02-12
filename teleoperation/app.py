@@ -65,6 +65,7 @@ from typing import Deque, Dict, List, Optional, Sequence, Tuple
 
 WATCHDOG_RUNTIME_DIR_NAME = ".watchdog_runtime"
 WATCHDOG_STATE_FILE_NAME = "service_state.json"
+WATCHDOG_LOCK_FILE_NAME = "watchdog.lock"
 MONITOR_INTERVAL_SECONDS = 0.25
 STOP_SIGINT_GRACE_SECONDS = 5.0
 STOP_SIGTERM_GRACE_SECONDS = 10.0
@@ -115,6 +116,7 @@ class WatchdogManager:
         self.runtime_dir = self.base_dir / WATCHDOG_RUNTIME_DIR_NAME
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.runtime_dir / WATCHDOG_STATE_FILE_NAME
+        self.lock_file = self.runtime_dir / WATCHDOG_LOCK_FILE_NAME
 
         self.services: List[ServiceSpec] = [
             ServiceSpec("adapter", "Adapter", "adapter/adapter.py"),
@@ -132,11 +134,14 @@ class WatchdogManager:
         self._logs: Deque[str] = deque(maxlen=300)
         self._selected_index = 0
         self._run_started_at = time.time()
+        self._instance_lock_acquired = False
 
         self._os_name = platform.system().lower()
         self._terminal_emulator = self._detect_terminal_emulator()
         if self._os_name not in ("windows", "darwin") and not self._terminal_emulator:
             self._log("[WARN] No terminal emulator detected; Linux service launch will fail")
+
+        self._acquire_instance_lock()
 
         desired_overrides = self._load_desired_state()
         now = time.time()
@@ -260,10 +265,70 @@ class WatchdogManager:
         except Exception:
             pass
 
+    def _acquire_instance_lock(self):
+        existing_pid = None
+        if self.lock_file.exists():
+            try:
+                existing_pid = int(self.lock_file.read_text(encoding="utf-8").strip())
+            except Exception:
+                existing_pid = None
+        if existing_pid and existing_pid != os.getpid() and self._is_pid_running(existing_pid):
+            raise RuntimeError(f"Another watchdog instance is already running (pid {existing_pid})")
+        try:
+            self.lock_file.write_text(str(os.getpid()), encoding="utf-8")
+            self._instance_lock_acquired = True
+        except Exception as exc:
+            raise RuntimeError(f"Failed to acquire watchdog lock: {exc}") from exc
+
+    def _release_instance_lock(self):
+        if not self._instance_lock_acquired:
+            return
+        try:
+            if not self.lock_file.exists():
+                return
+            raw = self.lock_file.read_text(encoding="utf-8").strip()
+            if str(os.getpid()) == raw:
+                self.lock_file.unlink()
+        except Exception:
+            pass
+        finally:
+            self._instance_lock_acquired = False
+
     @staticmethod
     def _is_pid_running(pid: int) -> bool:
         if not pid or pid <= 0:
             return False
+        if os.name == "nt":
+            try:
+                import ctypes
+
+                PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                STILL_ACTIVE = 259
+                handle = ctypes.windll.kernel32.OpenProcess(
+                    PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid)
+                )
+                if not handle:
+                    return False
+                try:
+                    exit_code = ctypes.c_ulong()
+                    if not ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return False
+                    return int(exit_code.value) == STILL_ACTIVE
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
+                try:
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"PID eq {int(pid)}", "/NH"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        text=True,
+                        check=False,
+                    )
+                    output = (result.stdout or "").strip().lower()
+                    return bool(output) and "no tasks are running" not in output
+                except Exception:
+                    return False
         try:
             os.kill(pid, 0)
             return True
@@ -394,8 +459,12 @@ class WatchdogManager:
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             )
             try:
+                comspec = os.environ.get("COMSPEC", "cmd.exe")
+                cmdline = subprocess.list2cmdline(
+                    [sys.executable, str(script_path)] + list(svc.args)
+                )
                 proc = subprocess.Popen(
-                    [sys.executable, str(script_path)] + list(svc.args),
+                    [comspec, "/c", cmdline],
                     cwd=str(svc.working_dir(self.base_dir)),
                     creationflags=creationflags,
                 )
@@ -898,14 +967,20 @@ class WatchdogManager:
         finally:
             self.request_shutdown()
             self.await_shutdown()
+            self._release_instance_lock()
             report = self._build_exit_report(interrupted=interrupted)
             print("\n" + report, flush=True)
 
 
 def main():
-    manager = WatchdogManager(pathlib.Path(__file__).resolve().parent)
+    try:
+        manager = WatchdogManager(pathlib.Path(__file__).resolve().parent)
+    except RuntimeError as exc:
+        print(f"[WATCHDOG] {exc}", flush=True)
+        return 1
     manager.run_curses()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
