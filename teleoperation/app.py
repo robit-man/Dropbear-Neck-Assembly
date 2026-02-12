@@ -56,8 +56,11 @@ import platform
 import shlex
 import shutil
 import signal
+import socket
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Sequence, Tuple
@@ -73,6 +76,23 @@ STOP_SIGKILL_GRACE_SECONDS = 14.0
 RESTART_BACKOFF_INITIAL_SECONDS = 1.0
 RESTART_BACKOFF_MAX_SECONDS = 20.0
 LAUNCH_GRACE_SECONDS = 3.0
+DEFAULT_ACTIVATION_TIMEOUT_SECONDS = 35.0
+DEFAULT_ACTIVATION_STABILITY_SECONDS = 4.0
+DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 2.0
+DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
+HTTP_PROBE_TIMEOUT_SECONDS = 1.5
+
+
+def _get_nested(data: dict, path: str, default=None):
+    current = data
+    for key in str(path or "").split("."):
+        if not key:
+            continue
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        else:
+            return default
+    return current
 
 
 @dataclass(frozen=True)
@@ -82,6 +102,15 @@ class ServiceSpec:
     script_relpath: str
     args: Tuple[str, ...] = ()
     auto_start: bool = True
+    health_mode: str = "process"  # process | tcp | http
+    health_port: int = 0
+    health_path: str = ""
+    config_relpath: str = ""
+    config_port_paths: Tuple[str, ...] = ()
+    activation_timeout_seconds: float = DEFAULT_ACTIVATION_TIMEOUT_SECONDS
+    activation_stability_seconds: float = DEFAULT_ACTIVATION_STABILITY_SECONDS
+    health_check_interval_seconds: float = DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS
+    health_failure_threshold: int = DEFAULT_HEALTH_FAILURE_THRESHOLD
 
     def script_path(self, base_dir: pathlib.Path) -> pathlib.Path:
         return (base_dir / self.script_relpath).resolve()
@@ -89,12 +118,58 @@ class ServiceSpec:
     def working_dir(self, base_dir: pathlib.Path) -> pathlib.Path:
         return self.script_path(base_dir).parent
 
+    def config_path(self, base_dir: pathlib.Path) -> Optional[pathlib.Path]:
+        rel = str(self.config_relpath or "").strip()
+        if not rel:
+            return None
+        return (base_dir / rel).resolve()
+
+    def resolved_health_port(self, base_dir: pathlib.Path) -> int:
+        cfg_path = self.config_path(base_dir)
+        if cfg_path and cfg_path.exists():
+            try:
+                payload = json.loads(cfg_path.read_text(encoding="utf-8"))
+                if isinstance(payload, dict):
+                    for path in self.config_port_paths:
+                        value = _get_nested(payload, path, None)
+                        if isinstance(value, bool):
+                            continue
+                        try:
+                            port = int(value)
+                        except Exception:
+                            continue
+                        if 1 <= port <= 65535:
+                            return port
+            except Exception:
+                pass
+        try:
+            port = int(self.health_port)
+        except Exception:
+            port = 0
+        return port if 1 <= port <= 65535 else 0
+
+    def resolved_health_target(self, base_dir: pathlib.Path) -> str:
+        mode = str(self.health_mode or "process").strip().lower()
+        if mode == "process":
+            return "process"
+        port = self.resolved_health_port(base_dir)
+        if port <= 0:
+            return ""
+        if mode == "tcp":
+            return f"127.0.0.1:{port}"
+        path = str(self.health_path or "").strip()
+        if not path:
+            path = "/"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"http://127.0.0.1:{port}{path}"
+
 
 @dataclass
 class ServiceRuntime:
     desired_enabled: bool = False
     restart_after_stop: bool = False
-    state: str = "stopped"  # stopped | starting | running | stopping | error | missing
+    state: str = "stopped"  # stopped | launching | activating | running | degraded | stopping | error | missing
     pid: Optional[int] = None
     terminal_process: Optional[subprocess.Popen] = None
     stop_stage: int = 0
@@ -106,10 +181,24 @@ class ServiceRuntime:
     stopped_at: float = 0.0
     last_event: str = ""
     last_error: str = ""
+    last_state_change_at: float = 0.0
     start_count: int = 0
     stop_count: int = 0
     crash_count: int = 0
     restart_count: int = 0
+    launch_attempts: int = 0
+    launch_attempt_started_at: float = 0.0
+    activation_deadline: float = 0.0
+    activation_checks: int = 0
+    activation_failures: int = 0
+    activation_method: str = ""
+    process_stable_since: float = 0.0
+    health_checks: int = 0
+    health_failures: int = 0
+    consecutive_health_failures: int = 0
+    last_health_probe_at: float = 0.0
+    last_health_ok_at: float = 0.0
+    last_health_error: str = ""
 
 
 class WatchdogManager:
@@ -121,11 +210,58 @@ class WatchdogManager:
         self.lock_file = self.runtime_dir / WATCHDOG_LOCK_FILE_NAME
 
         self.services: List[ServiceSpec] = [
-            ServiceSpec("adapter", "Adapter", "adapter/adapter.py"),
-            ServiceSpec("camera", "Camera Router", "vision/camera_route.py"),
-            ServiceSpec("depth", "Depth", "depth/depth.py"),
-            ServiceSpec("router", "NKN Router", "router/router.py"),
-            ServiceSpec("frontend", "Frontend", "frontend/app.py"),
+            ServiceSpec(
+                "adapter",
+                "Adapter",
+                "adapter/adapter.py",
+                health_mode="http",
+                health_port=5001,
+                health_path="/router_info",
+                config_relpath="adapter/config.json",
+                config_port_paths=("adapter.network.listen_port", "listen_port", "port"),
+                activation_timeout_seconds=30.0,
+            ),
+            ServiceSpec(
+                "camera",
+                "Camera Router",
+                "vision/camera_route.py",
+                health_mode="http",
+                health_port=8080,
+                health_path="/health",
+                config_relpath="vision/config.json",
+                config_port_paths=("camera_router.network.listen_port", "listen_port", "port"),
+                activation_timeout_seconds=50.0,
+            ),
+            ServiceSpec(
+                "depth",
+                "Depth",
+                "depth/depth.py",
+                health_mode="tcp",
+                health_port=8080,
+                activation_timeout_seconds=45.0,
+            ),
+            ServiceSpec(
+                "router",
+                "NKN Router",
+                "router/router.py",
+                health_mode="http",
+                health_port=5070,
+                health_path="/health",
+                config_relpath="router/config.json",
+                config_port_paths=("router.network.listen_port", "listen_port", "router_port"),
+                activation_timeout_seconds=35.0,
+            ),
+            ServiceSpec(
+                "frontend",
+                "Frontend",
+                "frontend/app.py",
+                health_mode="http",
+                health_port=5000,
+                health_path="/tunnel_info",
+                config_relpath="frontend/config.json",
+                config_port_paths=("app.server.port", "listen_port", "port"),
+                activation_timeout_seconds=30.0,
+            ),
         ]
         self.service_by_id: Dict[str, ServiceSpec] = {svc.service_id: svc for svc in self.services}
         self.runtime_by_id: Dict[str, ServiceRuntime] = {}
@@ -162,10 +298,15 @@ class WatchdogManager:
                 pid = self._read_pid_file(svc)
                 if pid and self._is_pid_running(pid):
                     runtime.pid = pid
-                    runtime.state = "running"
+                    runtime.state = "activating"
                     runtime.started_at = now
+                    runtime.launch_attempt_started_at = now
+                    runtime.activation_deadline = now + svc.activation_timeout_seconds
+                    runtime.process_stable_since = now
+                    runtime.last_event = f"Recovered existing pid={pid}; probing health"
                 elif pid:
                     self._remove_pid_file(svc)
+            runtime.last_state_change_at = now
             self.runtime_by_id[svc.service_id] = runtime
 
         self._log("Watchdog initialized")
@@ -228,13 +369,109 @@ class WatchdogManager:
     def _state_color(self, state: str) -> int:
         if state == "running":
             return 2
-        if state == "starting":
+        if state in ("launching", "activating", "degraded"):
             return 3
         if state == "stopping":
             return 4
         if state in ("error", "missing"):
             return 5
         return 1
+
+    def _set_state(
+        self,
+        svc: ServiceSpec,
+        runtime: ServiceRuntime,
+        new_state: str,
+        now: float,
+        event: Optional[str] = None,
+        error: Optional[str] = None,
+    ):
+        previous = runtime.state
+        runtime.state = str(new_state or runtime.state)
+        runtime.last_state_change_at = now
+        if event is not None:
+            runtime.last_event = event
+        if error is not None:
+            runtime.last_error = error
+        if previous != runtime.state:
+            self._log(f"[STATE] {svc.label}: {previous} -> {runtime.state}")
+
+    def _clear_runtime_timers(self, runtime: ServiceRuntime):
+        runtime.launch_grace_until = 0.0
+        runtime.launch_attempt_started_at = 0.0
+        runtime.activation_deadline = 0.0
+        runtime.process_stable_since = 0.0
+        runtime.last_health_probe_at = 0.0
+        runtime.last_health_ok_at = 0.0
+
+    def _reset_runtime_health(self, runtime: ServiceRuntime):
+        runtime.consecutive_health_failures = 0
+        runtime.last_health_error = ""
+
+    def _health_probe(self, svc: ServiceSpec) -> Tuple[bool, str]:
+        mode = str(svc.health_mode or "process").strip().lower()
+        target = svc.resolved_health_target(self.base_dir)
+        if mode == "process":
+            return True, "process-only probe"
+        if not target:
+            return False, "missing probe target"
+        if mode == "tcp":
+            try:
+                host, port_text = target.rsplit(":", 1)
+                port = int(port_text)
+            except Exception:
+                return False, f"invalid tcp target {target!r}"
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+                sock.settimeout(HTTP_PROBE_TIMEOUT_SECONDS)
+                try:
+                    ok = sock.connect_ex((host, port)) == 0
+                except Exception as exc:
+                    return False, str(exc)
+            return (ok, "tcp open" if ok else "tcp closed")
+
+        # Default HTTP probe.
+        request = urllib.request.Request(target, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=HTTP_PROBE_TIMEOUT_SECONDS) as response:
+                code = int(getattr(response, "status", 200) or 200)
+            if 200 <= code < 400:
+                return True, f"http {code}"
+            return False, f"http {code}"
+        except urllib.error.HTTPError as exc:
+            code = int(getattr(exc, "code", 0) or 0)
+            # 401/403 still means the service is up; activation should be considered successful.
+            if code in (401, 403):
+                return True, f"http {code} (auth required)"
+            return False, f"http {code}"
+        except Exception as exc:
+            return False, str(exc)
+
+    def _schedule_restart(self, runtime: ServiceRuntime, now: float):
+        runtime.next_restart_at = now + runtime.restart_backoff_seconds
+        runtime.restart_backoff_seconds = min(
+            RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
+        )
+
+    def _mark_launch_failure(
+        self,
+        svc: ServiceSpec,
+        runtime: ServiceRuntime,
+        now: float,
+        reason: str,
+        increment_crash: bool = False,
+    ):
+        runtime.activation_failures += 1
+        runtime.health_failures += 1
+        runtime.last_health_error = reason
+        if increment_crash:
+            runtime.crash_count += 1
+        runtime.pid = None
+        runtime.terminal_process = None
+        runtime.started_at = 0.0
+        runtime.stopped_at = now
+        self._clear_runtime_timers(runtime)
+        self._set_state(svc, runtime, "error", now, event="Waiting to restart", error=reason)
+        self._schedule_restart(runtime, now)
 
     # ------------------------------------------------------------------
     # PID and signaling helpers
@@ -527,10 +764,33 @@ class WatchdogManager:
     def _launch_service(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
         script_path = svc.script_path(self.base_dir)
         if not script_path.exists():
-            runtime.state = "missing"
-            runtime.last_error = f"Missing: {svc.script_relpath}"
+            self._set_state(
+                svc,
+                runtime,
+                "missing",
+                now,
+                event="Service script missing",
+                error=f"Missing: {svc.script_relpath}",
+            )
             runtime.desired_enabled = False
             return
+
+        runtime.launch_attempts += 1
+        runtime.activation_method = ""
+        runtime.activation_checks = 0
+        runtime.launch_attempt_started_at = now
+        runtime.activation_deadline = now + max(5.0, float(svc.activation_timeout_seconds))
+        runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
+        runtime.process_stable_since = 0.0
+        runtime.last_health_error = ""
+        self._set_state(
+            svc,
+            runtime,
+            "launching",
+            now,
+            event=f"Launch attempt #{runtime.launch_attempts}",
+            error="",
+        )
 
         child_env = os.environ.copy()
         # app.py already supervises restarts; disable nested camera self-supervision.
@@ -551,27 +811,24 @@ class WatchdogManager:
                 )
                 runtime.terminal_process = proc
                 runtime.pid = proc.pid
-                runtime.state = "starting"
-                runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
-                runtime.started_at = now
+                runtime.process_stable_since = now
                 runtime.stop_stage = 0
                 runtime.stop_requested_at = 0.0
-                runtime.last_error = ""
-                runtime.last_event = f"Launching (pid {proc.pid})"
+                self._set_state(
+                    svc,
+                    runtime,
+                    "activating",
+                    now,
+                    event=f"Spawned pid={proc.pid}; waiting for activation probe",
+                    error="",
+                )
                 runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
                 self._write_pid_file(svc, proc.pid)
-                self._log(f"[START] {svc.label} pid={proc.pid}")
+                self._log(f"[LAUNCH] {svc.label} attempt={runtime.launch_attempts} pid={proc.pid}")
                 return
             except Exception as exc:
-                runtime.state = "error"
-                runtime.last_error = str(exc)
-                runtime.last_event = "Launch failed"
-                runtime.launch_grace_until = 0.0
-                runtime.next_restart_at = now + runtime.restart_backoff_seconds
-                runtime.restart_backoff_seconds = min(
-                    RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
-                )
-                self._log(f"[ERROR] {svc.label} launch failed: {exc}")
+                self._mark_launch_failure(svc, runtime, now, f"Launch failed: {exc}")
+                self._log(f"[ERROR] {svc.label} launch failed on attempt={runtime.launch_attempts}: {exc}")
                 return
 
         if self._os_name == "darwin":
@@ -581,59 +838,56 @@ class WatchdogManager:
             try:
                 proc = subprocess.Popen(["osascript", "-e", apple_script])
                 runtime.terminal_process = proc
-                runtime.state = "starting"
-                runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
-                runtime.started_at = 0.0
                 runtime.stop_stage = 0
                 runtime.stop_requested_at = 0.0
-                runtime.last_error = ""
-                runtime.last_event = "Launching terminal"
-                self._log(f"[START] {svc.label} launching in Terminal.app")
+                self._set_state(
+                    svc,
+                    runtime,
+                    "launching",
+                    now,
+                    event="Launching terminal host (awaiting child pid)",
+                    error="",
+                )
+                self._log(f"[LAUNCH] {svc.label} attempt={runtime.launch_attempts} via Terminal.app")
                 return
             except Exception as exc:
-                runtime.state = "error"
-                runtime.last_error = str(exc)
-                runtime.last_event = "Launch failed"
-                runtime.launch_grace_until = 0.0
-                runtime.next_restart_at = now + runtime.restart_backoff_seconds
-                runtime.restart_backoff_seconds = min(
-                    RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
-                )
-                self._log(f"[ERROR] {svc.label} launch failed: {exc}")
+                self._mark_launch_failure(svc, runtime, now, f"Launch failed: {exc}")
+                self._log(f"[ERROR] {svc.label} launch failed on attempt={runtime.launch_attempts}: {exc}")
                 return
 
         wrapped = self._build_wrapped_shell_command(svc)
         terminal_cmd = self._build_terminal_command(f"Teleop - {svc.label}", wrapped)
         if not terminal_cmd:
-            runtime.state = "error"
-            runtime.last_error = "No terminal emulator found"
-            runtime.last_event = "Launch failed"
-            runtime.launch_grace_until = 0.0
+            self._set_state(
+                svc,
+                runtime,
+                "error",
+                now,
+                event="Launch failed",
+                error="No terminal emulator found",
+            )
             runtime.desired_enabled = False
+            self._clear_runtime_timers(runtime)
             self._log(f"[ERROR] {svc.label}: no terminal emulator found")
             return
 
         try:
             proc = subprocess.Popen(terminal_cmd, cwd=str(self.base_dir))
             runtime.terminal_process = proc
-            runtime.state = "starting"
-            runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
-            runtime.started_at = 0.0
             runtime.stop_stage = 0
             runtime.stop_requested_at = 0.0
-            runtime.last_error = ""
-            runtime.last_event = "Launching terminal"
-            self._log(f"[START] {svc.label} launching in {self._terminal_emulator}")
-        except Exception as exc:
-            runtime.state = "error"
-            runtime.last_error = str(exc)
-            runtime.last_event = "Launch failed"
-            runtime.launch_grace_until = 0.0
-            runtime.next_restart_at = now + runtime.restart_backoff_seconds
-            runtime.restart_backoff_seconds = min(
-                RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
+            self._set_state(
+                svc,
+                runtime,
+                "launching",
+                now,
+                event="Launching terminal host (awaiting child pid)",
+                error="",
             )
-            self._log(f"[ERROR] {svc.label} launch failed: {exc}")
+            self._log(f"[LAUNCH] {svc.label} attempt={runtime.launch_attempts} via {self._terminal_emulator}")
+        except Exception as exc:
+            self._mark_launch_failure(svc, runtime, now, f"Launch failed: {exc}")
+            self._log(f"[ERROR] {svc.label} launch failed on attempt={runtime.launch_attempts}: {exc}")
 
     # ------------------------------------------------------------------
     # Runtime synchronization
@@ -645,43 +899,39 @@ class WatchdogManager:
         if runtime.pid and not self._is_pid_running(runtime.pid):
             runtime.pid = None
 
-        if runtime.pid is None and self._is_process_handle_running(runtime.terminal_process):
+        if (
+            runtime.pid is None
+            and self._os_name == "windows"
+            and self._is_process_handle_running(runtime.terminal_process)
+        ):
             runtime.pid = int(runtime.terminal_process.pid)
 
         if runtime.pid is None:
             pid_from_file = self._read_pid_file(svc)
             if pid_from_file and self._is_pid_running(pid_from_file):
                 runtime.pid = pid_from_file
-                if runtime.started_at <= 0:
-                    runtime.started_at = now
-                if runtime.state != "running":
-                    runtime.state = "running"
-                    runtime.start_count += 1
-                    runtime.last_event = f"Running (pid {pid_from_file})"
-                    runtime.last_error = ""
-                    runtime.launch_grace_until = 0.0
-                    runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
-                    self._log(f"[RUNNING] {svc.label} pid={pid_from_file}")
             elif pid_from_file:
                 self._remove_pid_file(svc)
-        elif runtime.state in ("starting", "running"):
-            if runtime.started_at <= 0:
-                runtime.started_at = now
-            if runtime.state != "running":
-                runtime.state = "running"
-                runtime.start_count += 1
-                runtime.last_event = f"Running (pid {runtime.pid})"
-                runtime.last_error = ""
-                runtime.launch_grace_until = 0.0
-                runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
-                self._log(f"[RUNNING] {svc.label} pid={runtime.pid}")
+
+        if runtime.pid:
+            if runtime.process_stable_since <= 0:
+                runtime.process_stable_since = now
+            if runtime.state == "launching":
+                self._set_state(
+                    svc,
+                    runtime,
+                    "activating",
+                    now,
+                    event=f"Captured child pid={runtime.pid}; activation probe pending",
+                )
+        else:
+            runtime.process_stable_since = 0.0
 
     def _begin_stop(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
-        runtime.state = "stopping"
+        self._set_state(svc, runtime, "stopping", now, event="Stopping (SIGINT)", error="")
         runtime.stop_count += 1
         runtime.stop_stage = 1
         runtime.stop_requested_at = now
-        runtime.last_event = "Stopping (SIGINT)"
         if runtime.pid:
             self._send_signal(runtime.pid, signal.SIGINT)
             self._log(f"[STOP] {svc.label} SIGINT pid={runtime.pid}")
@@ -698,16 +948,15 @@ class WatchdogManager:
         terminal_running = self._is_process_handle_running(runtime.terminal_process)
         pid_running = bool(runtime.pid and self._is_pid_running(runtime.pid))
         if not pid_running and not terminal_running:
-            runtime.state = "stopped"
+            self._set_state(svc, runtime, "stopped", now, event="Stopped", error="")
             runtime.pid = None
             runtime.terminal_process = None
             runtime.stop_stage = 0
             runtime.stop_requested_at = 0.0
-            runtime.launch_grace_until = 0.0
+            self._clear_runtime_timers(runtime)
+            self._reset_runtime_health(runtime)
             runtime.started_at = 0.0
             runtime.stopped_at = now
-            runtime.last_error = ""
-            runtime.last_event = "Stopped"
             runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
             self._remove_pid_file(svc)
             self._log(f"[STOPPED] {svc.label}")
@@ -720,21 +969,28 @@ class WatchdogManager:
         if runtime.stop_stage == 1 and elapsed >= STOP_SIGINT_GRACE_SECONDS:
             runtime.stop_stage = 2
             runtime.last_event = "Stopping (SIGTERM)"
-            self._send_signal(runtime.pid, signal.SIGTERM)
-            self._log(f"[STOP] {svc.label} SIGTERM pid={runtime.pid}")
+            if runtime.pid:
+                self._send_signal(runtime.pid, signal.SIGTERM)
+                self._log(f"[STOP] {svc.label} SIGTERM pid={runtime.pid}")
             return
 
         if runtime.stop_stage == 2 and elapsed >= STOP_SIGTERM_GRACE_SECONDS:
             runtime.stop_stage = 3
             runtime.last_event = "Stopping (SIGKILL)"
-            self._send_signal(runtime.pid, signal.SIGKILL)
-            self._log(f"[STOP] {svc.label} SIGKILL pid={runtime.pid}")
+            if runtime.pid:
+                self._send_signal(runtime.pid, signal.SIGKILL)
+                self._log(f"[STOP] {svc.label} SIGKILL pid={runtime.pid}")
             return
 
         if runtime.stop_stage == 3 and elapsed >= STOP_SIGKILL_GRACE_SECONDS:
-            runtime.state = "error"
-            runtime.last_error = "Could not stop process"
-            runtime.last_event = "Stop escalation failed"
+            self._set_state(
+                svc,
+                runtime,
+                "error",
+                now,
+                event="Stop escalation failed",
+                error="Could not stop process",
+            )
 
     def _sync_single_service(self, svc: ServiceSpec, runtime: ServiceRuntime, now: float):
         if runtime.state == "missing":
@@ -742,43 +998,49 @@ class WatchdogManager:
 
         self._refresh_pid_state(svc, runtime, now)
         terminal_running = self._is_process_handle_running(runtime.terminal_process)
-        if not runtime.pid and terminal_running and runtime.terminal_process:
+        if (
+            not runtime.pid
+            and self._os_name == "windows"
+            and terminal_running
+            and runtime.terminal_process
+        ):
             runtime.pid = int(runtime.terminal_process.pid)
-        running = bool((runtime.pid and self._is_pid_running(runtime.pid)) or terminal_running)
-
-        if not running and runtime.state == "running":
-            runtime.terminal_process = None
-            runtime.pid = None
-            runtime.started_at = 0.0
-            runtime.stopped_at = now
-            runtime.launch_grace_until = 0.0
-            self._remove_pid_file(svc)
-            if runtime.desired_enabled:
-                runtime.state = "error"
-                runtime.crash_count += 1
-                runtime.last_error = "Exited unexpectedly"
-                runtime.last_event = "Waiting to restart"
-                runtime.next_restart_at = now + runtime.restart_backoff_seconds
-                runtime.restart_backoff_seconds = min(
-                    RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
-                )
-                self._log(f"[WARN] {svc.label} exited unexpectedly; restarting soon")
-            else:
-                runtime.state = "stopped"
-                runtime.last_error = ""
-                runtime.last_event = "Stopped"
-                runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
+        pid_running = bool(runtime.pid and self._is_pid_running(runtime.pid))
+        running = bool(pid_running or (self._os_name == "windows" and terminal_running))
 
         if not runtime.desired_enabled:
-            if running and runtime.state != "stopping":
+            should_stop = running or (
+                runtime.state in ("launching", "activating", "running", "degraded")
+                and terminal_running
+            )
+            if should_stop and runtime.state != "stopping":
                 self._begin_stop(svc, runtime, now)
             self._handle_stop_escalation(svc, runtime, now)
-            if not running and runtime.restart_after_stop:
+            if not should_stop and runtime.restart_after_stop:
                 runtime.restart_after_stop = False
                 runtime.desired_enabled = True
                 runtime.next_restart_at = now
                 runtime.last_event = "Restart queued"
                 self._save_desired_state()
+            elif not should_stop and not runtime.restart_after_stop:
+                if runtime.state not in ("stopped", "missing"):
+                    self._set_state(svc, runtime, "stopped", now, event="Stopped", error="")
+                    runtime.started_at = 0.0
+                    runtime.stopped_at = now
+                    self._clear_runtime_timers(runtime)
+                    self._reset_runtime_health(runtime)
+            return
+
+        if not running and runtime.state in ("running", "degraded"):
+            self._remove_pid_file(svc)
+            self._mark_launch_failure(
+                svc,
+                runtime,
+                now,
+                "Exited unexpectedly",
+                increment_crash=True,
+            )
+            self._log(f"[WARN] {svc.label} exited unexpectedly; waiting to restart")
             return
 
         if runtime.state == "stopping":
@@ -787,29 +1049,152 @@ class WatchdogManager:
             self._handle_stop_escalation(svc, runtime, now)
             return
 
-        if running:
-            runtime.state = "running"
-            runtime.last_error = ""
-            runtime.launch_grace_until = 0.0
-            runtime.next_restart_at = 0.0
-            runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
-            return
+        if runtime.state == "launching":
+            if not running:
+                if terminal_running and now < runtime.launch_grace_until:
+                    return
+                if now < runtime.launch_grace_until:
+                    return
+                if runtime.terminal_process and runtime.terminal_process.poll() is not None:
+                    code = runtime.terminal_process.returncode
+                    self._mark_launch_failure(
+                        svc, runtime, now, f"Terminal exited before child activation ({code})"
+                    )
+                    self._log(f"[ERROR] {svc.label} terminal host exited ({code})")
+                    return
+            # Wait for pid capture before activation.
+            if not runtime.pid:
+                if now > runtime.activation_deadline:
+                    self._mark_launch_failure(
+                        svc, runtime, now, "Activation timed out waiting for child pid"
+                    )
+                    self._log(f"[ERROR] {svc.label} activation timeout (no child pid captured)")
+                return
+            self._set_state(
+                svc,
+                runtime,
+                "activating",
+                now,
+                event=f"Child pid={runtime.pid} captured; probing readiness",
+            )
 
-        if runtime.state == "starting" and runtime.launch_grace_until > now:
-            return
-
-        if runtime.state == "starting":
-            if runtime.terminal_process and runtime.terminal_process.poll() is not None:
-                code = runtime.terminal_process.returncode
-                runtime.state = "error"
-                runtime.last_error = f"Terminal exited ({code})"
-                runtime.last_event = "Launch failed"
-                runtime.launch_grace_until = 0.0
-                runtime.next_restart_at = now + runtime.restart_backoff_seconds
-                runtime.restart_backoff_seconds = min(
-                    RESTART_BACKOFF_MAX_SECONDS, runtime.restart_backoff_seconds * 2.0
+        if runtime.state == "activating":
+            if not running:
+                self._mark_launch_failure(
+                    svc, runtime, now, "Process exited during activation", increment_crash=True
                 )
-                self._log(f"[ERROR] {svc.label} terminal exited ({code})")
+                self._log(f"[ERROR] {svc.label} exited during activation")
+                return
+
+            runtime.activation_checks += 1
+            probe_ok, probe_detail = self._health_probe(svc)
+            if probe_ok:
+                runtime.start_count += 1
+                runtime.started_at = now
+                runtime.next_restart_at = 0.0
+                runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
+                runtime.activation_method = f"probe:{probe_detail}"
+                runtime.last_health_ok_at = now
+                runtime.last_health_probe_at = now
+                self._reset_runtime_health(runtime)
+                self._set_state(
+                    svc,
+                    runtime,
+                    "running",
+                    now,
+                    event=f"Activated ({probe_detail})",
+                    error="",
+                )
+                self._log(
+                    f"[RUNNING] {svc.label} pid={runtime.pid} activated via {probe_detail} "
+                    f"attempt={runtime.launch_attempts}"
+                )
+                return
+
+            runtime.last_health_error = probe_detail
+            alive_for = now - (runtime.process_stable_since or now)
+            if alive_for >= max(1.5, float(svc.activation_stability_seconds)):
+                runtime.start_count += 1
+                runtime.started_at = now
+                runtime.next_restart_at = 0.0
+                runtime.restart_backoff_seconds = RESTART_BACKOFF_INITIAL_SECONDS
+                runtime.activation_method = f"stable-process:{alive_for:.1f}s"
+                self._set_state(
+                    svc,
+                    runtime,
+                    "degraded",
+                    now,
+                    event=f"Activated by process stability; health probe failing ({probe_detail})",
+                    error="",
+                )
+                self._log(
+                    f"[RUNNING] {svc.label} pid={runtime.pid} treated active after "
+                    f"{alive_for:.1f}s stability (probe={probe_detail})"
+                )
+                return
+
+            if now > runtime.activation_deadline:
+                self._mark_launch_failure(
+                    svc, runtime, now, f"Activation timeout ({probe_detail})"
+                )
+                self._log(f"[ERROR] {svc.label} activation timeout: {probe_detail}")
+                return
+
+            runtime.last_event = f"Activating... probe={probe_detail}"
+            return
+
+        if runtime.state in ("running", "degraded"):
+            if not running:
+                self._mark_launch_failure(
+                    svc, runtime, now, "Exited unexpectedly", increment_crash=True
+                )
+                self._log(f"[WARN] {svc.label} exited unexpectedly; waiting to restart")
+                return
+
+            interval = max(0.6, float(svc.health_check_interval_seconds))
+            if runtime.last_health_probe_at and (now - runtime.last_health_probe_at) < interval:
+                return
+
+            runtime.health_checks += 1
+            runtime.last_health_probe_at = now
+            probe_ok, probe_detail = self._health_probe(svc)
+            if probe_ok:
+                runtime.last_health_ok_at = now
+                runtime.consecutive_health_failures = 0
+                runtime.last_health_error = ""
+                if runtime.state != "running":
+                    self._set_state(
+                        svc,
+                        runtime,
+                        "running",
+                        now,
+                        event=f"Health restored ({probe_detail})",
+                        error="",
+                    )
+                else:
+                    runtime.last_event = f"Healthy ({probe_detail})"
+                return
+
+            runtime.health_failures += 1
+            runtime.consecutive_health_failures += 1
+            runtime.last_health_error = probe_detail
+            failure_limit = max(1, int(svc.health_failure_threshold))
+            if runtime.consecutive_health_failures >= failure_limit:
+                self._set_state(
+                    svc,
+                    runtime,
+                    "degraded",
+                    now,
+                    event=f"Health degraded ({runtime.consecutive_health_failures} fails)",
+                    error="",
+                )
+            else:
+                runtime.last_event = (
+                    f"Probe soft-fail {runtime.consecutive_health_failures}/{failure_limit}: {probe_detail}"
+                )
+            return
+
+        if runtime.state == "error" and runtime.next_restart_at > now:
             return
 
         if runtime.next_restart_at > now:
@@ -923,13 +1308,34 @@ class WatchdogManager:
             return f"{hrs:02d}:{mins:02d}:{secs:02d}"
         return f"{mins:02d}:{secs:02d}"
 
+    def _runtime_detail(self, runtime: ServiceRuntime, now: float) -> str:
+        base = runtime.last_error if runtime.last_error else runtime.last_event
+        tags = []
+        if runtime.launch_attempts > 0:
+            tags.append(f"a{runtime.launch_attempts}")
+        if runtime.state in ("launching", "activating") and runtime.activation_deadline > 0:
+            remaining = max(0.0, runtime.activation_deadline - now)
+            tags.append(f"t-{remaining:.0f}s")
+        if runtime.health_checks > 0:
+            tags.append(f"h{runtime.health_checks}/{runtime.health_failures}")
+        if runtime.consecutive_health_failures > 0:
+            tags.append(f"cf{runtime.consecutive_health_failures}")
+        if tags:
+            return f"{base} [{' '.join(tags)}]".strip()
+        return base
+
     def _build_exit_report(self, interrupted: bool = False) -> str:
         now = time.time()
         with self._lock:
             rows = []
             for svc in self.services:
                 runtime = self.runtime_by_id[svc.service_id]
-                if runtime.stopped_at > runtime.started_at > 0 and runtime.state != "running":
+                if runtime.stopped_at > runtime.started_at > 0 and runtime.state not in (
+                    "running",
+                    "degraded",
+                    "activating",
+                    "launching",
+                ):
                     active_for = runtime.stopped_at - runtime.started_at
                 elif runtime.started_at > 0:
                     active_for = now - runtime.started_at
@@ -946,7 +1352,7 @@ class WatchdogManager:
                         "stops": runtime.stop_count,
                         "restarts": runtime.restart_count,
                         "crashes": runtime.crash_count,
-                        "detail": runtime.last_error if runtime.last_error else runtime.last_event,
+                        "detail": self._runtime_detail(runtime, now),
                     }
                 )
             recent_logs = list(self._logs)[-30:]
@@ -1007,7 +1413,7 @@ class WatchdogManager:
             pid_text = str(runtime.pid) if runtime.pid else "-"
             uptime = self._format_duration(now - runtime.started_at) if runtime.started_at > 0 else "-"
             state_text = runtime.state.upper()
-            message = runtime.last_error if runtime.last_error else runtime.last_event
+            message = self._runtime_detail(runtime, now)
             line = (
                 f"{selected:1}    "
                 f"{svc.label[:14]:14}  "
