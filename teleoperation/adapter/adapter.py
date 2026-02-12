@@ -99,7 +99,7 @@ except ImportError:
     sys.exit(1)
 
 try:
-    from flask import Flask, request, jsonify
+    from flask import Flask, jsonify, render_template_string, request
     from flask_socketio import SocketIO, send as ws_send
     from flask_cors import CORS
 except ImportError:
@@ -1057,6 +1057,139 @@ def main():
     CORS(app, resources={r"/*": {"origins": "*"}})
 
     socketio = SocketIO(app, cors_allowed_origins="*")
+    started_at = time.time()
+    command_count = {"value": 0}
+    request_count = {"value": 0}
+
+    def _resolve_lan_host():
+        bind_host = str(listen_host or "").strip()
+        if bind_host and bind_host not in ("0.0.0.0", "::", "127.0.0.1", "localhost"):
+            return bind_host
+        try:
+            # Best-effort host detection for LAN-reachable address.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                candidate = str(sock.getsockname()[0] or "").strip()
+            if candidate and not candidate.startswith("127."):
+                return candidate
+        except Exception:
+            pass
+        try:
+            candidate = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+            if candidate and not candidate.startswith("127."):
+                return candidate
+        except Exception:
+            pass
+        return ""
+
+    def _network_endpoints():
+        local_base = f"http://127.0.0.1:{listen_port}"
+        bind_host = str(listen_host or "").strip() or "127.0.0.1"
+        bind_base = f"http://{bind_host}:{listen_port}"
+        lan_host = _resolve_lan_host()
+        lan_base = f"http://{lan_host}:{listen_port}" if lan_host else ""
+        local_http = f"{local_base}{listen_route}"
+        local_ws = f"ws://127.0.0.1:{listen_port}/ws"
+        lan_http = f"{lan_base}{listen_route}" if lan_base else ""
+        lan_ws = f"ws://{lan_host}:{listen_port}/ws" if lan_host else ""
+        return {
+            "local_base": local_base,
+            "bind_base": bind_base,
+            "lan_base": lan_base,
+            "local_http": local_http,
+            "local_ws": local_ws,
+            "lan_http": lan_http,
+            "lan_ws": lan_ws,
+        }
+
+    ADAPTER_INDEX_HTML = """
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Neck Adapter</title>
+    <style>
+      body { margin: 0; background: #111; color: #fff; font-family: monospace; }
+      .wrap { max-width: 980px; margin: 0 auto; padding: 1rem; }
+      .panel { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
+      code { color: #ffd479; }
+      .row { margin: 0.3rem 0; }
+      a, a:visited { color: #d8e3ff; }
+      .ok { color: #00d08a; }
+      .warn { color: #ffb86c; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="panel">
+        <h2 style="margin-top:0;">Neck Adapter</h2>
+        <div class="row">Service status: <span class="{{ status_class }}">{{ status_text }}</span></div>
+        <div class="row">Local dashboard: <a href="{{ local_base }}/">{{ local_base }}/</a></div>
+        <div class="row">Local health: <a href="{{ local_base }}/health">{{ local_base }}/health</a></div>
+        <div class="row">Local command: <code>{{ local_http }}</code></div>
+        <div class="row">Local websocket: <code>{{ local_ws }}</code></div>
+        <div class="row">LAN base: <code>{{ lan_base or "N/A" }}</code></div>
+        <div class="row">LAN command: <code>{{ lan_http or "N/A" }}</code></div>
+        <div class="row">Router info: <a href="{{ local_base }}/router_info">{{ local_base }}/router_info</a></div>
+        <div class="row">Tunnel info: <a href="{{ local_base }}/tunnel_info">{{ local_base }}/tunnel_info</a></div>
+      </div>
+      <div class="panel">
+        <h3 style="margin-top:0;">Notes</h3>
+        <div class="row">Bind host can be <code>0.0.0.0</code>, but clients should use local/LAN URLs above.</div>
+        <div class="row">Commands are POSTed to <code>{{ listen_route }}</code>; health/dashboard are separate GET routes.</div>
+      </div>
+    </div>
+  </body>
+</html>
+"""
+
+    @app.before_request
+    def _count_requests():
+        request_count["value"] += 1
+
+    @app.route("/", methods=["GET"])
+    def index():
+        payload = _build_adapter_discovery_payload()
+        local = payload.get("local", {}) if isinstance(payload, dict) else {}
+        local_base = str(local.get("base_url") or "").strip() or f"http://127.0.0.1:{listen_port}"
+        local_http = str(local.get("http_endpoint") or f"{local_base}{listen_route}").strip()
+        local_ws = str(local.get("ws_endpoint") or f"ws://127.0.0.1:{listen_port}/ws").strip()
+        lan_base = str(local.get("lan_base_url") or "").strip()
+        lan_http = str(local.get("lan_http_endpoint") or "").strip()
+        tunnel_active = bool(str(payload.get("tunnel_url") or "").strip())
+        return render_template_string(
+            ADAPTER_INDEX_HTML,
+            status_text="tunnel active" if tunnel_active else "local mode",
+            status_class="ok" if tunnel_active else "warn",
+            local_base=local_base,
+            local_http=local_http,
+            local_ws=local_ws,
+            lan_base=lan_base,
+            lan_http=lan_http,
+            listen_route=listen_route,
+        )
+
+    @app.route("/health", methods=["GET"])
+    def health():
+        payload = _build_adapter_discovery_payload()
+        with sessions_lock:
+            session_count = len(sessions)
+        serial_connected = bool(ser is not None and getattr(ser, "is_open", False))
+        return jsonify(
+            {
+                "status": "ok",
+                "service": "adapter",
+                "uptime_seconds": round(time.time() - started_at, 2),
+                "serial_connected": serial_connected,
+                "serial_device": serial_device or "",
+                "baudrate": int(baudrate),
+                "sessions_active": session_count,
+                "commands_served": int(command_count["value"]),
+                "requests_served": int(request_count["value"]),
+                "discovery": payload,
+            }
+        )
 
     @app.route("/auth", methods=["POST"])
     def authenticate():
@@ -1083,11 +1216,17 @@ def main():
             stale_tunnel = tunnel_url if (tunnel_url and not process_running) else ""
             current_error = tunnel_last_error
 
-        local_base = f"http://127.0.0.1:{listen_port}"
-        local_http = f"{local_base}{listen_route}"
-        local_ws = f"ws://127.0.0.1:{listen_port}/ws"
+        endpoints = _network_endpoints()
+        local_base = endpoints["local_base"]
+        bind_base = endpoints["bind_base"]
+        lan_base = endpoints["lan_base"]
+        local_http = endpoints["local_http"]
+        local_ws = endpoints["local_ws"]
+        lan_http = endpoints["lan_http"]
+        lan_ws = endpoints["lan_ws"]
         tunnel_http = f"{current_tunnel}{listen_route}" if current_tunnel else ""
         tunnel_ws = f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else ""
+        effective_base = current_tunnel or local_base
 
         tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
         if stale_tunnel and not process_running:
@@ -1098,23 +1237,34 @@ def main():
         return {
             "service": "adapter",
             "running": process_running,
+            "base_url": effective_base,
             "tunnel_url": current_tunnel,
             "http_endpoint": tunnel_http,
             "ws_endpoint": tunnel_ws,
             "local_base_url": local_base,
+            "bind_base_url": bind_base,
+            "lan_base_url": lan_base,
             "local_http_endpoint": local_http,
             "local_ws_endpoint": local_ws,
+            "lan_http_endpoint": lan_http,
+            "lan_ws_endpoint": lan_ws,
             "stale_tunnel_url": stale_tunnel,
             "error": current_error,
             "local": {
                 "base_url": local_base,
                 "listen_host": listen_host,
                 "listen_port": int(listen_port),
+                "bind_base_url": bind_base,
+                "lan_base_url": lan_base,
                 "command_route": listen_route,
                 "auth_route": "/auth",
                 "ws_path": "/ws",
+                "health_url": f"{local_base}/health",
+                "dashboard_url": f"{local_base}/",
                 "http_endpoint": local_http,
                 "ws_endpoint": local_ws,
+                "lan_http_endpoint": lan_http,
+                "lan_ws_endpoint": lan_ws,
             },
             "tunnel": {
                 "state": tunnel_state,
@@ -1269,16 +1419,20 @@ def main():
             tunnel_thread.start()
 
     # --- Startup Log & Run ---
-    hint = f"http://{listen_host}:{listen_port}{listen_route}"
-    if listen_host == "0.0.0.0":
-        try:
-            lan = socket.gethostbyname(socket.gethostname())
-            lan_hint = f"http://{lan}:{listen_port}{listen_route}"
-            hint += f"  (LAN: {lan_hint})"
-        except Exception:
-            pass
+    startup_endpoints = _network_endpoints()
+    local_base = startup_endpoints["local_base"]
+    lan_base = startup_endpoints["lan_base"]
+    local_http = startup_endpoints["local_http"]
+    local_ws = startup_endpoints["local_ws"]
+    lan_http = startup_endpoints["lan_http"]
 
-    log(f"Starting server on {hint}")
+    log(f"Adapter dashboard: {local_base}/")
+    log(f"Local health URL: {local_base}/health")
+    log(f"Local command URL: {local_http}")
+    if lan_base:
+        log(f"LAN dashboard: {lan_base}/")
+        log(f"LAN command URL: {lan_http}")
+    log(f"Bind host: {listen_host}:{listen_port}")
     if enable_tunnel:
         log("Cloudflare Tunnel will be available shortly...")
         log("Remote URL will be displayed once tunnel is established.")
@@ -1287,15 +1441,16 @@ def main():
     if ui:
         ui.update_metric("Serial Port", serial_device or "N/A")
         ui.update_metric("Baudrate", str(baudrate))
-        ui.update_metric("HTTP Endpoint", hint)
-        ui.update_metric("WebSocket", f"ws://{listen_host}:{listen_port}/ws")
+        ui.update_metric("Local URL", local_base)
+        ui.update_metric("LAN URL", lan_base or "N/A")
+        ui.update_metric("HTTP Endpoint", local_http)
+        ui.update_metric("WebSocket", local_ws)
         ui.update_metric("Session Timeout (s)", str(SESSION_TIMEOUT))
         ui.update_metric("Sessions", "0")
         ui.update_metric("Commands", "0")
         ui.update_metric("Tunnel Status", "Starting..." if enable_tunnel else "Disabled")
 
     # Metrics update thread
-    command_count = {"value": 0}
     restart_state = {"requested": False, "reason": ""}
     restart_lock = Lock()
 

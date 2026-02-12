@@ -81,6 +81,8 @@ DEFAULT_ACTIVATION_STABILITY_SECONDS = 4.0
 DEFAULT_HEALTH_CHECK_INTERVAL_SECONDS = 2.0
 DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
 HTTP_PROBE_TIMEOUT_SECONDS = 1.5
+PORT_DISCOVERY_SCAN_LIMIT = 64
+PORT_DISCOVERY_MAX_DELTA = 128
 
 
 def _get_nested(data: dict, path: str, default=None):
@@ -199,6 +201,8 @@ class ServiceRuntime:
     last_health_probe_at: float = 0.0
     last_health_ok_at: float = 0.0
     last_health_error: str = ""
+    resolved_health_port: int = 0
+    last_port_discovery_at: float = 0.0
 
 
 class WatchdogManager:
@@ -216,7 +220,7 @@ class WatchdogManager:
                 "adapter/adapter.py",
                 health_mode="http",
                 health_port=5060,
-                health_path="/router_info",
+                health_path="/health",
                 config_relpath="adapter/config.json",
                 config_port_paths=("adapter.network.listen_port", "listen_port", "port"),
                 activation_timeout_seconds=30.0,
@@ -403,14 +407,35 @@ class WatchdogManager:
         runtime.process_stable_since = 0.0
         runtime.last_health_probe_at = 0.0
         runtime.last_health_ok_at = 0.0
+        runtime.last_port_discovery_at = 0.0
 
     def _reset_runtime_health(self, runtime: ServiceRuntime):
         runtime.consecutive_health_failures = 0
         runtime.last_health_error = ""
 
     def _health_probe(self, svc: ServiceSpec) -> Tuple[bool, str]:
+        return self._health_probe_with_runtime(svc, None)
+
+    def _build_health_target(self, svc: ServiceSpec, port_override: int = 0) -> str:
         mode = str(svc.health_mode or "process").strip().lower()
-        target = svc.resolved_health_target(self.base_dir)
+        if mode == "process":
+            return "process"
+        port = int(port_override or 0)
+        if port <= 0:
+            port = svc.resolved_health_port(self.base_dir)
+        if port <= 0:
+            return ""
+        if mode == "tcp":
+            return f"127.0.0.1:{port}"
+        path = str(svc.health_path or "").strip()
+        if not path:
+            path = "/"
+        if not path.startswith("/"):
+            path = f"/{path}"
+        return f"http://127.0.0.1:{port}{path}"
+
+    def _probe_target(self, mode: str, target: str) -> Tuple[bool, str]:
+        mode = str(mode or "process").strip().lower()
         if mode == "process":
             return True, "process-only probe"
         if not target:
@@ -446,6 +471,148 @@ class WatchdogManager:
         except Exception as exc:
             return False, str(exc)
 
+    def _list_listening_ports_for_pid(self, pid: int) -> List[int]:
+        if not pid or pid <= 0:
+            return []
+        ports = set()
+        if self._os_name == "windows":
+            try:
+                result = subprocess.run(
+                    ["netstat", "-ano", "-p", "tcp"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                for raw in (result.stdout or "").splitlines():
+                    line = raw.strip()
+                    if not line or not line.upper().startswith("TCP"):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 5:
+                        continue
+                    state = str(parts[3]).strip().upper()
+                    if state != "LISTENING":
+                        continue
+                    try:
+                        line_pid = int(parts[4])
+                    except Exception:
+                        continue
+                    if line_pid != int(pid):
+                        continue
+                    local = str(parts[1]).strip()
+                    if local.startswith("[") and "]:" in local:
+                        port_text = local.rsplit("]:", 1)[-1]
+                    else:
+                        port_text = local.rsplit(":", 1)[-1]
+                    try:
+                        port = int(port_text)
+                    except Exception:
+                        continue
+                    if 1 <= port <= 65535:
+                        ports.add(port)
+            except Exception:
+                return []
+            return sorted(ports)
+
+        # POSIX fallback via lsof when available.
+        if shutil.which("lsof"):
+            try:
+                result = subprocess.run(
+                    ["lsof", "-Pan", "-p", str(int(pid)), "-iTCP", "-sTCP:LISTEN"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                for raw in (result.stdout or "").splitlines():
+                    match = re.search(r":(\d+)\s+\(LISTEN\)", raw)
+                    if not match:
+                        continue
+                    try:
+                        port = int(match.group(1))
+                    except Exception:
+                        continue
+                    if 1 <= port <= 65535:
+                        ports.add(port)
+            except Exception:
+                pass
+        return sorted(ports)
+
+    def _discover_runtime_health_port(
+        self,
+        svc: ServiceSpec,
+        runtime: Optional[ServiceRuntime],
+        attempted_port: int,
+    ) -> int:
+        if runtime is None:
+            return 0
+        pid = int(runtime.pid or 0)
+        if pid <= 0 or not self._is_pid_running(pid):
+            return 0
+
+        discovered_ports = self._list_listening_ports_for_pid(pid)
+        if not discovered_ports:
+            return 0
+
+        preferred = int(svc.resolved_health_port(self.base_dir) or 0)
+        current = int(runtime.resolved_health_port or 0)
+        attempted = int(attempted_port or 0)
+
+        def _rank(port_value: int):
+            delta = abs(port_value - preferred) if preferred else 0
+            # Favor previously discovered/current port, then default/config-adjacent ports.
+            return (
+                0 if current and port_value == current else 1,
+                0 if preferred and port_value == preferred else 1,
+                0 if preferred and delta <= PORT_DISCOVERY_MAX_DELTA else 1,
+                delta,
+                port_value,
+            )
+
+        mode = str(svc.health_mode or "process").strip().lower()
+        for port in sorted(discovered_ports, key=_rank)[:PORT_DISCOVERY_SCAN_LIMIT]:
+            if port == attempted:
+                continue
+            target = self._build_health_target(svc, port_override=port)
+            ok, _detail = self._probe_target(mode, target)
+            if ok:
+                return port
+        return 0
+
+    def _health_probe_with_runtime(
+        self,
+        svc: ServiceSpec,
+        runtime: Optional[ServiceRuntime],
+    ) -> Tuple[bool, str]:
+        mode = str(svc.health_mode or "process").strip().lower()
+        if mode == "process":
+            return True, "process-only probe"
+
+        preferred_port = int(svc.resolved_health_port(self.base_dir) or 0)
+        active_port = int((runtime.resolved_health_port if runtime else 0) or preferred_port or 0)
+        target = self._build_health_target(svc, port_override=active_port)
+        ok, detail = self._probe_target(mode, target)
+        if ok:
+            if runtime is not None and active_port > 0:
+                runtime.resolved_health_port = active_port
+            return True, detail
+
+        discovered_port = self._discover_runtime_health_port(svc, runtime, active_port)
+        if discovered_port > 0 and discovered_port != active_port:
+            discovered_target = self._build_health_target(svc, port_override=discovered_port)
+            discovered_ok, discovered_detail = self._probe_target(mode, discovered_target)
+            if discovered_ok:
+                if runtime is not None:
+                    runtime.resolved_health_port = discovered_port
+                    runtime.last_port_discovery_at = time.time()
+                self._log(f"[DISCOVER] {svc.label} health probe realigned to port {discovered_port}")
+                return True, f"{discovered_detail} (port {discovered_port})"
+
+        return False, detail
+
     def _schedule_restart(self, runtime: ServiceRuntime, now: float):
         runtime.next_restart_at = now + runtime.restart_backoff_seconds
         runtime.restart_backoff_seconds = min(
@@ -467,6 +634,7 @@ class WatchdogManager:
             runtime.crash_count += 1
         runtime.pid = None
         runtime.terminal_process = None
+        runtime.resolved_health_port = 0
         runtime.started_at = 0.0
         runtime.stopped_at = now
         self._clear_runtime_timers(runtime)
@@ -778,6 +946,7 @@ class WatchdogManager:
         runtime.launch_attempts += 1
         runtime.activation_method = ""
         runtime.activation_checks = 0
+        runtime.resolved_health_port = 0
         runtime.launch_attempt_started_at = now
         runtime.activation_deadline = now + max(5.0, float(svc.activation_timeout_seconds))
         runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
@@ -954,6 +1123,7 @@ class WatchdogManager:
             self._set_state(svc, runtime, "stopped", now, event="Stopped", error="")
             runtime.pid = None
             runtime.terminal_process = None
+            runtime.resolved_health_port = 0
             runtime.stop_stage = 0
             runtime.stop_requested_at = 0.0
             self._clear_runtime_timers(runtime)
@@ -1090,7 +1260,7 @@ class WatchdogManager:
                 return
 
             runtime.activation_checks += 1
-            probe_ok, probe_detail = self._health_probe(svc)
+            probe_ok, probe_detail = self._health_probe_with_runtime(svc, runtime)
             if probe_ok:
                 runtime.start_count += 1
                 runtime.started_at = now
@@ -1160,7 +1330,7 @@ class WatchdogManager:
 
             runtime.health_checks += 1
             runtime.last_health_probe_at = now
-            probe_ok, probe_detail = self._health_probe(svc)
+            probe_ok, probe_detail = self._health_probe_with_runtime(svc, runtime)
             if probe_ok:
                 runtime.last_health_ok_at = now
                 runtime.consecutive_health_failures = 0
@@ -1323,6 +1493,8 @@ class WatchdogManager:
             tags.append(f"h{runtime.health_checks}/{runtime.health_failures}")
         if runtime.consecutive_health_failures > 0:
             tags.append(f"cf{runtime.consecutive_health_failures}")
+        if runtime.resolved_health_port > 0:
+            tags.append(f"p{runtime.resolved_health_port}")
         if tags:
             return f"{base} [{' '.join(tags)}]".strip()
         return base
