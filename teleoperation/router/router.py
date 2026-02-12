@@ -1275,26 +1275,6 @@ def _coerce_router_info_shape(name, query_url, data):
     return None
 
 
-def _normalize_service_base_url(url):
-    raw = str(url or "").strip()
-    if not raw:
-        return ""
-    clean = raw.split("?", 1)[0].split("#", 1)[0].rstrip("/")
-    for suffix in ("/router_info", "/tunnel_info"):
-        if clean.endswith(suffix):
-            return clean[: -len(suffix)]
-    return clean.rsplit("/", 1)[0] if "/" in clean[clean.find("://") + 3 :] else clean
-
-
-def _http_base_to_ws_base(http_base):
-    value = str(http_base or "").strip()
-    if value.startswith("https://"):
-        return "wss://" + value[len("https://") :]
-    if value.startswith("http://"):
-        return "ws://" + value[len("http://") :]
-    return value
-
-
 def fetch_service_info(name, query_url):
     query_url = str(query_url or "").strip()
     record = _service_record(name, query_url)
@@ -1347,14 +1327,9 @@ def build_resolved_endpoints(services):
     camera_local = camera_data.get("local", {}) if isinstance(camera_data, dict) else {}
     camera_tunnel = camera_data.get("tunnel", {}) if isinstance(camera_data, dict) else {}
 
-    configured_adapter_base = _normalize_service_base_url(service_endpoints.get("adapter_router_info_url", ""))
     adapter_tunnel_url = str(adapter_tunnel.get("tunnel_url") or "").strip()
     adapter_local_http = str(adapter_local.get("http_endpoint") or "").strip()
     adapter_local_ws = str(adapter_local.get("ws_endpoint") or "").strip()
-    if not adapter_local_http and configured_adapter_base:
-        adapter_local_http = f"{configured_adapter_base}/send_command"
-    if not adapter_local_ws and configured_adapter_base:
-        adapter_local_ws = f"{_http_base_to_ws_base(configured_adapter_base)}/ws"
     adapter_http = str(adapter_tunnel.get("http_endpoint") or "").strip()
     adapter_ws = str(adapter_tunnel.get("ws_endpoint") or "").strip()
     if not adapter_http:
@@ -1376,7 +1351,6 @@ def build_resolved_endpoints(services):
     return {
         "adapter": {
             "tunnel_url": adapter_tunnel_url,
-            "base_url": configured_adapter_base,
             "http_endpoint": adapter_http,
             "ws_endpoint": adapter_ws,
             "local_http_endpoint": adapter_local_http,

@@ -22,6 +22,18 @@ let authenticated = false;
 let suppressCommandDispatch = false;
 const ROUTE_ALIASES = Object.freeze({ home: "neck" });
 const ROUTES = new Set(["connect", "neck", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
+const CONTROL_ROUTE_LABELS = Object.freeze({
+    direct: "Direct Motor",
+    euler: "Euler",
+    head: "Full Head",
+    quaternion: "Quaternion",
+    headstream: "Morphtarget",
+    orientation: "Orientation",
+});
+const CONTROL_ROUTE_STORAGE_KEY = "selectedControlRoute";
+let selectedControlRoute = localStorage.getItem(CONTROL_ROUTE_STORAGE_KEY) || "";
+let controlsNavInitialized = false;
+let controlsMenuOpen = false;
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
 
@@ -235,6 +247,118 @@ function normalizeRoute(route) {
     return ROUTE_ALIASES[normalized] || normalized;
 }
 
+function isControlRoute(route) {
+    const normalized = normalizeRoute(route);
+    return Object.prototype.hasOwnProperty.call(CONTROL_ROUTE_LABELS, normalized);
+}
+
+if (!isControlRoute(selectedControlRoute)) {
+    selectedControlRoute = "";
+}
+
+function updateControlGhostLabel() {
+    const ghostBtn = document.getElementById("controlsCurrentRouteGhost");
+    if (!ghostBtn) {
+        return;
+    }
+    const hasSelection = isControlRoute(selectedControlRoute);
+    ghostBtn.textContent = hasSelection
+        ? CONTROL_ROUTE_LABELS[selectedControlRoute]
+        : "No Control Selected";
+    ghostBtn.classList.toggle("active-control", hasSelection);
+}
+
+function setControlsMenuOpen(open) {
+    const panel = document.getElementById("controlsMenuPanel");
+    const toggleBtn = document.getElementById("controlsMenuToggleBtn");
+    if (!panel || !toggleBtn) {
+        controlsMenuOpen = false;
+        return;
+    }
+    controlsMenuOpen = !!open;
+    panel.hidden = !controlsMenuOpen;
+    toggleBtn.setAttribute("aria-expanded", controlsMenuOpen ? "true" : "false");
+    toggleBtn.classList.toggle("open", controlsMenuOpen);
+}
+
+function syncControlsNavState(route) {
+    const normalized = normalizeRoute(route);
+    if (isControlRoute(normalized)) {
+        selectedControlRoute = normalized;
+        localStorage.setItem(CONTROL_ROUTE_STORAGE_KEY, selectedControlRoute);
+    }
+
+    updateControlGhostLabel();
+
+    const activeControl = isControlRoute(normalized)
+        ? normalized
+        : (isControlRoute(selectedControlRoute) ? selectedControlRoute : "");
+
+    document.querySelectorAll(".controls-menu-option[data-control-route]").forEach((option) => {
+        option.classList.toggle("active", option.dataset.controlRoute === activeControl);
+    });
+
+    const toggleBtn = document.getElementById("controlsMenuToggleBtn");
+    if (toggleBtn) {
+        toggleBtn.classList.toggle("active", isControlRoute(normalized));
+    }
+}
+
+function activateControlRoute(route) {
+    const normalized = normalizeRoute(route);
+    if (!isControlRoute(normalized)) {
+        return;
+    }
+    setControlsMenuOpen(false);
+    setRoute(normalized);
+}
+
+function initializeControlsNav() {
+    if (controlsNavInitialized) {
+        return;
+    }
+    controlsNavInitialized = true;
+
+    const navShell = document.getElementById("controlsNav");
+    const toggleBtn = document.getElementById("controlsMenuToggleBtn");
+    if (toggleBtn) {
+        toggleBtn.addEventListener("click", (event) => {
+            event.preventDefault();
+            setControlsMenuOpen(!controlsMenuOpen);
+        });
+    }
+
+    document.querySelectorAll(".controls-menu-option[data-control-route]").forEach((option) => {
+        option.addEventListener("click", () => {
+            activateControlRoute(option.dataset.controlRoute || "");
+        });
+        option.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                activateControlRoute(option.dataset.controlRoute || "");
+            }
+        });
+    });
+
+    document.addEventListener("click", (event) => {
+        if (!controlsMenuOpen || !navShell) {
+            return;
+        }
+        if (!navShell.contains(event.target)) {
+            setControlsMenuOpen(false);
+        }
+    });
+
+    window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && controlsMenuOpen) {
+            setControlsMenuOpen(false);
+        }
+    });
+
+    setControlsMenuOpen(false);
+    syncControlsNavState(getRouteFromLocation());
+}
+
 function getRouteFromLocation() {
     const hashRoute = normalizeRoute(window.location.hash.replace(/^#\/?/, ""));
     if (ROUTES.has(hashRoute)) {
@@ -249,12 +373,14 @@ function getRouteFromLocation() {
 }
 
 function applyRoute(route) {
+    setControlsMenuOpen(false);
     document.querySelectorAll("[data-view]").forEach((view) => {
         view.classList.toggle("active", view.dataset.view === route);
     });
     document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
         link.classList.toggle("active", link.dataset.route === route);
     });
+    syncControlsNavState(route);
 
     if (route === "headstream" && !headstreamInitTriggered && typeof window.initHeadstreamApp === "function") {
         window.initHeadstreamApp();
@@ -3336,6 +3462,7 @@ function decQuatField(field, step) {
 
 window.addEventListener('load', async () => {
   initializeRouting();
+  initializeControlsNav();
   const initialRoute = getRouteFromLocation();
   ensureConnectionModalBindings();
   const queryConnection = parseConnectionFromQuery();

@@ -75,16 +75,25 @@
     </div>
 
     <nav>
-      <div class="nav-container">
-        <a href="#connect" class="nav-link" data-route="connect">Connect</a>
+      <div class="nav-container controls-nav" id="controlsNav">
         <a href="#neck" class="nav-link" data-route="neck">Neck</a>
-        <a href="#direct" class="nav-link" data-route="direct">Direct Motor</a>
-        <a href="#euler" class="nav-link" data-route="euler">Euler</a>
-        <a href="#head" class="nav-link" data-route="head">Full Head</a>
-        <a href="#quaternion" class="nav-link" data-route="quaternion">Quaternion</a>
-        <a href="#headstream" class="nav-link" data-route="headstream">Morphtarget</a>
-        <a href="#orientation" class="nav-link" data-route="orientation">Orientation</a>
         <a href="#streams" class="nav-link" data-route="streams">Streams</a>
+        <button id="controlsMenuToggleBtn" class="nav-link controls-menu-toggle" type="button" aria-expanded="false" aria-controls="controlsMenuPanel">
+          Controls
+        </button>
+        <button id="controlsCurrentRouteGhost" class="nav-link controls-current-ghost" type="button" disabled>
+          No Control Selected
+        </button>
+        <div id="controlsMenuPanel" class="controls-menu-panel" hidden>
+          <div class="controls-menu-stack">
+            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="direct">Direct Motor</div>
+            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="euler">Euler</div>
+            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="head">Full Head</div>
+            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="quaternion">Quaternion</div>
+            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="headstream">Morphtarget</div>
+            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="orientation">Orientation</div>
+          </div>
+        </div>
       </div>
       <div class="row">
         <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>

@@ -230,6 +230,72 @@ nav {
     border-color: var(--accent);
 }
 
+.controls-nav {
+    width: 100%;
+    align-items: center;
+}
+
+.controls-menu-toggle {
+    background: var(--bg-secondary);
+}
+
+.controls-menu-toggle.open {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+}
+
+.controls-current-ghost {
+    border-style: dashed;
+    color: var(--accent);
+    background: transparent;
+    opacity: 0.85;
+    cursor: default;
+    pointer-events: none;
+}
+
+.controls-current-ghost.active-control {
+    border-style: solid;
+    opacity: 1;
+}
+
+.controls-menu-panel {
+    width: 100%;
+    flex-basis: 100%;
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border-light);
+    border-radius: 0.5rem;
+    padding: 0.6rem;
+}
+
+.controls-menu-stack {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.controls-menu-option {
+    border: 2px solid var(--border-light);
+    border-radius: 0.45rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    padding: 0.45rem 0.75rem;
+    min-width: 140px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    user-select: none;
+}
+
+.controls-menu-option:hover,
+.controls-menu-option:focus-visible,
+.controls-menu-option.active {
+    background: var(--accent);
+    color: var(--bg-primary);
+    border-color: var(--accent);
+    outline: none;
+}
+
 .nav-button {
     background: var(--accent);
     border: 2px solid var(--accent);
@@ -606,5 +672,10 @@ h3 {
 
     .nkn-qr {
         justify-self: start;
+    }
+
+    .controls-menu-option {
+        flex: 1 1 calc(50% - 0.5rem);
+        min-width: 120px;
     }
 }
