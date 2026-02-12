@@ -1294,29 +1294,58 @@ function applyResolvedEndpoints(resolved) {
   let changed = false;
   const adapter = resolved.adapter || {};
   const camera = resolved.camera || {};
+  const adapterTunnel = (adapter.tunnel && typeof adapter.tunnel === "object") ? adapter.tunnel : {};
+  const adapterLocal = (adapter.local && typeof adapter.local === "object") ? adapter.local : {};
 
-  const httpCandidate = (adapter.http_endpoint || adapter.local_http_endpoint || "").trim();
-  const wsCandidate = (adapter.ws_endpoint || adapter.local_ws_endpoint || "").trim();
-  if (httpCandidate) {
-    HTTP_URL = httpCandidate;
+  const adapterTunnelCandidate = String(adapter.tunnel_url || adapterTunnel.tunnel_url || "").trim();
+  const adapterHttpCandidate = String(
+    adapter.http_endpoint ||
+    adapter.local_http_endpoint ||
+    adapterTunnel.http_endpoint ||
+    adapterLocal.http_endpoint ||
+    ""
+  ).trim();
+  const adapterWsCandidate = String(
+    adapter.ws_endpoint ||
+    adapter.local_ws_endpoint ||
+    adapterTunnel.ws_endpoint ||
+    adapterLocal.ws_endpoint ||
+    ""
+  ).trim();
+  const adapterBaseCandidate = String(
+    adapter.base_url ||
+    adapter.origin ||
+    adapter.url ||
+    adapterLocal.base_url ||
+    ""
+  ).trim();
+
+  const adapterSourceCandidate =
+    adapterTunnelCandidate ||
+    adapterHttpCandidate ||
+    adapterWsCandidate ||
+    adapterBaseCandidate;
+
+  const adapterEndpoints = buildAdapterEndpoints(adapterSourceCandidate);
+  if (adapterEndpoints) {
+    HTTP_URL = adapterEndpoints.httpUrl;
+    WS_URL = adapterEndpoints.wsUrl;
     localStorage.setItem("httpUrl", HTTP_URL);
+    localStorage.setItem("wsUrl", WS_URL);
     const httpInput = document.getElementById("httpUrlInput");
+    const wsInput = document.getElementById("wsUrlInput");
+    const addressInput = document.getElementById("adapterAddressInput");
     if (httpInput) {
       httpInput.value = HTTP_URL;
     }
-    changed = true;
-  }
-  if (wsCandidate) {
-    WS_URL = wsCandidate;
-    localStorage.setItem("wsUrl", WS_URL);
-    const wsInput = document.getElementById("wsUrlInput");
     if (wsInput) {
       wsInput.value = WS_URL;
     }
+    if (addressInput) {
+      addressInput.value = adapterEndpoints.origin;
+    }
+    hydrateEndpointInputs("address");
     changed = true;
-  }
-  if (httpCandidate || wsCandidate) {
-    hydrateEndpointInputs("http");
   }
 
   const cameraCandidate = (camera.tunnel_url || camera.base_url || "").trim();
