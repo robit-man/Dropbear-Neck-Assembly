@@ -122,6 +122,8 @@ DEFAULT_AUTO_INSTALL_NKN_SDK = True
 
 PENDING_REQUEST_TTL_SECONDS = 30
 SERVICE_REFRESH_INTERVAL_SECONDS = 3.0
+SERVICE_FETCH_TIMEOUT_SECONDS = 4.5
+SERVICE_FETCH_RETRY_DELAY_SECONDS = 0.2
 DEFAULT_UI_REFRESH_INTERVAL_MS = 700
 DASHBOARD_HISTORY_MAX_POINTS = 720
 DASHBOARD_LOG_MAX_ENTRIES = 800
@@ -1214,7 +1216,7 @@ def stop_nkn_sidecar():
                 pass
     _mark_nkn_disconnected("NKN sidecar stopped")
 
-def _fetch_json(url, timeout=2.0):
+def _fetch_json(url, timeout=SERVICE_FETCH_TIMEOUT_SECONDS):
     response = requests.get(url, timeout=timeout)
     data = response.json() if response.content else {}
     return response.status_code, data
@@ -1320,6 +1322,49 @@ def _coerce_router_info_shape(name, query_url, data):
     return None
 
 
+def _build_service_query_candidates(query_url):
+    raw = str(query_url or "").strip()
+    if not raw:
+        return []
+    candidates = []
+
+    def add(url):
+        value = str(url or "").strip()
+        if value and value not in candidates:
+            candidates.append(value)
+
+    add(raw)
+    trimmed = raw.rstrip("/")
+    if trimmed.endswith("/router_info"):
+        add(trimmed[:-len("/router_info")] + "/tunnel_info")
+    elif trimmed.endswith("/tunnel_info"):
+        add(trimmed[:-len("/tunnel_info")] + "/router_info")
+    else:
+        add(trimmed + "/router_info")
+        add(trimmed + "/tunnel_info")
+
+    return candidates
+
+
+def _merge_service_record_with_previous(current_record, previous_record):
+    current = dict(current_record) if isinstance(current_record, dict) else {}
+    previous = dict(previous_record) if isinstance(previous_record, dict) else {}
+    if current.get("ok"):
+        return current
+
+    previous_data = previous.get("data", {}) if isinstance(previous, dict) else {}
+    if isinstance(previous_data, dict) and previous_data:
+        merged = dict(current)
+        merged["data"] = previous_data
+        merged["cached"] = True
+        merged["cached_ok"] = bool(previous.get("ok"))
+        merged["cached_error"] = str(current.get("error") or "")
+        merged["error"] = ""
+        merged["ok"] = True
+        return merged
+    return current
+
+
 def fetch_service_info(name, query_url):
     query_url = str(query_url or "").strip()
     record = _service_record(name, query_url)
@@ -1328,16 +1373,24 @@ def fetch_service_info(name, query_url):
         return record
 
     tried = []
-    candidates = [query_url]
-    if query_url.endswith("/router_info"):
-        candidates.append(query_url[:-len("/router_info")] + "/tunnel_info")
+    candidates = _build_service_query_candidates(query_url)
 
     for url in candidates:
         tried.append(url)
-        try:
-            status, data = _fetch_json(url)
-        except Exception as exc:
-            record["error"] = str(exc)
+        status = None
+        data = {}
+        last_exc = None
+        for attempt in range(2):
+            try:
+                status, data = _fetch_json(url, timeout=SERVICE_FETCH_TIMEOUT_SECONDS)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                if attempt == 0:
+                    time.sleep(SERVICE_FETCH_RETRY_DELAY_SECONDS)
+        if last_exc is not None:
+            record["error"] = str(last_exc)
             continue
         record["http_status"] = status
         if status != 200:
@@ -1414,10 +1467,25 @@ def build_resolved_endpoints(services):
 
 
 def collect_service_snapshot():
-    services = {
+    with service_snapshot_lock:
+        existing = dict(service_snapshot)
+    previous_services = existing.get("services", {}) if isinstance(existing, dict) else {}
+
+    fetched_services = {
         "adapter": fetch_service_info("adapter", service_endpoints["adapter_router_info_url"]),
         "camera": fetch_service_info("camera", service_endpoints["camera_router_info_url"]),
     }
+    services = {
+        "adapter": _merge_service_record_with_previous(
+            fetched_services.get("adapter", {}),
+            previous_services.get("adapter", {}),
+        ),
+        "camera": _merge_service_record_with_previous(
+            fetched_services.get("camera", {}),
+            previous_services.get("camera", {}),
+        ),
+    }
+
     resolved = build_resolved_endpoints(services)
     snapshot = {
         "timestamp_ms": int(time.time() * 1000),
