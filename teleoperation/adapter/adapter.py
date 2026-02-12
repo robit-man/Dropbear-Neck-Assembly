@@ -833,6 +833,16 @@ def process_command(cmd, ser):
         log(f"Serial write error: {e}")
         return {"status":"error","message":str(e)}
 
+
+def _interactive_prompts_allowed():
+    raw = str(os.environ.get("ADAPTER_DISABLE_INTERACTIVE_PROMPTS", "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return False
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        return False
+
 # --- Main Application ---
 def main():
     global ui
@@ -891,6 +901,10 @@ def main():
     if ui:
         ui.on_save(_apply_runtime_config)
 
+    interactive_prompts = _interactive_prompts_allowed()
+    if not interactive_prompts:
+        log("[BOOT] Interactive prompts disabled; adapter will continue without blocking for manual input")
+
     # --- Serial Connection Setup ---
     ser = None
     serial_device = adapter_settings["serial_device"]
@@ -918,24 +932,27 @@ def main():
             except Exception:
                 continue
 
-    # 3) Interactive fallback
-    while ser is None:
-        device = input("Serial device (e.g. /dev/ttyUSB0 or COM3): ").strip()
-        baud_in = input(f"Baudrate (default {DEFAULT_BAUDRATE}): ").strip() or str(DEFAULT_BAUDRATE)
-        try:
-            baud = int(baud_in)
-        except ValueError:
-            print("Invalid baudrate.\n")
-            continue
-        try:
-            ser = serial.Serial(device, baud, timeout=1)
-            print("Serial connection successful!")
-            serial_device = device
-            baudrate = baud
-            _persist("adapter.serial.device", serial_device)
-            _persist("adapter.serial.baudrate", baudrate)
-        except Exception as exc:
-            print(f"Serial connect error: {exc}\n")
+    # 3) Interactive fallback (optional in supervised/headless mode)
+    if ser is None and interactive_prompts:
+        while ser is None:
+            device = input("Serial device (e.g. /dev/ttyUSB0 or COM3): ").strip()
+            baud_in = input(f"Baudrate (default {DEFAULT_BAUDRATE}): ").strip() or str(DEFAULT_BAUDRATE)
+            try:
+                baud = int(baud_in)
+            except ValueError:
+                print("Invalid baudrate.\n")
+                continue
+            try:
+                ser = serial.Serial(device, baud, timeout=1)
+                print("Serial connection successful!")
+                serial_device = device
+                baudrate = baud
+                _persist("adapter.serial.device", serial_device)
+                _persist("adapter.serial.baudrate", baudrate)
+            except Exception as exc:
+                print(f"Serial connect error: {exc}\n")
+    elif ser is None:
+        log("[WARN] Serial not connected; starting HTTP/WS endpoints in degraded mode")
 
     def reset_serial_connection(trigger_home=True, home_command="HOME_BRUTE"):
         """Disconnect and reconnect serial port, optionally issuing a home command."""
@@ -997,6 +1014,11 @@ def main():
         print(f"Using saved port: {configured_port}")
     else:
         print(f"Saved port {configured_port} unavailable on {listen_host}.")
+        if not interactive_prompts:
+            raise RuntimeError(
+                f"Configured listen port {configured_port} unavailable and prompts are disabled; "
+                "set adapter.network.listen_port to a free port"
+            )
 
     while listen_port is None:
         p_in = input(f"Listen port (1-65535) [{configured_port}]: ").strip()

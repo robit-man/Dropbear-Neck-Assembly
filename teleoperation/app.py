@@ -796,6 +796,9 @@ class WatchdogManager:
         # app.py already supervises restarts; disable nested camera self-supervision.
         if svc.service_id == "camera":
             child_env["CAMERA_ROUTE_SUPERVISE"] = "0"
+        if svc.service_id == "adapter":
+            # Avoid blocking prompts under watchdog; keep adapter API booting even without serial.
+            child_env["ADAPTER_DISABLE_INTERACTIVE_PROMPTS"] = "1"
 
         if self._os_name == "windows":
             creationflags = (
