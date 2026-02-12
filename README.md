@@ -49,7 +49,7 @@ python3 app.py
 
 and it will automatically generate a venv and start the application via flask. You can then visit the endpoint generated and inject the above password and http/s or ws/s endpoint provided by adapter interface.
 
-[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://github.com/robit-man/Dropbear-Neck-Assembly/blob/main/teleoperation/frontend/app.py)
+[![image](https://github.com/user-attachments/assets/940bc51c-9010-4bf4-be38-dac72bfb5653)](https://robit-man.github.io/Dropbear-Neck-Assembly)
 
 
 ## Software Requirements
