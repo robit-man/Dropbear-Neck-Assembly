@@ -1505,6 +1505,7 @@ const cameraPreview = {
   activeCameraId: "",
   targetCameraId: localStorage.getItem("cameraRouterSelectedFeed") || "",
   activeMode: STREAM_MODE_MJPEG,
+  jpegFallbackAttempted: false,
   desired: false,
   restartTimer: null,
   restartAttempts: 0,
@@ -2141,6 +2142,7 @@ function stopCameraPreview(options = {}) {
 
   cameraPreview.activeCameraId = "";
   cameraPreview.activeMode = STREAM_MODE_MJPEG;
+  cameraPreview.jpegFallbackAttempted = false;
   cameraPreview.healthFailStreak = 0;
   cameraPreview.zeroClientStreak = 0;
   cameraPreview.monitorInFlight = false;
@@ -2590,6 +2592,17 @@ async function startJpegPreview(cameraId) {
     if (cameraPreview.desired && cameraPreview.activeCameraId === cameraId) {
       if (jpegErrorStreak >= restartErrorThreshold) {
         jpegErrorStreak = 0;
+        if (usingTunnel && !cameraPreview.jpegFallbackAttempted) {
+          cameraPreview.jpegFallbackAttempted = true;
+          const modeSelect = document.getElementById("cameraModeSelect");
+          if (modeSelect) {
+            modeSelect.value = STREAM_MODE_MJPEG;
+          }
+          localStorage.setItem("cameraRouterSelectedMode", STREAM_MODE_MJPEG);
+          setStreamStatus("JPEG preview unstable over tunnel; switching to MJPEG", true);
+          startCameraPreview({ autoRestart: true, cameraId, reason: "jpeg tunnel fallback" }).catch(() => {});
+          return;
+        }
         scheduleCameraPreviewRestart("jpeg transport unstable");
       }
     }
@@ -2639,6 +2652,7 @@ async function startMjpegPreview(cameraId) {
   cameraPreview.activeCameraId = cameraId;
   cameraPreview.targetCameraId = cameraId;
   cameraPreview.activeMode = STREAM_MODE_MJPEG;
+  cameraPreview.jpegFallbackAttempted = false;
   syncPinnedPreviewSource({ forceRefresh: true });
   setPinButtonState();
   updateMetrics();
@@ -2730,6 +2744,14 @@ async function startCameraPreview(options = {}) {
   if (!allowedModes.has(mode)) {
     mode = STREAM_MODE_MJPEG;
     modeSelect.value = mode;
+  }
+  if (mode === STREAM_MODE_JPEG && isTryCloudflareBase(cameraRouterBaseUrl)) {
+    mode = STREAM_MODE_MJPEG;
+    modeSelect.value = mode;
+    localStorage.setItem("cameraRouterSelectedMode", mode);
+  }
+  if (mode !== STREAM_MODE_JPEG) {
+    cameraPreview.jpegFallbackAttempted = false;
   }
   if (!cameraId) {
     setStreamStatus("Select a feed first", true);
