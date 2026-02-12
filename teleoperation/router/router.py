@@ -110,8 +110,11 @@ NODE_BRIDGE_FILE = "nkn_router_bridge.js"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 5070
 
-DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5060/router_info"
-LEGACY_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5001/router_info"
+DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5160/router_info"
+LEGACY_ADAPTER_ROUTER_INFO_URLS = (
+    "http://127.0.0.1:5060/router_info",
+    "http://127.0.0.1:5001/router_info",
+)
 DEFAULT_CAMERA_ROUTER_INFO_URL = "http://127.0.0.1:8080/router_info"
 
 DEFAULT_NKN_ENABLE = True
@@ -596,7 +599,7 @@ def _load_router_settings(config):
         ),
         DEFAULT_ADAPTER_ROUTER_INFO_URL,
     )
-    if adapter_router_info_url == LEGACY_ADAPTER_ROUTER_INFO_URL:
+    if adapter_router_info_url in LEGACY_ADAPTER_ROUTER_INFO_URLS:
         adapter_router_info_url = DEFAULT_ADAPTER_ROUTER_INFO_URL
     promote("router.services.adapter_router_info_url", adapter_router_info_url)
 

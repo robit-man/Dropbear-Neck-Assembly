@@ -106,10 +106,13 @@ from flask import Flask, render_template_string, redirect, url_for, jsonify
 
 # ---------- Configuration ----------
 CONFIG_PATH = "config.json"
-DEFAULT_ADAPTER_WS_URL = os.environ.get("ADAPTER_WS_URL", "ws://127.0.0.1:5060/ws")
-DEFAULT_ADAPTER_HTTP_URL = os.environ.get("ADAPTER_HTTP_URL", "http://127.0.0.1:5060/send_command")
-LEGACY_ADAPTER_WS_URL = "ws://127.0.0.1:5001/ws"
-LEGACY_ADAPTER_HTTP_URL = "http://127.0.0.1:5001/send_command"
+DEFAULT_ADAPTER_WS_URL = os.environ.get("ADAPTER_WS_URL", "ws://127.0.0.1:5160/ws")
+DEFAULT_ADAPTER_HTTP_URL = os.environ.get("ADAPTER_HTTP_URL", "http://127.0.0.1:5160/send_command")
+LEGACY_ADAPTER_WS_URLS = ("ws://127.0.0.1:5060/ws", "ws://127.0.0.1:5001/ws")
+LEGACY_ADAPTER_HTTP_URLS = (
+    "http://127.0.0.1:5060/send_command",
+    "http://127.0.0.1:5001/send_command",
+)
 DEFAULT_APP_HOST = "0.0.0.0"
 DEFAULT_APP_PORT = 5000
 DEFAULT_APP_ENABLE_TUNNEL = True
@@ -221,7 +224,7 @@ def _load_app_settings(config):
             legacy_keys=("websocket_url", "ADAPTER_WS_URL"),
         )
     ).strip() or DEFAULT_ADAPTER_WS_URL
-    if websocket_url == LEGACY_ADAPTER_WS_URL:
+    if websocket_url in LEGACY_ADAPTER_WS_URLS:
         websocket_url = DEFAULT_ADAPTER_WS_URL
     promote("app.adapter.websocket_url", websocket_url)
 
@@ -233,7 +236,7 @@ def _load_app_settings(config):
             legacy_keys=("http_url", "ADAPTER_HTTP_URL"),
         )
     ).strip() or DEFAULT_ADAPTER_HTTP_URL
-    if http_url == LEGACY_ADAPTER_HTTP_URL:
+    if http_url in LEGACY_ADAPTER_HTTP_URLS:
         http_url = DEFAULT_ADAPTER_HTTP_URL
     promote("app.adapter.http_url", http_url)
 
@@ -2920,6 +2923,8 @@ if __name__ == "__main__":
                     legacy_keys=("websocket_url", "ADAPTER_WS_URL"),
                 )
             ).strip() or DEFAULT_ADAPTER_WS_URL
+            if WEBSOCKET_URL in LEGACY_ADAPTER_WS_URLS:
+                WEBSOCKET_URL = DEFAULT_ADAPTER_WS_URL
             ADAPTER_HTTP_URL = str(
                 _read_config_value(
                     saved_config,
@@ -2928,6 +2933,8 @@ if __name__ == "__main__":
                     legacy_keys=("http_url", "ADAPTER_HTTP_URL"),
                 )
             ).strip() or DEFAULT_ADAPTER_HTTP_URL
+            if ADAPTER_HTTP_URL in LEGACY_ADAPTER_HTTP_URLS:
+                ADAPTER_HTTP_URL = DEFAULT_ADAPTER_HTTP_URL
             ui.update_metric("Adapter WS", WEBSOCKET_URL)
             ui.update_metric("Adapter HTTP", ADAPTER_HTTP_URL)
             ui.log("Applied adapter endpoint updates")

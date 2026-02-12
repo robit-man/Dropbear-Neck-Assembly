@@ -2,24 +2,21 @@
 const PI = Math.PI;
 
 // Defaults injected from backend config
-const SERVER_DEFAULT_WS_URL = "ws://127.0.0.1:5060/ws";
-const SERVER_DEFAULT_HTTP_URL = "http://127.0.0.1:5060/send_command";
-const LEGACY_DEFAULT_WS_URL = "ws://127.0.0.1:5001/ws";
-const LEGACY_DEFAULT_HTTP_URL = "http://127.0.0.1:5001/send_command";
+const SERVER_DEFAULT_WS_URL = "ws://127.0.0.1:5160/ws";
+const SERVER_DEFAULT_HTTP_URL = "http://127.0.0.1:5160/send_command";
+const LEGACY_DEFAULT_WS_URLS = ["ws://127.0.0.1:5060/ws", "ws://127.0.0.1:5001/ws"];
+const LEGACY_DEFAULT_HTTP_URLS = [
+    "http://127.0.0.1:5060/send_command",
+    "http://127.0.0.1:5001/send_command",
+];
 
 // Connection state - no auto-fill, only use saved or query params
 let WS_URL = localStorage.getItem('wsUrl') || "";
 let HTTP_URL = localStorage.getItem('httpUrl') || "";
-if (WS_URL === SERVER_DEFAULT_WS_URL) {
+if (WS_URL === SERVER_DEFAULT_WS_URL || LEGACY_DEFAULT_WS_URLS.includes(WS_URL)) {
     WS_URL = "";
 }
-if (WS_URL === LEGACY_DEFAULT_WS_URL) {
-    WS_URL = "";
-}
-if (HTTP_URL === SERVER_DEFAULT_HTTP_URL) {
-    HTTP_URL = "";
-}
-if (HTTP_URL === LEGACY_DEFAULT_HTTP_URL) {
+if (HTTP_URL === SERVER_DEFAULT_HTTP_URL || LEGACY_DEFAULT_HTTP_URLS.includes(HTTP_URL)) {
     HTTP_URL = "";
 }
 let SESSION_KEY = localStorage.getItem('sessionKey') || "";

@@ -132,8 +132,8 @@ DEFAULT_PASSWORD = "neck2025"  # Should be changed via config
 CONFIG_PATH = "config.json"
 DEFAULT_BAUDRATE = 115200
 DEFAULT_LISTEN_HOST = "0.0.0.0"
-DEFAULT_LISTEN_PORT = 5060
-LEGACY_DEFAULT_LISTEN_PORT = 5001
+DEFAULT_LISTEN_PORT = 5160
+LEGACY_DEFAULT_LISTEN_PORTS = {5001, 5060}
 DEFAULT_LISTEN_ROUTE = "/send_command"
 DEFAULT_ENABLE_TUNNEL = True
 DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
@@ -619,7 +619,7 @@ def _load_adapter_settings(config):
         minimum=1,
         maximum=65535,
     )
-    if listen_port == LEGACY_DEFAULT_LISTEN_PORT:
+    if listen_port in LEGACY_DEFAULT_LISTEN_PORTS:
         listen_port = DEFAULT_LISTEN_PORT
     promote("adapter.network.listen_port", listen_port)
 

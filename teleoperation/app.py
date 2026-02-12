@@ -219,7 +219,7 @@ class WatchdogManager:
                 "Adapter",
                 "adapter/adapter.py",
                 health_mode="http",
-                health_port=5060,
+                health_port=5160,
                 health_path="/health",
                 config_relpath="adapter/config.json",
                 config_port_paths=("adapter.network.listen_port", "listen_port", "port"),
@@ -1008,7 +1008,7 @@ class WatchdogManager:
             escaped = wrapped.replace("\\", "\\\\").replace('"', '\\"')
             apple_script = f'tell application "Terminal" to do script "bash -lc \\"{escaped}\\""'
             try:
-                proc = subprocess.Popen(["osascript", "-e", apple_script])
+                proc = subprocess.Popen(["osascript", "-e", apple_script], env=child_env)
                 runtime.terminal_process = proc
                 runtime.stop_stage = 0
                 runtime.stop_requested_at = 0.0
@@ -1044,7 +1044,7 @@ class WatchdogManager:
             return
 
         try:
-            proc = subprocess.Popen(terminal_cmd, cwd=str(self.base_dir))
+            proc = subprocess.Popen(terminal_cmd, cwd=str(self.base_dir), env=child_env)
             runtime.terminal_process = proc
             runtime.stop_stage = 0
             runtime.stop_requested_at = 0.0
