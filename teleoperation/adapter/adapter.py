@@ -142,16 +142,24 @@ AUTO_SERIAL_CANDIDATES = ("/dev/ttyUSB0", "/dev/ttyUSB1")
 tunnel_url = None
 tunnel_url_lock = Lock()
 tunnel_process = None
+tunnel_last_error = ""
+tunnel_desired = False
+tunnel_restart_lock = Lock()
 
 # --- Runtime Control ---
 SCRIPT_WATCH_INTERVAL_SECONDS = 1.0
+DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
+service_running = threading.Event()
 
 
 def stop_cloudflared_tunnel():
     """Stop the cloudflared subprocess if it is running."""
-    global tunnel_process
+    global tunnel_process, tunnel_last_error, tunnel_url, tunnel_desired
+    tunnel_desired = False
     process = tunnel_process
     if not process:
+        with tunnel_url_lock:
+            tunnel_url = None
         return
     try:
         if process.poll() is None:
@@ -164,6 +172,9 @@ def stop_cloudflared_tunnel():
         pass
     finally:
         tunnel_process = None
+        with tunnel_url_lock:
+            tunnel_url = None
+        tunnel_last_error = "Tunnel stopped"
 
 
 def restart_current_process(reason="Restarting process"):
@@ -370,7 +381,11 @@ def install_cloudflared():
 
 def start_cloudflared_tunnel(local_port, command_route="/send_command"):
     """Start cloudflared tunnel in background and capture the URL."""
-    global tunnel_url, tunnel_process
+    global tunnel_url, tunnel_process, tunnel_last_error, tunnel_desired
+    with tunnel_restart_lock:
+        if tunnel_process is not None and tunnel_process.poll() is None:
+            return True
+        tunnel_desired = True
 
     cloudflared_path = get_cloudflared_path()
     if not os.path.exists(cloudflared_path):
@@ -380,12 +395,16 @@ def start_cloudflared_tunnel(local_port, command_route="/send_command"):
     if not command_route.startswith("/"):
         command_route = f"/{command_route}"
 
+    with tunnel_url_lock:
+        tunnel_url = None
+    tunnel_last_error = ""
+
     url = f"http://localhost:{local_port}"
 
     try:
         log("[START] Starting Cloudflare Tunnel...")
         process = subprocess.Popen(
-            [cloudflared_path, "tunnel", "--url", url],
+            [cloudflared_path, "tunnel", "--protocol", "http2", "--url", url],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -395,27 +414,65 @@ def start_cloudflared_tunnel(local_port, command_route="/send_command"):
 
         # Start a thread to monitor output and capture the URL
         def monitor_tunnel():
-            global tunnel_url
-            for line in iter(process.stdout.readline, ''):
-                line = line.strip()
-                if line:
-                    # Look for the tunnel URL in the output
-                    if "trycloudflare.com" in line or "https://" in line:
-                        # Extract URL using regex
-                        url_match = re.search(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-                        if url_match:
-                            with tunnel_url_lock:
-                                if tunnel_url is None:
-                                    tunnel_url = url_match.group(0)
-                                    log(f"")
-                                    log(f"{'='*60}")
-                                    log(f"[TUNNEL] Cloudflare Tunnel URL: {tunnel_url}")
-                                    log(f"{'='*60}")
-                                    log(f"")
-                                    log(f"Use this URL in app.py for remote access:")
-                                    log(f"  HTTP URL: {tunnel_url}{command_route}")
-                                    log(f"  WS URL:   {tunnel_url.replace('https://', 'wss://')}")
-                                    log(f"")
+            global tunnel_url, tunnel_process, tunnel_last_error
+            found_url = False
+            captured_url = ""
+            if process.stdout is None:
+                return
+
+            for raw_line in iter(process.stdout.readline, ""):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                lowered = line.lower()
+                if any(token in lowered for token in ("error", "failed", "unable", "panic")):
+                    log(f"[CLOUDFLARED] {line}")
+
+                if "trycloudflare.com" in line:
+                    url_match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                    if not url_match:
+                        url_match = re.search(r"https://[^\s]+trycloudflare\.com[^\s]*", line)
+                    if url_match:
+                        with tunnel_url_lock:
+                            if tunnel_url is None:
+                                captured_url = url_match.group(0)
+                                tunnel_url = captured_url
+                                found_url = True
+                                tunnel_last_error = ""
+                                log("")
+                                log(f"{'='*60}")
+                                log(f"[TUNNEL] Cloudflare Tunnel URL: {tunnel_url}")
+                                log(f"{'='*60}")
+                                log("")
+                                log(f"Use this URL in app.py for remote access:")
+                                log(f"  HTTP URL: {tunnel_url}{command_route}")
+                                log(f"  WS URL:   {tunnel_url.replace('https://', 'wss://')}/ws")
+                                log("")
+
+            return_code = process.poll()
+            with tunnel_restart_lock:
+                if tunnel_process is process:
+                    tunnel_process = None
+
+            if captured_url:
+                with tunnel_url_lock:
+                    if tunnel_url == captured_url:
+                        tunnel_url = None
+
+            if return_code is not None:
+                if found_url:
+                    tunnel_last_error = f"cloudflared exited (code {return_code}); tunnel URL expired"
+                    log(f"[WARN] {tunnel_last_error}")
+                else:
+                    tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
+                    log(f"[ERROR] {tunnel_last_error}")
+
+                if tunnel_desired and service_running.is_set():
+                    delay = DEFAULT_TUNNEL_RESTART_DELAY_SECONDS
+                    log(f"[WARN] Restarting cloudflared in {delay:.1f}s...")
+                    time.sleep(delay)
+                    if tunnel_desired and service_running.is_set():
+                        start_cloudflared_tunnel(local_port, command_route)
 
         thread = threading.Thread(target=monitor_tunnel, daemon=True)
         thread.start()
@@ -1000,22 +1057,64 @@ def main():
         local_base = f"http://127.0.0.1:{listen_port}"
         local_http = f"{local_base}{listen_route}"
         local_ws = f"ws://127.0.0.1:{listen_port}/ws"
+        process_running = tunnel_process is not None and tunnel_process.poll() is None
         with tunnel_url_lock:
-            if tunnel_url:
+            current_tunnel = tunnel_url if process_running else None
+            stale_tunnel = tunnel_url if (tunnel_url and not process_running) else None
+            current_error = tunnel_last_error
+
+            if current_tunnel:
                 return jsonify(
                     {
                         "status": "success",
-                        "tunnel_url": tunnel_url,
-                        "http_endpoint": f"{tunnel_url}{listen_route}",
-                        "ws_endpoint": f"{tunnel_url.replace('https://', 'wss://')}/ws",
+                        "running": process_running,
+                        "tunnel_url": current_tunnel,
+                        "http_endpoint": f"{current_tunnel}{listen_route}",
+                        "ws_endpoint": f"{current_tunnel.replace('https://', 'wss://')}/ws",
                         "local_base_url": local_base,
                         "local_http_endpoint": local_http,
                         "local_ws_endpoint": local_ws,
+                        "message": "Tunnel URL available",
                     }
                 )
+
+            if stale_tunnel:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "running": process_running,
+                        "tunnel_url": "",
+                        "http_endpoint": "",
+                        "ws_endpoint": "",
+                        "stale_tunnel_url": stale_tunnel,
+                        "local_base_url": local_base,
+                        "local_http_endpoint": local_http,
+                        "local_ws_endpoint": local_ws,
+                        "error": current_error or "Tunnel URL expired",
+                        "message": "Tunnel process is not running; URL is stale",
+                    }
+                )
+
+            if current_error:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "running": process_running,
+                        "tunnel_url": "",
+                        "http_endpoint": "",
+                        "ws_endpoint": "",
+                        "local_base_url": local_base,
+                        "local_http_endpoint": local_http,
+                        "local_ws_endpoint": local_ws,
+                        "error": current_error,
+                        "message": "Tunnel failed to start",
+                    }
+                )
+
             return jsonify(
                 {
                     "status": "pending",
+                    "running": process_running,
                     "tunnel_url": "",
                     "http_endpoint": "",
                     "ws_endpoint": "",
@@ -1031,15 +1130,23 @@ def main():
         """Discovery payload for the NKN router sidecar."""
         process_running = tunnel_process is not None and tunnel_process.poll() is None
         with tunnel_url_lock:
-            current_tunnel = tunnel_url
+            current_tunnel = tunnel_url if process_running else ""
+            stale_tunnel = tunnel_url if (tunnel_url and not process_running) else ""
+            current_error = tunnel_last_error
 
         local_base = f"http://127.0.0.1:{listen_port}"
-        tunnel_state = "active" if current_tunnel else ("starting" if process_running else "inactive")
+        tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
+        if stale_tunnel and not process_running:
+            tunnel_state = "stale"
+        if current_error and not process_running and not current_tunnel and not stale_tunnel:
+            tunnel_state = "error"
         tunnel_data = {
             "state": tunnel_state,
             "tunnel_url": current_tunnel,
             "http_endpoint": f"{current_tunnel}{listen_route}" if current_tunnel else "",
             "ws_endpoint": f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else "",
+            "stale_tunnel_url": stale_tunnel,
+            "error": current_error,
         }
 
         return jsonify(
@@ -1145,6 +1252,8 @@ def main():
         result = process_command(cmd, ser)
         ws_send(json.dumps(result))
 
+    service_running.set()
+
     # --- Cloudflare Tunnel Setup ---
     enable_tunnel = adapter_settings["enable_tunnel"]
     if enable_tunnel:
@@ -1206,10 +1315,27 @@ def main():
             ui.update_metric("Sessions", str(session_count))
             ui.update_metric("Commands", str(command_count["value"]))
 
+            process_running = tunnel_process is not None and tunnel_process.poll() is None
             with tunnel_url_lock:
-                if tunnel_url:
-                    ui.update_metric("Tunnel URL", tunnel_url)
+                current_tunnel = tunnel_url if process_running else None
+                stale_tunnel = tunnel_url if (tunnel_url and not process_running) else None
+                current_error = tunnel_last_error
+
+                if current_tunnel:
+                    ui.update_metric("Tunnel URL", current_tunnel)
                     ui.update_metric("Tunnel Status", "Active")
+                elif stale_tunnel and not process_running:
+                    ui.update_metric("Tunnel URL", "Stale")
+                    ui.update_metric("Tunnel Status", "Stale URL")
+                elif current_error:
+                    ui.update_metric("Tunnel URL", "N/A")
+                    ui.update_metric("Tunnel Status", f"Error: {current_error}")
+                elif process_running:
+                    ui.update_metric("Tunnel URL", "Pending...")
+                    ui.update_metric("Tunnel Status", "Starting...")
+                else:
+                    ui.update_metric("Tunnel URL", "N/A")
+                    ui.update_metric("Tunnel Status", "Inactive")
 
             time.sleep(1)
 
@@ -1291,6 +1417,7 @@ def main():
         except KeyboardInterrupt:
             pass
         finally:
+            service_running.clear()
             with restart_lock:
                 restart_requested = restart_state["requested"]
                 restart_reason = restart_state["reason"]
@@ -1302,6 +1429,10 @@ def main():
                 log("Shutting down...")
     else:
         # Run Flask normally without UI
-        socketio.run(app, host=listen_host, port=listen_port, debug=True)
+        try:
+            socketio.run(app, host=listen_host, port=listen_port, debug=False, use_reloader=False)
+        finally:
+            service_running.clear()
+            stop_cloudflared_tunnel()
 if __name__ == "__main__":
     main()
