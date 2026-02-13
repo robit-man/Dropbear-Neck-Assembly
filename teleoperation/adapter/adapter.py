@@ -977,6 +977,7 @@ def main():
 
     runtime_security = {
         "password": adapter_settings["password"],
+        "require_auth": True,
     }
 
     def _persist(path, value):
@@ -1719,7 +1720,7 @@ def main():
                 "status": "ok",
                 "service": "adapter",
                 "uptime_seconds": round(time.time() - started_at, 2),
-                "require_auth": bool(runtime_security["require_auth"]),
+                "require_auth": bool(runtime_security.get("require_auth", True)),
                 "tunnel_running": process_running,
                 "tunnel_error": current_error,
                 "tunnel_url": current_tunnel if process_running else None,
