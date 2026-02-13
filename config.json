@@ -46,7 +46,7 @@
         },
         "network": {
             "listen_host": "0.0.0.0",
-            "listen_port": 5160,
+            "listen_port": 5180,
             "listen_route": "/send_command"
         },
         "security": {

@@ -1706,15 +1706,22 @@ def main():
 
     @app.route("/health", methods=["GET"])
     def health():
-        payload = _build_adapter_discovery_payload()
+        payload = {}
         with sessions_lock:
             session_count = len(sessions)
         serial_connected = bool(ser is not None and getattr(ser, "is_open", False))
-        tunnel_payload = payload.get("tunnel", {}) if isinstance(payload, dict) else {}
         process_running = tunnel_process is not None and tunnel_process.poll() is None
-        current_tunnel_raw = tunnel_payload.get("tunnel_url")
-        current_tunnel = str(current_tunnel_raw or "").strip() if current_tunnel_raw is not None else None
-        current_error = str(tunnel_payload.get("error") or "").strip()
+        current_tunnel = None
+        current_error = ""
+        try:
+            payload = _build_adapter_discovery_payload()
+            tunnel_payload = payload.get("tunnel", {}) if isinstance(payload, dict) else {}
+            current_tunnel_raw = tunnel_payload.get("tunnel_url")
+            current_tunnel = str(current_tunnel_raw or "").strip() if current_tunnel_raw is not None else None
+            current_error = str(tunnel_payload.get("error") or "").strip()
+        except Exception as exc:
+            current_error = str(exc)
+            log(f"[HEALTH] discovery payload error: {current_error}")
         return jsonify(
             {
                 "status": "ok",
