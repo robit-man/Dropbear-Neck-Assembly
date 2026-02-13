@@ -700,7 +700,7 @@ def _build_adapter_config_spec():
                         value_type="str",
                         default="",
                         description="Serial device path, e.g. COM3 or /dev/ttyUSB0.",
-                        restart_required=True,
+                        restart_required=False,
                     ),
                     SettingSpec(
                         id="baudrate",
@@ -711,7 +711,7 @@ def _build_adapter_config_spec():
                         min_value=300,
                         max_value=2000000,
                         description="UART baudrate for the neck controller.",
-                        restart_required=True,
+                        restart_required=False,
                     ),
                 ),
             ),
@@ -979,6 +979,9 @@ def main():
         "password": adapter_settings["password"],
         "require_auth": True,
     }
+    ser = None
+    serial_device = adapter_settings["serial_device"]
+    baudrate = adapter_settings["baudrate"]
 
     def _persist(path, value):
         nonlocal config_changed
@@ -989,6 +992,7 @@ def main():
 
     def _apply_runtime_config(saved_config):
         global SESSION_TIMEOUT
+        nonlocal ser, serial_device, baudrate
         password = str(
             _read_config_value(
                 saved_config,
@@ -1008,11 +1012,88 @@ def main():
             minimum=30,
             maximum=86400,
         )
+        configured_serial_device = _read_config_value(
+            saved_config,
+            "adapter.serial.device",
+            serial_device or "",
+            legacy_keys=("serial_device",),
+        )
+        configured_serial_device = str(configured_serial_device or "").strip() or None
+        configured_baudrate = _as_int(
+            _read_config_value(
+                saved_config,
+                "adapter.serial.baudrate",
+                baudrate,
+                legacy_keys=("baudrate",),
+            ),
+            baudrate,
+            minimum=300,
+            maximum=2_000_000,
+        )
+
         runtime_security["password"] = password
         SESSION_TIMEOUT = timeout
+        serial_apply = {
+            "changed": False,
+            "attempted": False,
+            "configured_device": configured_serial_device or "",
+            "baudrate": int(configured_baudrate),
+            "connected": bool(ser is not None and getattr(ser, "is_open", False)),
+            "error": "",
+        }
+
+        if configured_serial_device != serial_device or int(configured_baudrate) != int(baudrate):
+            serial_apply["changed"] = True
+
+            with serial_io_lock:
+                if ser is not None:
+                    try:
+                        if getattr(ser, "is_open", False):
+                            ser.close()
+                            log(f"Serial disconnected: {serial_device}@{baudrate}")
+                    except Exception as close_exc:
+                        log(f"Serial close warning: {close_exc}")
+                    finally:
+                        ser = None
+
+                serial_device = configured_serial_device
+                baudrate = int(configured_baudrate)
+
+                if serial_device:
+                    serial_apply["attempted"] = True
+                    try:
+                        ser = serial.Serial(serial_device, int(baudrate), timeout=1)
+                        serial_apply["connected"] = True
+                        log(f"[CONFIG] Serial reconnected from config save: {serial_device}@{baudrate}")
+                    except Exception as open_exc:
+                        serial_apply["connected"] = False
+                        serial_apply["error"] = str(open_exc)
+                        log(
+                            f"[WARN] Configured serial connect failed: "
+                            f"{serial_device}@{baudrate} ({open_exc})"
+                        )
+                else:
+                    serial_apply["connected"] = False
+                    log("[CONFIG] Serial device cleared; serial connection disabled")
+
         if ui:
             ui.update_metric("Session Timeout (s)", str(SESSION_TIMEOUT))
+            ui.update_metric("Serial Port", serial_device or "N/A")
+            ui.update_metric("Baudrate", str(baudrate))
+            ui.update_metric(
+                "Serial",
+                "Connected" if (ser is not None and getattr(ser, "is_open", False)) else "Disconnected",
+            )
             ui.log("Applied live security updates from config save")
+            if serial_apply["changed"]:
+                if serial_apply["connected"]:
+                    ui.log(f"Serial config applied: {serial_device}@{baudrate}")
+                else:
+                    ui.log(
+                        f"Serial config apply failed for {serial_device or '(none)'}@{baudrate}: "
+                        f"{serial_apply['error'] or 'not connected'}"
+                    )
+        return serial_apply
 
     if ui:
         ui.on_save(_apply_runtime_config)
@@ -1021,11 +1102,6 @@ def main():
     if not interactive_prompts:
         log("[BOOT] Interactive prompts disabled; adapter will continue without blocking for manual input")
 
-    # --- Serial Connection Setup ---
-    ser = None
-    serial_device = adapter_settings["serial_device"]
-    baudrate = adapter_settings["baudrate"]
-
     # 1) Try saved config
     if serial_device:
         try:
@@ -1033,13 +1109,30 @@ def main():
             print("Serial connection OK from saved config")
         except Exception as exc:
             print(f"Saved config failed: {exc}")
+            log(f"[WARN] Saved serial config failed: {serial_device}@{baudrate} ({exc})")
 
-    # 2) Auto-try default candidates at default baudrate
+    # 2) Auto-try default candidates at default baudrate if the initial probe failed.
     if ser is None:
+        fallback_candidates = []
         for dev in AUTO_SERIAL_CANDIDATES:
+            candidate = str(dev or "").strip()
+            if not candidate:
+                continue
+            if serial_device and candidate == serial_device:
+                continue
+            fallback_candidates.append(candidate)
+
+        if serial_device and fallback_candidates:
+            log(
+                f"[WARN] Configured serial device {serial_device}@{baudrate} unavailable; "
+                f"trying fallback candidates: {', '.join(fallback_candidates)}"
+            )
+
+        for dev in fallback_candidates:
             try:
                 ser = serial.Serial(dev, DEFAULT_BAUDRATE, timeout=1)
-                print(f"Auto-connected: {dev}@{DEFAULT_BAUDRATE}")
+                print(f"Auto-connected fallback: {dev}@{DEFAULT_BAUDRATE}")
+                log(f"[BOOT] Fallback serial connected: {dev}@{DEFAULT_BAUDRATE}")
                 serial_device = dev
                 baudrate = DEFAULT_BAUDRATE
                 _persist("adapter.serial.device", serial_device)
@@ -1047,6 +1140,12 @@ def main():
                 break
             except Exception:
                 continue
+
+        if ser is None and serial_device and not fallback_candidates:
+            log(
+                f"[WARN] Configured serial device {serial_device}@{baudrate} unavailable; "
+                "no fallback candidates configured"
+            )
 
     # 3) Interactive fallback (optional in supervised/headless mode)
     if ser is None and interactive_prompts:
@@ -1839,13 +1938,14 @@ def main():
             _set_nested(config_data, path, value)
         _load_adapter_settings(config_data)
         save_config(config_data)
-        _apply_runtime_config(config_data)
+        runtime_apply = _apply_runtime_config(config_data)
 
         return jsonify({
             "status": "success",
             "message": "Config saved",
             "saved_paths": sorted(coerced_changes.keys()),
             "restart_required": restart_required,
+            "runtime_apply": runtime_apply,
         })
 
     @app.route("/auth", methods=["POST"])
