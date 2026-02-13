@@ -219,7 +219,7 @@ class WatchdogManager:
                 "Adapter",
                 "adapter/adapter.py",
                 health_mode="http",
-                health_port=5160,
+                health_port=5180,
                 health_path="/health",
                 config_relpath="adapter/config.json",
                 config_port_paths=("adapter.network.listen_port", "listen_port", "port"),
@@ -891,7 +891,7 @@ class WatchdogManager:
         python_cmd = shlex.quote(sys.executable)
         script_cmd = shlex.quote(str(svc.script_path(self.base_dir)))
         args = " ".join(shlex.quote(arg) for arg in svc.args)
-        core = f"cd {workdir}; {python_cmd} {script_cmd}"
+        core = f"cd {workdir} || exit 1; exec {python_cmd} {script_cmd}"
         if args:
             core += f" {args}"
         return core
@@ -899,14 +899,11 @@ class WatchdogManager:
     def _build_wrapped_shell_command(self, svc: ServiceSpec) -> str:
         pidfile = shlex.quote(str(self._pid_file(svc)))
         core = self._build_service_shell_command(svc)
-        # Keep terminal open with the service in foreground while tracking the real child PID.
+        # Keep the service in the terminal foreground so curses receives keyboard input.
         return (
-            f"{core} & child=$!; "
-            f"echo $child > {pidfile}; "
-            f"wait $child; "
-            f"rc=$?; "
-            f"rm -f {pidfile}; "
-            f"exit $rc"
+            f"echo $$ > {pidfile}; "
+            f"trap 'rm -f {pidfile}' EXIT INT TERM; "
+            f"{core}"
         )
 
     def _build_terminal_command(self, title: str, wrapped_cmd: str) -> Optional[List[str]]:

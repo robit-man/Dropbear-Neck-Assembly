@@ -1265,6 +1265,8 @@ def _coerce_router_info_shape(name, query_url, data):
                     "http_endpoint": local_http,
                     "ws_endpoint": local_ws,
                     "auth_route": "/auth",
+                    "health_url": f"{base_local}/health",
+                    "dashboard_url": f"{base_local}/",
                 },
                 "tunnel": {
                     "state": "active" if tunnel_url else "inactive",
@@ -1301,6 +1303,8 @@ def _coerce_router_info_shape(name, query_url, data):
                     "http_endpoint": f"{base_local}/send_command",
                     "ws_endpoint": f"{base_local.replace('http://', 'ws://').replace('https://', 'wss://')}/ws",
                     "auth_route": "/auth",
+                    "health_url": f"{base_local}/health",
+                    "dashboard_url": f"{base_local}/",
                 },
                 "tunnel": {
                     "state": "active" if tunnel_url else "inactive",
@@ -1459,6 +1463,16 @@ def build_resolved_endpoints(services):
     if not camera_base:
         camera_base = str(camera_local.get("base_url") or "").strip()
 
+    adapter_health = str(
+        adapter_local.get("health_url") or (f"{adapter_base}/health" if adapter_base else "")
+    ).strip()
+    adapter_dashboard = str(
+        adapter_local.get("dashboard_url") or (f"{adapter_base}/" if adapter_base else "")
+    ).strip()
+    adapter_auth = str(
+        adapter_local.get("auth_route") or "/auth"
+    ).strip()
+
     return {
         "adapter": {
             "tunnel_url": adapter_tunnel_url,
@@ -1468,6 +1482,9 @@ def build_resolved_endpoints(services):
             "ws_endpoint": adapter_ws,
             "local_http_endpoint": adapter_local_http,
             "local_ws_endpoint": adapter_local_ws,
+            "health_url": adapter_health,
+            "dashboard_url": adapter_dashboard,
+            "auth_route": adapter_auth,
         },
         "camera": {
             "tunnel_url": camera_tunnel_url,

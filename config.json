@@ -39,5 +39,23 @@
             "default_rotation_degrees": 90,
             "camera_rotation_degrees": {}
         }
+    },
+    "adapter": {
+        "serial": {
+            "baudrate": 115200
+        },
+        "network": {
+            "listen_host": "0.0.0.0",
+            "listen_port": 5160,
+            "listen_route": "/send_command"
+        },
+        "security": {
+            "password": "neck2025",
+            "session_timeout": 300
+        },
+        "tunnel": {
+            "enable": true,
+            "auto_install_cloudflared": true
+        }
     }
 }

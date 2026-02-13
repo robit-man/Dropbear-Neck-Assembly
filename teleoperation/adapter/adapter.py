@@ -132,8 +132,8 @@ DEFAULT_PASSWORD = "neck2025"  # Should be changed via config
 CONFIG_PATH = "config.json"
 DEFAULT_BAUDRATE = 115200
 DEFAULT_LISTEN_HOST = "0.0.0.0"
-DEFAULT_LISTEN_PORT = 5160
-LEGACY_DEFAULT_LISTEN_PORTS = {5001, 5060}
+DEFAULT_LISTEN_PORT = 5180
+LEGACY_DEFAULT_LISTEN_PORTS = {5001, 5060, 5160}
 DEFAULT_LISTEN_ROUTE = "/send_command"
 DEFAULT_ENABLE_TUNNEL = True
 DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
@@ -802,6 +802,118 @@ def _build_adapter_config_spec():
         ),
     )
 
+# --- Configurator helpers (mirror camera_route.py pattern) ---
+def _config_spec_available():
+    return UI_AVAILABLE and ConfigSpec is not None and SettingSpec is not None and CategorySpec is not None
+
+
+def _serialize_setting_spec(spec):
+    return {
+        "id": str(spec.id),
+        "label": str(spec.label),
+        "path": str(spec.path),
+        "value_type": str(spec.value_type),
+        "description": str(spec.description or ""),
+        "default": spec.default,
+        "choices": list(getattr(spec, "choices", None) or ()),
+        "sensitive": bool(getattr(spec, "sensitive", False)),
+        "restart_required": bool(getattr(spec, "restart_required", False)),
+        "min_value": getattr(spec, "min_value", None),
+        "max_value": getattr(spec, "max_value", None),
+    }
+
+
+def _adapter_config_schema_payload(config_data=None):
+    if not _config_spec_available():
+        return {
+            "status": "error",
+            "message": "Configurator unavailable (terminal_ui support is not loaded).",
+        }, 503
+
+    spec = _build_adapter_config_spec()
+    if spec is None:
+        return {"status": "error", "message": "Configurator spec unavailable."}, 503
+
+    config_data = load_config() if config_data is None else config_data
+    categories_payload = []
+    for category in spec.categories:
+        settings_payload = []
+        for setting in category.settings:
+            raw = _get_nested(config_data, setting.path, _MISSING)
+            if raw is _MISSING:
+                current_value = setting.default
+                current_source = "default"
+            else:
+                current_value = raw
+                current_source = "config"
+            settings_payload.append(
+                {
+                    **_serialize_setting_spec(setting),
+                    "current_value": current_value,
+                    "current_source": current_source,
+                }
+            )
+        categories_payload.append(
+            {
+                "id": str(category.id),
+                "label": str(category.label),
+                "settings": settings_payload,
+            }
+        )
+
+    return {
+        "status": "success",
+        "config": {
+            "label": str(spec.label),
+            "categories": categories_payload,
+        },
+    }, 200
+
+
+def _coerce_config_value(raw_value, setting_spec):
+    value_type = str(setting_spec.value_type or "str").strip().lower()
+
+    if value_type == "bool":
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, (int, float)):
+            return bool(raw_value)
+        if isinstance(raw_value, str):
+            normalized = raw_value.strip().lower()
+            if normalized in ("1", "true", "yes", "on"):
+                return True
+            if normalized in ("0", "false", "no", "off"):
+                return False
+        raise ValueError("Expected boolean value")
+
+    if value_type == "int":
+        try:
+            parsed = int(str(raw_value).strip())
+        except (TypeError, ValueError):
+            raise ValueError("Expected integer value")
+        if setting_spec.min_value is not None and parsed < setting_spec.min_value:
+            raise ValueError(f"Minimum is {setting_spec.min_value}")
+        if setting_spec.max_value is not None and parsed > setting_spec.max_value:
+            raise ValueError(f"Maximum is {setting_spec.max_value}")
+        return parsed
+
+    if value_type == "float":
+        try:
+            parsed = float(str(raw_value).strip())
+        except (TypeError, ValueError):
+            raise ValueError("Expected numeric value")
+        if setting_spec.min_value is not None and parsed < setting_spec.min_value:
+            raise ValueError(f"Minimum is {setting_spec.min_value}")
+        if setting_spec.max_value is not None and parsed > setting_spec.max_value:
+            raise ValueError(f"Maximum is {setting_spec.max_value}")
+        return parsed
+
+    if value_type == "secret":
+        return str(raw_value)
+
+    return str(raw_value).strip()
+
+
 # --- Process a Single Command ---
 def process_command(cmd, ser):
     log(f"Received command: {cmd}")
@@ -1009,34 +1121,27 @@ def main():
     # --- Network Host/Port/Route ---
     listen_host = adapter_settings["listen_host"]
     listen_route = _normalize_route(adapter_settings["listen_route"])
-    listen_port = None
-    configured_port = adapter_settings["listen_port"]
+    configured_port = _as_int(
+        adapter_settings.get("listen_port"),
+        DEFAULT_LISTEN_PORT,
+        minimum=1,
+        maximum=65535,
+    )
 
     if is_port_available(configured_port, listen_host):
         listen_port = configured_port
-        print(f"Using saved port: {configured_port}")
+        log(f"[BOOT] Using configured listen port: {configured_port}")
+    elif configured_port != DEFAULT_LISTEN_PORT and is_port_available(DEFAULT_LISTEN_PORT, listen_host):
+        listen_port = DEFAULT_LISTEN_PORT
+        log(
+            f"[WARN] Configured listen port {configured_port} unavailable on {listen_host}; "
+            f"falling back to default {DEFAULT_LISTEN_PORT}"
+        )
     else:
-        print(f"Saved port {configured_port} unavailable on {listen_host}.")
-        if not interactive_prompts:
-            raise RuntimeError(
-                f"Configured listen port {configured_port} unavailable and prompts are disabled; "
-                "set adapter.network.listen_port to a free port"
-            )
-
-    while listen_port is None:
-        p_in = input(f"Listen port (1-65535) [{configured_port}]: ").strip()
-        if not p_in:
-            p = configured_port
-        else:
-            try:
-                p = int(p_in)
-            except ValueError:
-                print("Invalid port.\n")
-                continue
-        if is_port_available(p, listen_host):
-            listen_port = p
-        else:
-            print("Port not available.\n")
+        raise RuntimeError(
+            f"No available adapter port on {listen_host}. "
+            f"Tried configured={configured_port} and default={DEFAULT_LISTEN_PORT}."
+        )
 
     _persist("adapter.network.listen_host", listen_host)
     _persist("adapter.network.listen_port", listen_port)
@@ -1108,38 +1213,480 @@ def main():
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Neck Adapter</title>
+    <title>Neck Adapter Dashboard</title>
     <style>
+      * { box-sizing: border-box; }
       body { margin: 0; background: #111; color: #fff; font-family: monospace; }
-      .wrap { max-width: 980px; margin: 0 auto; padding: 1rem; }
+      .wrap { max-width: 1280px; margin: 0 auto; padding: 1rem; }
       .panel { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 1rem; margin-bottom: 1rem; }
-      code { color: #ffd479; }
-      .row { margin: 0.3rem 0; }
-      a, a:visited { color: #d8e3ff; }
+      .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+      .title { margin: 0; }
+      .muted { opacity: 0.85; }
       .ok { color: #00d08a; }
-      .warn { color: #ffb86c; }
+      .warn { color: #ffcc66; }
+      .bad { color: #ff5c5c; }
+      code { color: #ffcc66; }
+      a, a:visited { color: #d8e3ff; }
+      input, button, select { background: #222; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 0.5rem; }
+      button { cursor: pointer; }
+      .tabs { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+      .tab-btn { background: #222; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 0.5rem 0.8rem; cursor: pointer; }
+      .tab-btn.active { border-color: #8aa0ff; color: #d7e1ff; }
+      .tab-panel { display: none; margin-top: 0.8rem; }
+      .tab-panel.active { display: block; }
+      .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 0.75rem; }
+      .card { background: #1b1b1b; border: 1px solid #333; border-radius: 10px; padding: 0.8rem; }
+      .card .label { opacity: 0.85; font-size: 0.78rem; }
+      .card .value { margin-top: 4px; font-size: 1.05rem; }
+      .motor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.75rem; }
+      .motor-card { background: #161616; border: 1px solid #333; border-radius: 10px; padding: 0.8rem; }
+      .motor-card .motor-label { font-size: 0.85rem; opacity: 0.85; margin-bottom: 4px; }
+      .motor-card .motor-value { font-size: 1.4rem; font-weight: 700; margin-bottom: 6px; }
+      .motor-bar-track { width: 100%; height: 10px; background: #222; border-radius: 5px; overflow: hidden; position: relative; }
+      .motor-bar-fill { height: 100%; border-radius: 5px; transition: width 0.3s, left 0.3s; position: absolute; }
+      .motor-bar-center { position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #555; }
+      .motor-range { font-size: 0.72rem; opacity: 0.6; margin-top: 3px; display: flex; justify-content: space-between; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 0.45rem; border-bottom: 1px solid #333; vertical-align: top; }
+      th { opacity: 0.85; }
+      .cfg-wrap { overflow: auto; max-height: 460px; border: 1px solid #333; border-radius: 8px; }
+      .cfg-input, .cfg-select { width: 100%; background: #222; color: #fff; border: 1px solid #444; border-radius: 6px; padding: 0.35rem 0.45rem; }
+      .cfg-check { transform: scale(1.1); }
+      .cfg-row.pending { background: rgba(0, 208, 138, 0.08); }
+      .cfg-source { font-size: 0.8rem; opacity: 0.85; }
+      .cfg-path { font-size: 0.78rem; opacity: 0.72; }
+      .badge { display: inline-block; margin-left: 0.4rem; padding: 0.1rem 0.4rem; border-radius: 999px; border: 1px solid #666; font-size: 0.7rem; }
+      .config-status.ok { color: #00d08a; }
+      .config-status.bad { color: #ff5c5c; }
+      .meta { opacity: 0.85; font-size: 0.85rem; margin: 0.3rem 0; }
+      .links-grid { display: grid; grid-template-columns: auto 1fr; gap: 0.2rem 0.8rem; align-items: baseline; }
+      .links-grid .lbl { opacity: 0.75; text-align: right; white-space: nowrap; }
     </style>
   </head>
   <body>
     <div class="wrap">
       <div class="panel">
-        <h2 style="margin-top:0;">Neck Adapter</h2>
-        <div class="row">Service status: <span class="{{ status_class }}">{{ status_text }}</span></div>
-        <div class="row">Local dashboard: <a href="{{ local_base }}/">{{ local_base }}/</a></div>
-        <div class="row">Local health: <a href="{{ local_base }}/health">{{ local_base }}/health</a></div>
-        <div class="row">Local command: <code>{{ local_http }}</code></div>
-        <div class="row">Local websocket: <code>{{ local_ws }}</code></div>
-        <div class="row">LAN base: <code>{{ lan_base or "N/A" }}</code></div>
-        <div class="row">LAN command: <code>{{ lan_http or "N/A" }}</code></div>
-        <div class="row">Router info: <a href="{{ local_base }}/router_info">{{ local_base }}/router_info</a></div>
-        <div class="row">Tunnel info: <a href="{{ local_base }}/tunnel_info">{{ local_base }}/tunnel_info</a></div>
+        <div class="row">
+          <h2 class="title">Neck Adapter Dashboard</h2>
+          <span id="serialState" class="muted">loading...</span>
+          <span class="muted" id="refreshState"></span>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <label for="password">Password</label>
+          <input id="password" type="password" placeholder="Enter password">
+          <button id="connectBtn" type="button">Authenticate</button>
+          <button id="refreshNowBtn" type="button">Refresh Now</button>
+          <button id="serialResetBtn" type="button">Serial Reset</button>
+        </div>
+        <div id="statusLine" class="meta">Not authenticated.</div>
       </div>
+
       <div class="panel">
-        <h3 style="margin-top:0;">Notes</h3>
-        <div class="row">Bind host can be <code>0.0.0.0</code>, but clients should use local/LAN URLs above.</div>
-        <div class="row">Commands are POSTed to <code>{{ listen_route }}</code>; health/dashboard are separate GET routes.</div>
+        <h3 style="margin-top:0">Motor States</h3>
+        <div id="motorGrid" class="motor-grid"></div>
+      </div>
+
+      <div class="panel">
+        <div class="cards">
+          <div class="card"><div class="label">Serial Port</div><div id="serialPort" class="value">--</div></div>
+          <div class="card"><div class="label">Baudrate</div><div id="baudrate" class="value">--</div></div>
+          <div class="card"><div class="label">Serial Status</div><div id="serialStatus" class="value">--</div></div>
+          <div class="card"><div class="label">Sessions Active</div><div id="sessionsActive" class="value">0</div></div>
+          <div class="card"><div class="label">Commands Served</div><div id="commandsServed" class="value">0</div></div>
+          <div class="card"><div class="label">Requests Served</div><div id="requestsServed" class="value">0</div></div>
+          <div class="card"><div class="label">Uptime</div><div id="uptime" class="value">--</div></div>
+          <div class="card"><div class="label">Tunnel</div><div id="tunnelStatus" class="value">--</div></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="tabs">
+          <button id="tabHealthBtn" class="tab-btn active" type="button">Health &amp; Links</button>
+          <button id="tabConfigBtn" class="tab-btn" type="button">Configurator</button>
+        </div>
+        <div id="healthPanel" class="tab-panel active">
+          <h3 style="margin-top:0">/health</h3>
+          <pre id="healthOut" class="meta">loading...</pre>
+          <h3>Endpoints</h3>
+          <div class="links-grid">
+            <span class="lbl">Dashboard:</span><span><a href="/" id="linkDashboard">/</a></span>
+            <span class="lbl">Health:</span><span><a href="/health" id="linkHealth">/health</a></span>
+            <span class="lbl">Command:</span><span><code id="linkCommand">{{ listen_route }}</code></span>
+            <span class="lbl">WebSocket:</span><span><code>ws://127.0.0.1:{{ listen_port }}/ws</code></span>
+            <span class="lbl">Router Info:</span><span><a href="/router_info">/router_info</a></span>
+            <span class="lbl">Tunnel Info:</span><span><a href="/tunnel_info">/tunnel_info</a></span>
+            <span class="lbl">Config Schema:</span><span><a href="/config/schema">/config/schema</a></span>
+          </div>
+        </div>
+        <div id="configPanel" class="tab-panel">
+          <div class="row">
+            <button id="configReloadBtn" type="button">Reload Config</button>
+            <button id="configSaveBtn" type="button">Save Changes</button>
+            <button id="configDiscardBtn" type="button">Discard Changes</button>
+          </div>
+          <div id="configStatus" class="meta config-status">Load config schema to begin.</div>
+          <div id="configCategoryTabs" class="tabs" style="margin:0.6rem 0;"></div>
+          <div class="cfg-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th style="min-width:180px;">Setting</th>
+                  <th style="min-width:220px;">Value</th>
+                  <th style="min-width:70px;">Type</th>
+                  <th style="min-width:90px;">Source</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody id="configRows"></tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </div>
+
+    <script>
+      var sessionKey = "";
+      var polling = false;
+      var MOTOR_LABELS = {
+        X: "Pan (X)",
+        Y: "Tilt (Y)",
+        Z: "Roll (Z)",
+        H: "Height (H)",
+        S: "Speed (S)",
+        A: "Accel (A)",
+        R: "Roll Motor (R)",
+        P: "Pan Motor (P)"
+      };
+      var MOTOR_COLORS = {
+        X: "#5ca8ff", Y: "#00d08a", Z: "#ffcc66", H: "#ff8c5c",
+        S: "#d08aff", A: "#ff5ca8", R: "#8affe0", P: "#ffd45c"
+      };
+      var configState = { schema: null, selectedCategoryId: "", pending: {} };
+
+      function esc(v) {
+        if (v === null || v === undefined) v = "";
+        return String(v).replace(/[&<>"']/g, function(m) {
+          return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[m];
+        });
+      }
+
+      function normalizeScalar(v) {
+        if (v === null || v === undefined) return "";
+        if (typeof v === "object") { try { return JSON.stringify(v); } catch(_) { return String(v); } }
+        return String(v);
+      }
+
+      function asBool(v) {
+        if (typeof v === "boolean") return v;
+        return ["1","true","yes","on"].includes(String(v||"").trim().toLowerCase());
+      }
+
+      function fmtUptime(s) {
+        var h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = Math.floor(s%60);
+        return (h>0 ? h+"h " : "") + m+"m " + sec+"s";
+      }
+
+      function renderMotors(motorState, motorRanges) {
+        var root = document.getElementById("motorGrid");
+        if (!root) return;
+        var keys = ["X","Y","Z","H","S","A","R","P"];
+        var html = "";
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i];
+          var val = Number(motorState[k] || 0);
+          var range = motorRanges[k] || {min:0,max:1};
+          var lo = Number(range.min), hi = Number(range.max);
+          var span = hi - lo || 1;
+          var hasCenterZero = lo < 0;
+          var pct, leftPct, barColor;
+          barColor = MOTOR_COLORS[k] || "#5ca8ff";
+          if (hasCenterZero) {
+            var centerPct = Math.abs(lo) / span * 100;
+            if (val >= 0) {
+              leftPct = centerPct;
+              pct = (val / hi) * (100 - centerPct);
+            } else {
+              pct = (Math.abs(val) / Math.abs(lo)) * centerPct;
+              leftPct = centerPct - pct;
+            }
+          } else {
+            leftPct = 0;
+            pct = ((val - lo) / span) * 100;
+          }
+          pct = Math.max(0.5, Math.min(100, pct));
+          html += '<div class="motor-card">';
+          html += '<div class="motor-label">' + esc(MOTOR_LABELS[k] || k) + '</div>';
+          html += '<div class="motor-value" style="color:' + barColor + '">' + val + '</div>';
+          html += '<div class="motor-bar-track">';
+          if (hasCenterZero) html += '<div class="motor-bar-center"></div>';
+          html += '<div class="motor-bar-fill" style="background:' + barColor + ';left:' + leftPct.toFixed(1) + '%;width:' + pct.toFixed(1) + '%"></div>';
+          html += '</div>';
+          html += '<div class="motor-range"><span>' + lo + '</span><span>' + hi + '</span></div>';
+          html += '</div>';
+        }
+        root.innerHTML = html;
+      }
+
+      function showTab(name) {
+        var hb = document.getElementById("tabHealthBtn");
+        var cb = document.getElementById("tabConfigBtn");
+        var hp = document.getElementById("healthPanel");
+        var cp = document.getElementById("configPanel");
+        hb.classList.toggle("active", name==="health");
+        cb.classList.toggle("active", name==="config");
+        hp.classList.toggle("active", name==="health");
+        cp.classList.toggle("active", name==="config");
+      }
+
+      function setConfigStatus(msg, isError) {
+        var n = document.getElementById("configStatus");
+        n.textContent = msg;
+        n.classList.toggle("ok", !isError);
+        n.classList.toggle("bad", !!isError);
+      }
+
+      function getSpecByPath(path) {
+        if (!configState.schema || !configState.schema.categories) return null;
+        for (var i=0; i<configState.schema.categories.length; i++) {
+          var cat = configState.schema.categories[i];
+          if (!cat.settings) continue;
+          for (var j=0; j<cat.settings.length; j++) {
+            if (cat.settings[j].path === path) return cat.settings[j];
+          }
+        }
+        return null;
+      }
+
+      function comparableValue(v, spec) {
+        if (!spec) return normalizeScalar(v);
+        if (spec.value_type === "bool") return asBool(v) ? "true" : "false";
+        return normalizeScalar(v);
+      }
+
+      function setPendingValue(path, value) {
+        var spec = getSpecByPath(path);
+        if (!spec) return;
+        if (comparableValue(value, spec) === comparableValue(spec.current_value, spec)) {
+          delete configState.pending[path];
+        } else {
+          configState.pending[path] = value;
+        }
+      }
+
+      function renderConfigCategoryTabs() {
+        var root = document.getElementById("configCategoryTabs");
+        if (!configState.schema || !configState.schema.categories || !configState.schema.categories.length) { root.innerHTML = ""; return; }
+        root.innerHTML = configState.schema.categories.map(function(cat) {
+          var active = cat.id === configState.selectedCategoryId;
+          return '<button type="button" class="tab-btn ' + (active?"active":"") + '" data-category-id="' + esc(cat.id) + '">' + esc(cat.label) + '</button>';
+        }).join("");
+      }
+
+      function renderConfigRows() {
+        var root = document.getElementById("configRows");
+        if (!configState.schema || !configState.schema.categories || !configState.schema.categories.length) {
+          root.innerHTML = "<tr><td colspan='5' class='meta'>No configurator schema.</td></tr>"; return;
+        }
+        var cat = null;
+        for (var i=0; i<configState.schema.categories.length; i++) {
+          if (configState.schema.categories[i].id === configState.selectedCategoryId) { cat = configState.schema.categories[i]; break; }
+        }
+        if (!cat) cat = configState.schema.categories[0];
+        if (!cat || !cat.settings || !cat.settings.length) {
+          root.innerHTML = "<tr><td colspan='5' class='meta'>No settings.</td></tr>"; return;
+        }
+        root.innerHTML = cat.settings.map(function(s) {
+          var path = String(s.path || "");
+          var pending = configState.pending.hasOwnProperty(path);
+          var curVal = pending ? configState.pending[path] : s.current_value;
+          var source = pending ? "pending" : (s.current_source || "default");
+          var vt = String(s.value_type || "str");
+          var editor = "";
+          if (vt === "bool") {
+            editor = '<input class="cfg-check" type="checkbox" data-config-path="'+esc(path)+'" '+(asBool(curVal)?"checked":"")+'>';
+          } else if (vt === "enum") {
+            var opts = (s.choices||[]).map(function(c) { var cv=normalizeScalar(c); return '<option value="'+esc(cv)+'" '+(cv===normalizeScalar(curVal)?"selected":"")+'>'+esc(cv)+'</option>'; }).join("");
+            editor = '<select class="cfg-select" data-config-path="'+esc(path)+'">'+opts+'</select>';
+          } else {
+            var it = vt==="secret"?"password":(vt==="int"||vt==="float"?"number":"text");
+            var step = vt==="float"?"any":(vt==="int"?"1":"");
+            var minA = s.min_value!=null?' min="'+esc(s.min_value)+'"':"";
+            var maxA = s.max_value!=null?' max="'+esc(s.max_value)+'"':"";
+            var stepA = step?' step="'+step+'"':"";
+            editor = '<input class="cfg-input" type="'+it+'" data-config-path="'+esc(path)+'" value="'+esc(normalizeScalar(curVal))+'"'+minA+maxA+stepA+'>';
+          }
+          var rb = s.restart_required ? "<span class='badge'>restart</span>" : "";
+          var rc = pending ? "cfg-row pending" : "cfg-row";
+          return '<tr class="'+rc+'"><td><div><strong>'+esc(s.label||s.id||path)+'</strong>'+rb+'</div><div class="cfg-path"><code>'+esc(path)+'</code></div></td><td>'+editor+'</td><td class="cfg-source">'+esc(vt)+'</td><td class="cfg-source">'+esc(source)+'</td><td>'+esc(s.description||"")+'</td></tr>';
+        }).join("");
+      }
+
+      function renderConfigPanel() {
+        renderConfigCategoryTabs();
+        renderConfigRows();
+        var pc = Object.keys(configState.pending).length;
+        if (pc > 0) setConfigStatus(pc + " pending change(s)", false);
+      }
+
+      function fetchJson(url, timeout, done) {
+        var xhr = new XMLHttpRequest();
+        var finished = false;
+        function finish(err, data) { if (finished) return; finished = true; done(err, data); }
+        try { xhr.open("GET", url, true); } catch(e) { finish(e, null); return; }
+        xhr.timeout = timeout || 5000;
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try { finish(null, JSON.parse(xhr.responseText)); } catch(e) { finish(e, null); }
+        };
+        xhr.onerror = function() { finish(new Error("network error"), null); };
+        xhr.ontimeout = function() { finish(new Error("timeout"), null); };
+        try { xhr.send(); } catch(e) { finish(e, null); }
+      }
+
+      function refreshDashboard() {
+        if (polling) return;
+        polling = true;
+        var marker = document.getElementById("refreshState");
+        if (marker) marker.textContent = "updating...";
+        var t0 = Date.now();
+        fetchJson("/dashboard/data?t="+Date.now(), 5000, function(err, data) {
+          polling = false;
+          if (err || !data || data.status !== "success") {
+            if (marker) marker.textContent = "update error";
+            return;
+          }
+          renderMotors(data.motor_state || {}, data.motor_ranges || {});
+          var setText = function(id, v) { var n = document.getElementById(id); if (n) n.textContent = String(v); };
+          var serial = data.serial || {};
+          var serialNode = document.getElementById("serialState");
+          if (serialNode) {
+            serialNode.textContent = serial.connected ? "Serial connected" : "Serial disconnected";
+            serialNode.className = serial.connected ? "ok" : "bad";
+          }
+          setText("serialPort", serial.device || "N/A");
+          setText("baudrate", serial.baudrate || "--");
+          setText("serialStatus", serial.connected ? "Connected" : "Disconnected");
+          setText("sessionsActive", data.sessions_active || 0);
+          setText("commandsServed", data.commands_served || 0);
+          setText("requestsServed", data.requests_served || 0);
+          setText("uptime", fmtUptime(data.uptime_seconds || 0));
+          var tun = data.tunnel || {};
+          setText("tunnelStatus", tun.url ? "Active" : (tun.running ? "Starting..." : "Inactive"));
+          if (marker) marker.textContent = "updated " + new Date().toLocaleTimeString() + " (" + (Date.now()-t0) + "ms)";
+        });
+      }
+
+      function refreshHealth() {
+        fetchJson("/health?t="+Date.now(), 5000, function(err, data) {
+          var out = document.getElementById("healthOut");
+          if (out) out.textContent = err ? String(err) : JSON.stringify(data, null, 2);
+        });
+      }
+
+      function authenticate() {
+        var pw = document.getElementById("password").value.trim();
+        if (!pw) { alert("Enter password first."); return; }
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/auth", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try {
+            var d = JSON.parse(xhr.responseText);
+            if (d.status === "success") {
+              sessionKey = d.session_key;
+              document.getElementById("statusLine").textContent = "Authenticated. Timeout " + d.timeout + "s";
+              loadConfigSchema();
+            } else {
+              document.getElementById("statusLine").textContent = "Auth failed: " + (d.message || xhr.status);
+            }
+          } catch(e) { document.getElementById("statusLine").textContent = "Auth error: " + e; }
+        };
+        xhr.send(JSON.stringify({password: pw}));
+      }
+
+      function serialReset() {
+        if (!sessionKey) { document.getElementById("statusLine").textContent = "Authenticate first."; return; }
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/serial_reset", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try {
+            var d = JSON.parse(xhr.responseText);
+            document.getElementById("statusLine").textContent = d.message || d.status;
+          } catch(e) { document.getElementById("statusLine").textContent = "Reset error: " + e; }
+        };
+        xhr.send(JSON.stringify({session_key: sessionKey, trigger_home: true}));
+      }
+
+      function loadConfigSchema() {
+        fetchJson("/config/schema?t="+Date.now(), 5000, function(err, data) {
+          if (err || !data || data.status !== "success") {
+            setConfigStatus(err ? String(err) : (data && data.message || "Schema load failed"), true);
+            return;
+          }
+          configState.schema = data.config || {categories:[]};
+          configState.pending = {};
+          var cats = configState.schema.categories || [];
+          configState.selectedCategoryId = cats.length ? String(cats[0].id) : "";
+          renderConfigPanel();
+          setConfigStatus("Configurator loaded.", false);
+        });
+      }
+
+      function saveConfigChanges() {
+        var paths = Object.keys(configState.pending);
+        if (!paths.length) { setConfigStatus("No pending changes.", false); return; }
+        if (!sessionKey) { setConfigStatus("Authenticate first to save.", true); return; }
+        var xhr = new XMLHttpRequest();
+        xhr.open("POST", "/config/save", true);
+        xhr.setRequestHeader("Content-Type", "application/json");
+        xhr.onreadystatechange = function() {
+          if (xhr.readyState !== 4) return;
+          try {
+            var d = JSON.parse(xhr.responseText);
+            if (d.status === "success") {
+              loadConfigSchema();
+              var note = d.restart_required ? " Restart required." : "";
+              setConfigStatus("Saved " + (d.saved_paths ? d.saved_paths.length : paths.length) + " change(s)." + note, false);
+            } else {
+              setConfigStatus("Save failed: " + (d.errors ? JSON.stringify(d.errors) : (d.message || xhr.status)), true);
+            }
+          } catch(e) { setConfigStatus("Save error: " + e, true); }
+        };
+        xhr.send(JSON.stringify({session_key: sessionKey, changes: configState.pending}));
+      }
+
+      /* event delegation for config inputs */
+      document.addEventListener("input", function(e) {
+        var path = e.target.getAttribute("data-config-path");
+        if (!path) return;
+        if (e.target.type === "checkbox") { setPendingValue(path, e.target.checked); }
+        else { setPendingValue(path, e.target.value); }
+        renderConfigPanel();
+      });
+      document.addEventListener("click", function(e) {
+        var catId = e.target.getAttribute("data-category-id");
+        if (catId) { configState.selectedCategoryId = catId; renderConfigPanel(); }
+      });
+
+      document.getElementById("connectBtn").addEventListener("click", authenticate);
+      document.getElementById("refreshNowBtn").addEventListener("click", function() { refreshDashboard(); refreshHealth(); });
+      document.getElementById("serialResetBtn").addEventListener("click", serialReset);
+      document.getElementById("tabHealthBtn").addEventListener("click", function() { showTab("health"); });
+      document.getElementById("tabConfigBtn").addEventListener("click", function() { showTab("config"); });
+      document.getElementById("configReloadBtn").addEventListener("click", loadConfigSchema);
+      document.getElementById("configSaveBtn").addEventListener("click", saveConfigChanges);
+      document.getElementById("configDiscardBtn").addEventListener("click", function() { configState.pending = {}; renderConfigPanel(); setConfigStatus("Discarded.", false); });
+
+      showTab("health");
+      refreshDashboard();
+      refreshHealth();
+      loadConfigSchema();
+      setInterval(refreshDashboard, 1000);
+      setInterval(refreshHealth, 3000);
+    </script>
   </body>
 </html>
 """
@@ -1150,24 +1697,10 @@ def main():
 
     @app.route("/", methods=["GET"])
     def index():
-        payload = _build_adapter_discovery_payload()
-        local = payload.get("local", {}) if isinstance(payload, dict) else {}
-        local_base = str(local.get("base_url") or "").strip() or f"http://127.0.0.1:{listen_port}"
-        local_http = str(local.get("http_endpoint") or f"{local_base}{listen_route}").strip()
-        local_ws = str(local.get("ws_endpoint") or f"ws://127.0.0.1:{listen_port}/ws").strip()
-        lan_base = str(local.get("lan_base_url") or "").strip()
-        lan_http = str(local.get("lan_http_endpoint") or "").strip()
-        tunnel_active = bool(str(payload.get("tunnel_url") or "").strip())
         return render_template_string(
             ADAPTER_INDEX_HTML,
-            status_text="tunnel active" if tunnel_active else "local mode",
-            status_class="ok" if tunnel_active else "warn",
-            local_base=local_base,
-            local_http=local_http,
-            local_ws=local_ws,
-            lan_base=lan_base,
-            lan_http=lan_http,
             listen_route=listen_route,
+            listen_port=listen_port,
         )
 
     @app.route("/health", methods=["GET"])
@@ -1190,6 +1723,114 @@ def main():
                 "discovery": payload,
             }
         )
+
+    @app.route("/dashboard", methods=["GET"])
+    def dashboard_page():
+        return index()
+
+    @app.route("/dashboard/data", methods=["GET"])
+    def dashboard_data():
+        """Live dashboard data: motor states, serial status, metrics."""
+        serial_connected = bool(ser is not None and getattr(ser, "is_open", False))
+        with sessions_lock:
+            session_count = len(sessions)
+        process_running = tunnel_process is not None and tunnel_process.poll() is None
+        with tunnel_url_lock:
+            current_tunnel = tunnel_url if process_running else None
+
+        return jsonify({
+            "status": "success",
+            "timestamp_ms": int(time.time() * 1000),
+            "uptime_seconds": round(time.time() - started_at, 2),
+            "motor_state": dict(current_state),
+            "motor_ranges": {k: {"min": v[0], "max": v[1], "type": v[2].__name__} for k, v in allowed_ranges.items()},
+            "serial": {
+                "connected": serial_connected,
+                "device": serial_device or "",
+                "baudrate": int(baudrate),
+            },
+            "network": {
+                "listen_host": listen_host,
+                "listen_port": int(listen_port),
+                "listen_route": listen_route,
+            },
+            "tunnel": {
+                "running": process_running,
+                "url": current_tunnel or "",
+            },
+            "sessions_active": session_count,
+            "commands_served": int(command_count["value"]),
+            "requests_served": int(request_count["value"]),
+        })
+
+    @app.route("/config/schema", methods=["GET"])
+    def config_schema():
+        """Return the adapter configurator schema with current values."""
+        payload, status_code = _adapter_config_schema_payload(load_config())
+        return jsonify(payload), status_code
+
+    @app.route("/config/save", methods=["POST"])
+    def config_save():
+        """Save adapter configuration changes."""
+        if not _config_spec_available():
+            return jsonify({"status": "error", "message": "Configurator unavailable"}), 503
+
+        data = request.get_json() or {}
+        session_key = data.get("session_key", "")
+        if not validate_session(session_key):
+            return jsonify({"status": "error", "message": "Invalid or expired session"}), 401
+
+        changes = data.get("changes", {})
+        if not isinstance(changes, dict) or not changes:
+            return jsonify({"status": "error", "message": "No config changes provided"}), 400
+
+        spec = _build_adapter_config_spec()
+        if spec is None:
+            return jsonify({"status": "error", "message": "Configurator spec unavailable"}), 503
+
+        path_to_spec = {}
+        for category in spec.categories:
+            for setting in category.settings:
+                path_to_spec[setting.path] = setting
+
+        coerced_changes = {}
+        errors = {}
+        restart_required = False
+        for path, raw_value in changes.items():
+            path = str(path or "").strip()
+            if not path:
+                continue
+            setting_spec = path_to_spec.get(path)
+            if setting_spec is None:
+                errors[path] = "Unknown setting path"
+                continue
+            try:
+                coerced_value = _coerce_config_value(raw_value, setting_spec)
+                coerced_changes[path] = coerced_value
+                if setting_spec.restart_required:
+                    restart_required = True
+            except ValueError as exc:
+                errors[path] = str(exc)
+
+        if errors:
+            return jsonify({"status": "error", "message": "Validation failed", "errors": errors}), 400
+
+        if not coerced_changes:
+            return jsonify({"status": "error", "message": "No valid config changes provided"}), 400
+
+        config_data = load_config()
+        for path, value in coerced_changes.items():
+            _set_nested(config_data, path, value)
+        _load_adapter_settings(config_data)
+        save_config(config_data)
+        _apply_runtime_config(config_data)
+
+        return jsonify({
+            "status": "success",
+            "message": "Config saved",
+            "saved_paths": sorted(coerced_changes.keys()),
+            "restart_required": restart_required,
+        })
 
     @app.route("/auth", methods=["POST"])
     def authenticate():
@@ -1538,6 +2179,7 @@ def main():
                 port=listen_port,
                 debug=False,
                 use_reloader=False,
+                allow_unsafe_werkzeug=True,
             ),
             daemon=True,
         )
@@ -1576,7 +2218,7 @@ def main():
     else:
         # Run Flask normally without UI
         try:
-            socketio.run(app, host=listen_host, port=listen_port, debug=False, use_reloader=False)
+            socketio.run(app, host=listen_host, port=listen_port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
         finally:
             service_running.clear()
             stop_cloudflared_tunnel()
