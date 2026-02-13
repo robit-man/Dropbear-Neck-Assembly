@@ -1709,6 +1709,9 @@ def main():
         with sessions_lock:
             session_count = len(sessions)
         serial_connected = bool(ser is not None and getattr(ser, "is_open", False))
+        local_payload = payload.get("local", {}) if isinstance(payload, dict) else {}
+        tunnel_payload = payload.get("tunnel", {}) if isinstance(payload, dict) else {}
+        security_payload = payload.get("security", {}) if isinstance(payload, dict) else {}
         return jsonify(
             {
                 "status": "ok",
@@ -1720,7 +1723,9 @@ def main():
                 "sessions_active": session_count,
                 "commands_served": int(command_count["value"]),
                 "requests_served": int(request_count["value"]),
-                "discovery": payload,
+                "local": local_payload,
+                "tunnel": tunnel_payload,
+                "security": security_payload,
             }
         )
 
@@ -1875,38 +1880,29 @@ def main():
         if current_error and not process_running and not current_tunnel and not stale_tunnel:
             tunnel_state = "error"
 
+        local_payload = {
+            "base_url": local_base,
+            "listen_host": listen_host,
+            "listen_port": int(listen_port),
+            "command_route": listen_route,
+            "auth_route": "/auth",
+            "ws_path": "/ws",
+            "health_url": f"{local_base}/health",
+            "dashboard_url": f"{local_base}/",
+            "http_endpoint": local_http,
+            "ws_endpoint": local_ws,
+        }
+        if bind_base and bind_base != local_base:
+            local_payload["bind_base_url"] = bind_base
+        if lan_base:
+            local_payload["lan_base_url"] = lan_base
+            local_payload["lan_http_endpoint"] = lan_http
+            local_payload["lan_ws_endpoint"] = lan_ws
+
         return {
             "service": "adapter",
-            "running": process_running,
             "base_url": effective_base,
-            "tunnel_url": current_tunnel,
-            "http_endpoint": tunnel_http,
-            "ws_endpoint": tunnel_ws,
-            "local_base_url": local_base,
-            "bind_base_url": bind_base,
-            "lan_base_url": lan_base,
-            "local_http_endpoint": local_http,
-            "local_ws_endpoint": local_ws,
-            "lan_http_endpoint": lan_http,
-            "lan_ws_endpoint": lan_ws,
-            "stale_tunnel_url": stale_tunnel,
-            "error": current_error,
-            "local": {
-                "base_url": local_base,
-                "listen_host": listen_host,
-                "listen_port": int(listen_port),
-                "bind_base_url": bind_base,
-                "lan_base_url": lan_base,
-                "command_route": listen_route,
-                "auth_route": "/auth",
-                "ws_path": "/ws",
-                "health_url": f"{local_base}/health",
-                "dashboard_url": f"{local_base}/",
-                "http_endpoint": local_http,
-                "ws_endpoint": local_ws,
-                "lan_http_endpoint": lan_http,
-                "lan_ws_endpoint": lan_ws,
-            },
+            "local": local_payload,
             "tunnel": {
                 "state": tunnel_state,
                 "tunnel_url": current_tunnel,
@@ -1926,16 +1922,17 @@ def main():
     def get_tunnel_info():
         """Get the Cloudflare Tunnel URL if available."""
         payload = _build_adapter_discovery_payload()
-        current_tunnel = str(payload.get("tunnel_url") or "").strip()
-        stale_tunnel = str(payload.get("stale_tunnel_url") or "").strip()
-        current_error = str(payload.get("error") or "").strip()
+        tunnel_payload = payload.get("tunnel", {}) if isinstance(payload, dict) else {}
+        current_tunnel = str(tunnel_payload.get("tunnel_url") or "").strip()
+        stale_tunnel = str(tunnel_payload.get("stale_tunnel_url") or "").strip()
+        current_error = str(tunnel_payload.get("error") or "").strip()
 
         if current_tunnel:
             payload["status"] = "success"
             payload["message"] = "Tunnel URL available"
         elif stale_tunnel:
             payload["status"] = "error"
-            payload["error"] = current_error or "Tunnel URL expired"
+            tunnel_payload["error"] = current_error or "Tunnel URL expired"
             payload["message"] = "Tunnel process is not running; URL is stale"
         elif current_error:
             payload["status"] = "error"

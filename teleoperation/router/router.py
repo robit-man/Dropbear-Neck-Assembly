@@ -1242,6 +1242,14 @@ def _service_record(name, query_url):
 def _coerce_router_info_shape(name, query_url, data):
     if not isinstance(data, dict):
         return None
+    # adapter /health wraps router_info-style fields under "discovery".
+    if "local" not in data and "tunnel" not in data:
+        discovery = data.get("discovery")
+        if isinstance(discovery, dict):
+            outer_status = str(data.get("status") or "").strip().lower()
+            data = dict(discovery)
+            if "status" not in data and outer_status:
+                data["status"] = "success" if outer_status == "ok" else outer_status
     if "local" in data or "tunnel" in data:
         return data
     if query_url.endswith("/tunnel_info"):

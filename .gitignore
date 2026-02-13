@@ -11,3 +11,4 @@
 /teleoperation/*/*_venv/
 /teleoperation/*/config.json
 /teleoperation/router/nkn_sidecar/
+*.exe
