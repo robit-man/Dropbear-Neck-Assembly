@@ -110,8 +110,9 @@ NODE_BRIDGE_FILE = "nkn_router_bridge.js"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 5070
 
-DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5160/router_info"
+DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5180/health"
 LEGACY_ADAPTER_ROUTER_INFO_URLS = (
+    "http://127.0.0.1:5160/router_info",
     "http://127.0.0.1:5060/router_info",
     "http://127.0.0.1:5001/router_info",
 )
@@ -757,7 +758,7 @@ def _build_router_config_spec():
                         path="router.services.adapter_router_info_url",
                         value_type="str",
                         default=DEFAULT_ADAPTER_ROUTER_INFO_URL,
-                        description="Adapter /router_info endpoint.",
+                        description="Adapter /health, /router_info, or /tunnel_info endpoint.",
                         restart_required=True,
                     ),
                     SettingSpec(
@@ -1353,11 +1354,20 @@ def _build_service_query_candidates(query_url):
 
     add(raw)
     trimmed = raw.rstrip("/")
-    if trimmed.endswith("/router_info"):
-        add(trimmed[:-len("/router_info")] + "/tunnel_info")
+    if trimmed.endswith("/health"):
+        base = trimmed[:-len("/health")]
+        add(base + "/router_info")
+        add(base + "/tunnel_info")
+    elif trimmed.endswith("/router_info"):
+        base = trimmed[:-len("/router_info")]
+        add(base + "/tunnel_info")
+        add(base + "/health")
     elif trimmed.endswith("/tunnel_info"):
-        add(trimmed[:-len("/tunnel_info")] + "/router_info")
+        base = trimmed[:-len("/tunnel_info")]
+        add(base + "/router_info")
+        add(base + "/health")
     else:
+        add(trimmed + "/health")
         add(trimmed + "/router_info")
         add(trimmed + "/tunnel_info")
 

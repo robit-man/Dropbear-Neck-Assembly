@@ -1709,23 +1709,26 @@ def main():
         with sessions_lock:
             session_count = len(sessions)
         serial_connected = bool(ser is not None and getattr(ser, "is_open", False))
-        local_payload = payload.get("local", {}) if isinstance(payload, dict) else {}
         tunnel_payload = payload.get("tunnel", {}) if isinstance(payload, dict) else {}
-        security_payload = payload.get("security", {}) if isinstance(payload, dict) else {}
+        process_running = tunnel_process is not None and tunnel_process.poll() is None
+        current_tunnel_raw = tunnel_payload.get("tunnel_url")
+        current_tunnel = str(current_tunnel_raw or "").strip() if current_tunnel_raw is not None else None
+        current_error = str(tunnel_payload.get("error") or "").strip()
         return jsonify(
             {
                 "status": "ok",
                 "service": "adapter",
                 "uptime_seconds": round(time.time() - started_at, 2),
+                "require_auth": bool(runtime_security["require_auth"]),
+                "tunnel_running": process_running,
+                "tunnel_error": current_error,
+                "tunnel_url": current_tunnel if process_running else None,
                 "serial_connected": serial_connected,
                 "serial_device": serial_device or "",
                 "baudrate": int(baudrate),
                 "sessions_active": session_count,
                 "commands_served": int(command_count["value"]),
                 "requests_served": int(request_count["value"]),
-                "local": local_payload,
-                "tunnel": tunnel_payload,
-                "security": security_payload,
             }
         )
 
