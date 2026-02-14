@@ -740,7 +740,10 @@ function initWebSocket() {
 }
 
 // Show/hide connection modal
-function showConnectionModal() {
+function showConnectionModal(userInitiated = false) {
+  if (!userInitiated) {
+    return;
+  }
   ensureConnectionModalBindings();
   const modal = document.getElementById('connectionModal');
   if (modal) {
@@ -822,12 +825,23 @@ function ensureConnectionModalBindings() {
     return;
   }
   const modal = document.getElementById('connectionModal');
+  const closeBtn = document.getElementById('connectionModalCloseBtn');
   if (!modal) {
     return;
   }
   connectionModalBindingsInstalled = true;
   modal.addEventListener('click', (event) => {
     if (event.target === modal) {
+      hideConnectionModal();
+    }
+  });
+  if (closeBtn) {
+    closeBtn.addEventListener('click', () => {
+      hideConnectionModal();
+    });
+  }
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
       hideConnectionModal();
     }
   });

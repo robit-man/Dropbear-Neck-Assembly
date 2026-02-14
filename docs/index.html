@@ -22,8 +22,9 @@
   <script type="module" src="./orientation-module.js"></script>
 </head>
 <body>
-  <div id="connectionModal" class="modal active">
+  <div id="connectionModal" class="modal">
     <div class="modal-content">
+      <button id="connectionModalCloseBtn" class="modal-close-btn" type="button" aria-label="Close Settings">x</button>
       <div class="modal-header">NKN Router Discovery</div>
 
       <div class="modal-section">
@@ -68,7 +69,7 @@
         <div id="metricVideoStats" class="metric-meta">-- fps | -- kbps | -- clients</div>
       </div>
       <div style="margin-left:auto;align-self: flex-start;">
-        <button onclick="showConnectionModal()" class="nav-button">
+        <button onclick="showConnectionModal(true)" class="nav-button">
           Settings
         </button>
       </div>

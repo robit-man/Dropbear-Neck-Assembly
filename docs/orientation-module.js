@@ -406,7 +406,7 @@ function buildCommand(snapshot) {
   const yVal = Math.round(clamp(state.smoothed.lateral + tuneables.offsetY, -COMMAND_LIMIT, COMMAND_LIMIT));
   const zVal = Math.round(clamp(state.smoothed.frontBack + tuneables.offsetZ, -COMMAND_LIMIT, COMMAND_LIMIT));
   const hVal = Math.round(clamp(state.smoothed.height + tuneables.offsetH, HEIGHT_MIN, HEIGHT_MAX));
-  const rVal = Math.round(clamp(state.smoothed.roll + tuneables.offsetR, -COMMAND_LIMIT, COMMAND_LIMIT));
+  const rVal = Math.round(clamp((-state.smoothed.roll) + tuneables.offsetR, -COMMAND_LIMIT, COMMAND_LIMIT));
   const pVal = Math.round(clamp((-state.smoothed.pitch) + tuneables.offsetP, -COMMAND_LIMIT, COMMAND_LIMIT));
 
   const speed = clamp(tuneables.speed, 0, 10);
