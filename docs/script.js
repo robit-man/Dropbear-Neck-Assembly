@@ -42,6 +42,45 @@ let controlsMenuOpen = false;
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
 
+// Prevent browser zoom gestures (double-tap, pinch, ctrl+wheel) for touch control stability.
+(function installViewportZoomGuards() {
+    let lastTouchEndMs = 0;
+    document.addEventListener("touchend", (event) => {
+        const now = Date.now();
+        if (now - lastTouchEndMs < 320) {
+            event.preventDefault();
+        }
+        lastTouchEndMs = now;
+    }, { passive: false });
+
+    document.addEventListener("touchmove", (event) => {
+        if (event.touches && event.touches.length > 1) {
+            event.preventDefault();
+        }
+    }, { passive: false });
+
+    const preventGesture = (event) => event.preventDefault();
+    document.addEventListener("gesturestart", preventGesture, { passive: false });
+    document.addEventListener("gesturechange", preventGesture, { passive: false });
+    document.addEventListener("gestureend", preventGesture, { passive: false });
+
+    window.addEventListener("wheel", (event) => {
+        if (event.ctrlKey) {
+            event.preventDefault();
+        }
+    }, { passive: false });
+
+    window.addEventListener("keydown", (event) => {
+        if (!(event.ctrlKey || event.metaKey)) {
+            return;
+        }
+        const key = String(event.key || "").toLowerCase();
+        if (key === "+" || key === "-" || key === "=" || key === "_" || key === "0") {
+            event.preventDefault();
+        }
+    }, { passive: false });
+})();
+
 function routeAllowsWebSocket(route) {
     return route !== "orientation";
 }
