@@ -474,21 +474,30 @@ h3 {
 
 .orientation-embed-wrap {
     position: relative;
-    width: 100%;
-    min-height: 460px;
+    width: min(100%, 760px);
+    max-width: 100%;
+    aspect-ratio: 1 / 1;
     border: 2px solid var(--border-light);
     border-radius: 0.5rem;
     overflow: hidden;
     background: #050505;
+    margin: 0 auto;
 }
 
 .orientation-embed-wrap iframe,
 #orientationSceneHost {
     display: block;
     width: 100%;
-    min-height: 460px;
+    height: 100%;
+    min-height: 0;
     border: 0;
     background: #000;
+}
+
+#orientationSceneHost canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
 }
 
 .stream-preview-wrap {
@@ -653,12 +662,6 @@ h3 {
 
     .stream-preview-wrap {
         min-height: 220px;
-    }
-
-    .orientation-embed-wrap,
-    .orientation-embed-wrap iframe,
-    #orientationSceneHost {
-        min-height: 320px;
     }
 
     .pinned-stream-pane {
