@@ -618,20 +618,24 @@ h3 {
 }
 
 .hybrid-preview-wrap {
+    --hybrid-stream-aspect: 16 / 9;
     position: relative;
     width: 100%;
-    aspect-ratio: 16 / 9;
+    aspect-ratio: var(--hybrid-stream-aspect);
     min-height: 280px;
     border: 2px solid var(--border-light);
     border-radius: 0.6rem;
     overflow: hidden;
     background: #080808;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .hybrid-preview-wrap img {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
     display: block;
 }
 
@@ -651,9 +655,9 @@ h3 {
 
 .hybrid-drag-surface {
     position: absolute;
-    inset: 12%;
+    inset: 0;
     border-radius: 0.65rem;
-    border: 2px dashed rgba(255, 255, 255, 0.35);
+    border: 2px dashed rgba(255, 255, 255, 0.2);
     background: rgba(8, 8, 8, 0.08);
     cursor: grab;
     user-select: none;
@@ -732,6 +736,42 @@ h3 {
     font-size: 0.82rem;
     opacity: 0.8;
     line-height: 1.35;
+}
+
+.imu-readout-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
+}
+
+.imu-readout-item {
+    border: 1px solid var(--border-light);
+    border-radius: 0.45rem;
+    background: var(--bg-secondary);
+    padding: 0.5rem;
+    min-height: 58px;
+}
+
+.imu-readout-label {
+    font-size: 0.7rem;
+    opacity: 0.72;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.imu-readout-value {
+    display: block;
+    margin-top: 0.3rem;
+    font-size: 0.78rem;
+    line-height: 1.2;
+    color: var(--accent);
+    word-break: break-word;
+}
+
+.imu-readout-meta {
+    margin: 0;
+    font-size: 0.8rem;
+    opacity: 0.82;
 }
 
 .pinned-stream-pane {
@@ -838,7 +878,7 @@ h3 {
     }
 
     .hybrid-drag-surface {
-        inset: 9%;
+        inset: 0;
     }
 
     .hybrid-arrow {
@@ -846,6 +886,10 @@ h3 {
         height: 2.55rem;
         min-width: 2.55rem;
         font-size: 1.06rem;
+    }
+
+    .imu-readout-grid {
+        grid-template-columns: 1fr;
     }
 
     .pinned-stream-pane {

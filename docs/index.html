@@ -699,6 +699,20 @@
         <h3 style="margin-top:0;">Feed Status</h3>
         <div id="cameraFeedList" class="stream-feed-list"></div>
       </div>
+      <div class="control-section">
+        <h3 style="margin-top:0;">IMU Telemetry</h3>
+        <div class="imu-readout-grid">
+          <div class="imu-readout-item">
+            <div class="imu-readout-label">Accel (m/s^2)</div>
+            <code id="streamImuAccel" class="imu-readout-value">--</code>
+          </div>
+          <div class="imu-readout-item">
+            <div class="imu-readout-label">Gyro (rad/s)</div>
+            <code id="streamImuGyro" class="imu-readout-value">--</code>
+          </div>
+        </div>
+        <p id="streamImuMeta" class="imu-readout-meta">IMU idle</p>
+      </div>
     </section>
 
     <section class="view" data-view="hybrid">
@@ -729,6 +743,17 @@
           Drag: yaw/pitch. Ctrl/Cmd + drag: lateral/forward-back. Shift + drag: roll/height.
           Scroll: height. Hold arrows for continuous trim.
         </p>
+        <div class="imu-readout-grid">
+          <div class="imu-readout-item">
+            <div class="imu-readout-label">Accel (m/s^2)</div>
+            <code id="hybridImuAccel" class="imu-readout-value">--</code>
+          </div>
+          <div class="imu-readout-item">
+            <div class="imu-readout-label">Gyro (rad/s)</div>
+            <code id="hybridImuGyro" class="imu-readout-value">--</code>
+          </div>
+        </div>
+        <p id="hybridImuMeta" class="imu-readout-meta">IMU idle</p>
       </div>
     </section>
   </div>

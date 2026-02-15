@@ -282,6 +282,9 @@ function resetSliders(options = {}) {
         document.querySelectorAll('.current-command').forEach((el) => {
             el.textContent = "";
         });
+        if (typeof resetHybridPoseState === "function") {
+            resetHybridPoseState();
+        }
     } finally {
         suppressCommandDispatch = previousSuppress;
     }
@@ -1920,6 +1923,7 @@ const STREAM_MODE_MJPEG = "mjpeg";
 const STREAM_MODE_JPEG = "jpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
 const CAMERA_FEED_POLL_INTERVAL_MS = 1500;
+const CAMERA_IMU_POLL_INTERVAL_MS = 200;
 const CAMERA_JPEG_POLL_INTERVAL_LOCAL_MS = 180;
 const CAMERA_JPEG_POLL_INTERVAL_TUNNEL_MS = 550;
 const CAMERA_JPEG_REQUEST_STALL_MS = 3500;
@@ -1945,6 +1949,9 @@ let cameraRouterProtocols = {
   jpeg_snapshot: true,
   mpegts: false,
 };
+let cameraRouterRoutes = {
+  imu: "/imu",
+};
 const cameraPreview = {
   jpegTimer: null,
   peerConnection: null,
@@ -1961,6 +1968,7 @@ const cameraPreview = {
   monitorInFlight: false,
 };
 const HYBRID_SELECTED_FEED_KEY = "hybridSelectedFeed";
+const HYBRID_PREVIEW_DEFAULT_ASPECT = "16 / 9";
 const HYBRID_COMMAND_INTERVAL_MS = 55;
 const HYBRID_HOLD_INTERVAL_MS = 95;
 const HYBRID_POSE_LIMITS = Object.freeze({
@@ -1997,6 +2005,9 @@ const hybridDragState = {
   lastX: 0,
   lastY: 0,
 };
+let cameraImuPollTimer = null;
+let cameraImuPollInFlight = false;
+let cameraImuSnapshot = null;
 let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
 let cameraSessionRotateInFlight = false;
@@ -2073,6 +2084,162 @@ function setStreamStatus(message, error = false) {
   }
   statusEl.textContent = message;
   statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function cameraRouterImuPath() {
+  const raw = String((cameraRouterRoutes && cameraRouterRoutes.imu) || "/imu").trim();
+  if (!raw) {
+    return "/imu";
+  }
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function parseImuVector(raw) {
+  if (Array.isArray(raw) && raw.length >= 3) {
+    const x = Number(raw[0]);
+    const y = Number(raw[1]);
+    const z = Number(raw[2]);
+    const ts = Number(raw[3]);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      return null;
+    }
+    return {
+      x,
+      y,
+      z,
+      timestampMs: Number.isFinite(ts) ? ts : null,
+    };
+  }
+  if (raw && typeof raw === "object") {
+    const x = Number(raw.x);
+    const y = Number(raw.y);
+    const z = Number(raw.z);
+    const ts = Number(raw.timestamp_ms || raw.t_ms || raw.ts || raw.timestamp);
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+      return null;
+    }
+    return {
+      x,
+      y,
+      z,
+      timestampMs: Number.isFinite(ts) ? ts : null,
+    };
+  }
+  return null;
+}
+
+function formatImuVector(vector) {
+  if (!vector) {
+    return "--";
+  }
+  const base = `${vector.x.toFixed(3)}, ${vector.y.toFixed(3)}, ${vector.z.toFixed(3)}`;
+  if (Number.isFinite(vector.timestampMs)) {
+    return `${base} | t=${vector.timestampMs.toFixed(1)}ms`;
+  }
+  return base;
+}
+
+function updateCameraImuReadouts(payload = null, options = {}) {
+  const accel = payload && payload.accel ? payload.accel : null;
+  const gyro = payload && payload.gyro ? payload.gyro : null;
+  const message = String(options.message || "").trim();
+  const error = !!options.error;
+  const fallbackMessage = error ? "IMU unavailable" : "IMU idle";
+  const metaText = message || fallbackMessage;
+  const metaColor = error ? "#ff4444" : "var(--accent)";
+
+  ["streamImuAccel", "hybridImuAccel"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = formatImuVector(accel);
+    }
+  });
+  ["streamImuGyro", "hybridImuGyro"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = formatImuVector(gyro);
+    }
+  });
+  ["streamImuMeta", "hybridImuMeta"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = metaText;
+      el.style.color = metaColor;
+    }
+  });
+}
+
+async function refreshCameraImu(options = {}) {
+  const silent = !!options.silent;
+  if (cameraImuPollInFlight) {
+    return !!cameraImuSnapshot;
+  }
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    cameraImuSnapshot = null;
+    updateCameraImuReadouts(null, {
+      message: "Authenticate camera router to read /imu",
+      error: false,
+    });
+    return false;
+  }
+
+  cameraImuPollInFlight = true;
+  try {
+    const response = await cameraRouterFetch(cameraRouterImuPath(), { cache: "no-store" }, true);
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (err) {
+      data = {};
+    }
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        cameraRouterSessionKey = "";
+        localStorage.removeItem("cameraRouterSessionKey");
+      }
+      cameraImuSnapshot = null;
+      updateCameraImuReadouts(null, {
+        message: `IMU fetch failed: ${data.message || response.status}`,
+        error: true,
+      });
+      return false;
+    }
+
+    const accel = parseImuVector(data.accel);
+    const gyro = parseImuVector(data.gyro);
+    cameraImuSnapshot = {
+      accel,
+      gyro,
+      fetchedAtMs: Date.now(),
+    };
+
+    const anyVector = !!(accel || gyro);
+    updateCameraImuReadouts(cameraImuSnapshot, {
+      message: anyVector ? `IMU live (${new Date(cameraImuSnapshot.fetchedAtMs).toLocaleTimeString()})` : "IMU route reachable; waiting for motion samples",
+      error: false,
+    });
+    return anyVector;
+  } catch (err) {
+    cameraImuSnapshot = null;
+    updateCameraImuReadouts(null, {
+      message: silent ? "IMU fetch error" : `IMU fetch error: ${err}`,
+      error: true,
+    });
+    return false;
+  } finally {
+    cameraImuPollInFlight = false;
+  }
+}
+
+function startCameraImuPolling() {
+  if (cameraImuPollTimer) {
+    return;
+  }
+  refreshCameraImu({ silent: true }).catch(() => {});
+  cameraImuPollTimer = setInterval(() => {
+    refreshCameraImu({ silent: true }).catch(() => {});
+  }, CAMERA_IMU_POLL_INTERVAL_MS);
 }
 
 function markCameraSelectInteraction(durationMs = 1800) {
@@ -2711,12 +2878,17 @@ async function authenticateCameraRouter() {
 
     setStreamStatus(`Authenticated. Session timeout ${data.timeout}s`);
     await refreshCameraFeeds();
+    await refreshCameraImu({ silent: true });
     syncPinnedPreviewSource();
     if (cameraPreview.desired) {
       await startCameraPreview({ autoRestart: true, reason: "session refresh" });
     }
   } catch (err) {
     setStreamStatus(`Auth error: ${err}`, true);
+    updateCameraImuReadouts(null, {
+      message: "IMU unavailable until camera router auth succeeds",
+      error: true,
+    });
   }
 }
 
@@ -2757,6 +2929,10 @@ async function rotateCameraRouterSessionKey() {
         localStorage.removeItem("cameraRouterSessionKey");
         syncPinnedPreviewSource();
         renderHybridFeedOptions();
+        updateCameraImuReadouts(null, {
+          message: "Camera session expired; IMU polling paused",
+          error: true,
+        });
         if (cameraPreview.desired) {
           stopCameraPreview();
         }
@@ -2775,6 +2951,7 @@ async function rotateCameraRouterSessionKey() {
     localStorage.setItem("cameraRouterSessionKey", cameraRouterSessionKey);
     syncPinnedPreviewSource({ forceRefresh: true });
     await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    await refreshCameraImu({ silent: true });
     if (cameraPreview.desired) {
       await startCameraPreview({ autoRestart: true, reason: "session rotated" });
     }
@@ -3014,6 +3191,10 @@ async function refreshCameraFeeds(options = {}) {
         localStorage.removeItem("cameraRouterSessionKey");
         syncPinnedPreviewSource();
         renderHybridFeedOptions();
+        updateCameraImuReadouts(null, {
+          message: "Camera session expired; IMU polling paused",
+          error: true,
+        });
         if (cameraPreview.desired) {
           stopCameraPreview();
           setStreamStatus("Camera session expired. Re-authenticate to resume preview.", true);
@@ -3027,8 +3208,15 @@ async function refreshCameraFeeds(options = {}) {
 
     cameraRouterFeeds = Array.isArray(data.cameras) ? data.cameras : [];
     cameraRouterProtocols = data.protocols || cameraRouterProtocols;
+    if (data.routes && typeof data.routes === "object") {
+      cameraRouterRoutes = {
+        ...cameraRouterRoutes,
+        ...data.routes,
+      };
+    }
     const preserveSelectors = silent && isCameraSelectInteractionActive();
     renderCameraFeedOptions({ preserveSelectors });
+    refreshCameraImu({ silent: true }).catch(() => {});
     syncPinnedPreviewSource();
     if (!silent) {
       setStreamStatus(`Loaded ${cameraRouterFeeds.length} feeds`);
@@ -3301,6 +3489,7 @@ function setupStreamConfigUi() {
   const feedSelect = document.getElementById("cameraFeedSelect");
   initializePinnedPreviewUi();
   startCameraFeedPolling();
+  startCameraImuPolling();
 
   if (baseInput) {
     baseInput.value = cameraRouterBaseUrl;
@@ -3311,6 +3500,7 @@ function setupStreamConfigUi() {
         hybridPreviewSourceKey = "";
         syncPinnedPreviewSource();
         renderHybridFeedOptions();
+        refreshCameraImu({ silent: true }).catch(() => {});
       } catch (err) {}
     });
   }
@@ -3409,9 +3599,14 @@ function setupStreamConfigUi() {
 
   if (cameraRouterBaseUrl && cameraRouterSessionKey) {
     refreshCameraFeeds();
+    refreshCameraImu({ silent: true }).catch(() => {});
   } else {
     setStreamStatus("Configure camera router URL + password, then authenticate");
     renderHybridFeedOptions();
+    updateCameraImuReadouts(null, {
+      message: "Authenticate camera router to read /imu",
+      error: false,
+    });
   }
 }
 
@@ -3422,6 +3617,30 @@ function setHybridStatus(message, error = false) {
   }
   statusEl.textContent = String(message || "");
   statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function setHybridPreviewAspect(width, height) {
+  const wrapEl = document.getElementById("hybridPreviewWrap");
+  if (!wrapEl) {
+    return;
+  }
+  const w = Number(width);
+  const h = Number(height);
+  if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
+    wrapEl.style.setProperty("--hybrid-stream-aspect", `${w} / ${h}`);
+    return;
+  }
+  wrapEl.style.setProperty("--hybrid-stream-aspect", HYBRID_PREVIEW_DEFAULT_ASPECT);
+}
+
+function resetHybridPoseState() {
+  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 1, A: 1, R: 0, P: 0 };
+  Object.keys(defaults).forEach((axis) => {
+    hybridPose[axis] = defaults[axis];
+  });
+  hybridLastCommand = "";
+  hybridLastDispatchMs = 0;
+  renderHybridReadout();
 }
 
 function hybridClampValue(axis, value) {
@@ -3541,6 +3760,7 @@ function setHybridSelectedFeed(cameraId) {
 function showHybridPreviewPlaceholder(message) {
   const imageEl = document.getElementById("hybridPreviewImage");
   const emptyEl = document.getElementById("hybridPreviewEmpty");
+  setHybridPreviewAspect(null, null);
   if (imageEl) {
     imageEl.style.display = "none";
     imageEl.removeAttribute("src");
@@ -3588,8 +3808,12 @@ function startHybridPreview(cameraId, options = {}) {
     if (hybridPreviewSourceKey !== sourceKey) {
       return;
     }
+    setHybridPreviewAspect(imageEl.naturalWidth, imageEl.naturalHeight);
     emptyEl.style.display = "none";
-    setHybridStatus(`Preview active: ${selectedId}`);
+    const resolution = imageEl.naturalWidth && imageEl.naturalHeight
+      ? ` ${imageEl.naturalWidth}x${imageEl.naturalHeight}`
+      : "";
+    setHybridStatus(`Preview active: ${selectedId}${resolution}`);
   };
   imageEl.onerror = () => {
     if (hybridPreviewSourceKey !== sourceKey) {
@@ -3774,7 +3998,7 @@ function onHybridDragPointerMove(event) {
     deltas.H = -dy * 0.2;
   } else {
     deltas.X = dx * 2.4;
-    deltas.P = -dy * 2.4;
+    deltas.P = dy * 2.4;
   }
 
   applyHybridDeltas(deltas, {
