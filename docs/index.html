@@ -78,6 +78,7 @@
     <nav>
       <div class="nav-container controls-nav" id="controlsNav">
         <a href="#neck" class="nav-link" data-route="neck">Neck</a>
+        <a href="#hybrid" class="nav-link" data-route="hybrid">Hybrid</a>
         <a href="#streams" class="nav-link" data-route="streams">Streams</a>
         <button id="controlsMenuToggleBtn" class="nav-link controls-menu-toggle" type="button" aria-expanded="false" aria-controls="controlsMenuPanel">
           Controls
@@ -697,6 +698,37 @@
       <div class="control-section">
         <h3 style="margin-top:0;">Feed Status</h3>
         <div id="cameraFeedList" class="stream-feed-list"></div>
+      </div>
+    </section>
+
+    <section class="view" data-view="hybrid">
+      <h2>Hybrid Drive</h2>
+
+      <div class="control-section">
+        <h3 style="margin-top:0;">Feed Selection</h3>
+        <div id="hybridFeedButtons" class="hybrid-feed-buttons" role="group" aria-label="Available camera feeds"></div>
+        <p id="hybridStatus" style="margin:0.25rem 0 0 0;opacity:0.85;">Authenticate with camera router to load feeds.</p>
+      </div>
+
+      <div class="control-section">
+        <div class="section-header">
+          <h3 style="margin-top:0;">Preview + Motion Overlay</h3>
+          <button id="hybridRefreshFeedsBtn" type="button">Refresh Feeds</button>
+        </div>
+        <div id="hybridPreviewWrap" class="hybrid-preview-wrap">
+          <img id="hybridPreviewImage" alt="Hybrid Preview" style="display:none;">
+          <div id="hybridPreviewEmpty" class="hybrid-preview-empty">Authenticate and select a camera feed.</div>
+          <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
+          <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
+          <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="8" aria-label="Yaw Right">&#9654;</button>
+          <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
+          <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Left">&#9664;</button>
+        </div>
+        <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S1,A1,R0,P0</p>
+        <p class="hybrid-control-hint">
+          Drag: yaw/pitch. Ctrl/Cmd + drag: lateral/forward-back. Shift + drag: roll/height.
+          Scroll: height. Hold arrows for continuous trim.
+        </p>
       </div>
     </section>
   </div>

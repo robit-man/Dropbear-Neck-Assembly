@@ -597,6 +597,143 @@ h3 {
     background: var(--bg-secondary);
 }
 
+.hybrid-feed-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+.hybrid-feed-btn {
+    min-width: 120px;
+}
+
+.hybrid-feed-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg-primary);
+}
+
+.hybrid-feed-btn.offline {
+    opacity: 0.55;
+}
+
+.hybrid-preview-wrap {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    min-height: 280px;
+    border: 2px solid var(--border-light);
+    border-radius: 0.6rem;
+    overflow: hidden;
+    background: #080808;
+}
+
+.hybrid-preview-wrap img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.hybrid-preview-empty {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: rgba(255, 255, 255, 0.82);
+    background: radial-gradient(circle at center, rgba(255, 174, 0, 0.08), rgba(0, 0, 0, 0.72));
+    padding: 1rem;
+    font-size: 0.95rem;
+    z-index: 1;
+}
+
+.hybrid-drag-surface {
+    position: absolute;
+    inset: 12%;
+    border-radius: 0.65rem;
+    border: 2px dashed rgba(255, 255, 255, 0.35);
+    background: rgba(8, 8, 8, 0.08);
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+    z-index: 2;
+}
+
+.hybrid-drag-surface.dragging {
+    cursor: grabbing;
+    border-color: rgba(255, 174, 0, 0.85);
+    background: rgba(255, 174, 0, 0.08);
+}
+
+.hybrid-arrow {
+    position: absolute;
+    width: 3.05rem;
+    height: 3.05rem;
+    min-width: 3.05rem;
+    padding: 0;
+    border-radius: 999px;
+    z-index: 3;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.28rem;
+    line-height: 1;
+    border: 2px solid rgba(255, 255, 255, 0.38);
+    background: rgba(0, 0, 0, 0.33);
+    color: rgba(255, 255, 255, 0.95);
+    opacity: 0.42;
+    backdrop-filter: blur(2px);
+}
+
+.hybrid-arrow:hover,
+.hybrid-arrow:focus-visible,
+.hybrid-arrow.active {
+    opacity: 1;
+    border-color: var(--accent);
+    background: rgba(0, 0, 0, 0.86);
+    color: var(--accent);
+}
+
+.hybrid-arrow-up {
+    top: 0.6rem;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.hybrid-arrow-right {
+    right: 0.6rem;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.hybrid-arrow-down {
+    bottom: 0.6rem;
+    left: 50%;
+    transform: translateX(-50%);
+}
+
+.hybrid-arrow-left {
+    left: 0.6rem;
+    top: 50%;
+    transform: translateY(-50%);
+}
+
+.hybrid-control-readout {
+    margin: 0.45rem 0 0 0;
+    color: var(--accent);
+    font-size: 0.9rem;
+    word-break: break-word;
+}
+
+.hybrid-control-hint {
+    margin: 0;
+    font-size: 0.82rem;
+    opacity: 0.8;
+    line-height: 1.35;
+}
+
 .pinned-stream-pane {
     position: fixed;
     left: 1rem;
@@ -694,6 +831,21 @@ h3 {
 
     .stream-preview-wrap {
         min-height: 220px;
+    }
+
+    .hybrid-preview-wrap {
+        min-height: 220px;
+    }
+
+    .hybrid-drag-surface {
+        inset: 9%;
+    }
+
+    .hybrid-arrow {
+        width: 2.55rem;
+        height: 2.55rem;
+        min-width: 2.55rem;
+        font-size: 1.06rem;
     }
 
     .pinned-stream-pane {

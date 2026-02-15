@@ -26,7 +26,7 @@ let useWS = false;
 let authenticated = false;
 let suppressCommandDispatch = false;
 const ROUTE_ALIASES = Object.freeze({ home: "neck" });
-const ROUTES = new Set(["connect", "neck", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
+const ROUTES = new Set(["connect", "neck", "hybrid", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
 const CONTROL_ROUTE_LABELS = Object.freeze({
     direct: "Direct Motor",
     euler: "Euler",
@@ -41,6 +41,7 @@ let controlsNavInitialized = false;
 let controlsMenuOpen = false;
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
+let hybridUiInitialized = false;
 
 // Prevent browser zoom gestures (double-tap, pinch, ctrl+wheel) for touch control stability.
 (function installViewportZoomGuards() {
@@ -439,6 +440,17 @@ function applyRoute(route) {
     if (route === "streams") {
         setupStreamConfigUi();
         hideConnectionModal();
+    }
+    if (route === "hybrid") {
+        setupHybridUi();
+        hybridSyncPoseFromHeadControls();
+        renderHybridReadout();
+        hideConnectionModal();
+        if (cameraRouterBaseUrl && cameraRouterSessionKey && cameraRouterFeeds.length === 0) {
+            refreshCameraFeeds({ silent: true, suppressErrors: true }).catch(() => {});
+        } else {
+            renderHybridFeedOptions();
+        }
     }
     if (route === "orientation") {
         disableWebSocketMode();
@@ -1948,6 +1960,43 @@ const cameraPreview = {
   zeroClientStreak: 0,
   monitorInFlight: false,
 };
+const HYBRID_SELECTED_FEED_KEY = "hybridSelectedFeed";
+const HYBRID_COMMAND_INTERVAL_MS = 55;
+const HYBRID_HOLD_INTERVAL_MS = 95;
+const HYBRID_POSE_LIMITS = Object.freeze({
+  X: { min: -800, max: 800 },
+  Y: { min: -800, max: 800 },
+  Z: { min: -800, max: 800 },
+  H: { min: 0, max: 70 },
+  R: { min: -800, max: 800 },
+  P: { min: -800, max: 800 },
+});
+const hybridPose = {
+  X: 0,
+  Y: 0,
+  Z: 0,
+  H: 0,
+  S: 1,
+  A: 1,
+  R: 0,
+  P: 0,
+};
+let hybridSelectedFeedId = localStorage.getItem(HYBRID_SELECTED_FEED_KEY) || "";
+let hybridPreviewSourceKey = "";
+let hybridLastCommand = "";
+let hybridLastDispatchMs = 0;
+const hybridHoldState = {
+  timer: null,
+  axis: "",
+  delta: 0,
+  button: null,
+};
+const hybridDragState = {
+  active: false,
+  pointerId: null,
+  lastX: 0,
+  lastY: 0,
+};
 let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
 let cameraSessionRotateInFlight = false;
@@ -2707,6 +2756,7 @@ async function rotateCameraRouterSessionKey() {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
         syncPinnedPreviewSource();
+        renderHybridFeedOptions();
         if (cameraPreview.desired) {
           stopCameraPreview();
         }
@@ -2791,6 +2841,7 @@ function renderCameraFeedOptions(options = {}) {
   if (profileSelect && !preserveSelectors) {
     renderCameraProfileOptions(feedSelect.value || "");
   }
+  renderHybridFeedOptions();
 }
 
 function formatProfileOption(profile) {
@@ -2962,6 +3013,7 @@ async function refreshCameraFeeds(options = {}) {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
         syncPinnedPreviewSource();
+        renderHybridFeedOptions();
         if (cameraPreview.desired) {
           stopCameraPreview();
           setStreamStatus("Camera session expired. Re-authenticate to resume preview.", true);
@@ -3255,7 +3307,10 @@ function setupStreamConfigUi() {
     baseInput.addEventListener("change", () => {
       try {
         cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
+        localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
+        hybridPreviewSourceKey = "";
         syncPinnedPreviewSource();
+        renderHybridFeedOptions();
       } catch (err) {}
     });
   }
@@ -3356,7 +3411,438 @@ function setupStreamConfigUi() {
     refreshCameraFeeds();
   } else {
     setStreamStatus("Configure camera router URL + password, then authenticate");
+    renderHybridFeedOptions();
   }
+}
+
+function setHybridStatus(message, error = false) {
+  const statusEl = document.getElementById("hybridStatus");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = String(message || "");
+  statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function hybridClampValue(axis, value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return 0;
+  }
+  if (axis === "S" || axis === "A") {
+    return Math.max(0, Math.min(10, numeric));
+  }
+  const limits = HYBRID_POSE_LIMITS[axis];
+  if (!limits) {
+    return numeric;
+  }
+  return Math.min(limits.max, Math.max(limits.min, numeric));
+}
+
+function hybridSyncPoseFromHeadControls() {
+  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 1, A: 1, R: 0, P: 0 };
+  Object.keys(defaults).forEach((axis) => {
+    const el = document.getElementById(axis);
+    const fallback = defaults[axis];
+    const parsed = el ? Number(el.value) : fallback;
+    const normalized = Number.isFinite(parsed) ? parsed : fallback;
+    hybridPose[axis] = hybridClampValue(axis, normalized);
+  });
+}
+
+function buildHybridCommandPayload() {
+  const values = {
+    X: Math.round(hybridClampValue("X", hybridPose.X)),
+    Y: Math.round(hybridClampValue("Y", hybridPose.Y)),
+    Z: Math.round(hybridClampValue("Z", hybridPose.Z)),
+    H: Math.round(hybridClampValue("H", hybridPose.H)),
+    S: Number(hybridClampValue("S", hybridPose.S).toFixed(2)),
+    A: Number(hybridClampValue("A", hybridPose.A).toFixed(2)),
+    R: Math.round(hybridClampValue("R", hybridPose.R)),
+    P: Math.round(hybridClampValue("P", hybridPose.P)),
+  };
+  return {
+    values,
+    command: `X${values.X},Y${values.Y},Z${values.Z},H${values.H},S${values.S},A${values.A},R${values.R},P${values.P}`,
+  };
+}
+
+function renderHybridReadout() {
+  const readoutEl = document.getElementById("hybridControlReadout");
+  if (!readoutEl) {
+    return;
+  }
+  const payload = buildHybridCommandPayload();
+  readoutEl.textContent = payload.command;
+}
+
+function dispatchHybridCommand(options = {}) {
+  const force = !!options.force;
+  const minIntervalMs = Math.max(0, Number(options.minIntervalMs) || 0);
+  const readoutOnly = !!options.readoutOnly;
+  const payload = buildHybridCommandPayload();
+  const nowMs = Date.now();
+
+  renderHybridReadout();
+  if (readoutOnly) {
+    return;
+  }
+  if (!force && minIntervalMs > 0 && nowMs - hybridLastDispatchMs < minIntervalMs) {
+    return;
+  }
+  if (!force && payload.command === hybridLastCommand) {
+    return;
+  }
+  hybridLastDispatchMs = nowMs;
+  hybridLastCommand = payload.command;
+  sendCommand(payload.command);
+}
+
+function applyHybridDeltas(deltas, options = {}) {
+  let changed = false;
+  Object.entries(deltas || {}).forEach(([axis, rawDelta]) => {
+    if (!Object.prototype.hasOwnProperty.call(hybridPose, axis)) {
+      return;
+    }
+    const delta = Number(rawDelta);
+    if (!Number.isFinite(delta) || delta === 0) {
+      return;
+    }
+    const nextValue = hybridClampValue(axis, (Number(hybridPose[axis]) || 0) + delta);
+    if (nextValue !== hybridPose[axis]) {
+      hybridPose[axis] = nextValue;
+      changed = true;
+    }
+  });
+
+  if (changed) {
+    dispatchHybridCommand({
+      force: !!options.force,
+      minIntervalMs: options.minIntervalMs,
+    });
+  } else {
+    renderHybridReadout();
+  }
+}
+
+function setHybridSelectedFeed(cameraId) {
+  hybridSelectedFeedId = String(cameraId || "").trim();
+  localStorage.setItem(HYBRID_SELECTED_FEED_KEY, hybridSelectedFeedId);
+  if (hybridSelectedFeedId) {
+    localStorage.setItem("cameraRouterSelectedFeed", hybridSelectedFeedId);
+    cameraPreview.targetCameraId = hybridSelectedFeedId;
+    const feedSelect = document.getElementById("cameraFeedSelect");
+    if (feedSelect && feedSelect.value !== hybridSelectedFeedId) {
+      feedSelect.value = hybridSelectedFeedId;
+    }
+  }
+}
+
+function showHybridPreviewPlaceholder(message) {
+  const imageEl = document.getElementById("hybridPreviewImage");
+  const emptyEl = document.getElementById("hybridPreviewEmpty");
+  if (imageEl) {
+    imageEl.style.display = "none";
+    imageEl.removeAttribute("src");
+  }
+  if (emptyEl) {
+    emptyEl.textContent = String(message || "Select a camera feed.");
+    emptyEl.style.display = "flex";
+  }
+}
+
+function startHybridPreview(cameraId, options = {}) {
+  const force = !!options.force;
+  const selectedId = String(cameraId || "").trim();
+  const imageEl = document.getElementById("hybridPreviewImage");
+  const emptyEl = document.getElementById("hybridPreviewEmpty");
+  if (!imageEl || !emptyEl) {
+    return;
+  }
+
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    hybridPreviewSourceKey = "";
+    showHybridPreviewPlaceholder("Authenticate and select a camera feed.");
+    setHybridStatus("Authenticate with camera router to load Hybrid preview.");
+    return;
+  }
+  if (!selectedId) {
+    hybridPreviewSourceKey = "";
+    showHybridPreviewPlaceholder("Select a feed from the row above.");
+    setHybridStatus("Select a feed to start Hybrid preview.");
+    return;
+  }
+
+  const sourceKey = `${cameraRouterBaseUrl}|${cameraRouterSessionKey}|${selectedId}`;
+  if (!force && sourceKey === hybridPreviewSourceKey) {
+    return;
+  }
+  hybridPreviewSourceKey = sourceKey;
+
+  setHybridStatus(`Loading preview for ${selectedId}...`);
+  emptyEl.textContent = `Loading ${selectedId}...`;
+  emptyEl.style.display = "flex";
+  imageEl.style.display = "block";
+
+  imageEl.onload = () => {
+    if (hybridPreviewSourceKey !== sourceKey) {
+      return;
+    }
+    emptyEl.style.display = "none";
+    setHybridStatus(`Preview active: ${selectedId}`);
+  };
+  imageEl.onerror = () => {
+    if (hybridPreviewSourceKey !== sourceKey) {
+      return;
+    }
+    showHybridPreviewPlaceholder(`Preview failed for ${selectedId}.`);
+    setHybridStatus(`Preview failed for ${selectedId}`, true);
+  };
+  imageEl.src = cameraRouterUrl(`/mjpeg/${encodeURIComponent(selectedId)}`, true);
+}
+
+function renderHybridFeedOptions() {
+  const feedButtonsEl = document.getElementById("hybridFeedButtons");
+  if (!feedButtonsEl) {
+    return;
+  }
+
+  feedButtonsEl.innerHTML = "";
+
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    const note = document.createElement("div");
+    note.className = "stream-feed-row";
+    note.textContent = "Authenticate camera router in Streams to load feeds.";
+    feedButtonsEl.appendChild(note);
+    showHybridPreviewPlaceholder("Authenticate and select a camera feed.");
+    return;
+  }
+
+  if (!Array.isArray(cameraRouterFeeds) || cameraRouterFeeds.length === 0) {
+    const note = document.createElement("div");
+    note.className = "stream-feed-row";
+    note.textContent = "No feeds discovered yet. Use Refresh Feeds.";
+    feedButtonsEl.appendChild(note);
+    showHybridPreviewPlaceholder("No feeds discovered.");
+    setHybridStatus("No feeds discovered. Refresh the list.");
+    return;
+  }
+
+  const hasStoredSelection = hybridSelectedFeedId && cameraRouterFeeds.some((feed) => feed.id === hybridSelectedFeedId);
+  if (!hasStoredSelection) {
+    const fallbackId =
+      localStorage.getItem("cameraRouterSelectedFeed") ||
+      cameraPreview.targetCameraId ||
+      cameraRouterFeeds[0].id;
+    setHybridSelectedFeed(fallbackId);
+  }
+
+  cameraRouterFeeds.forEach((feed) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "hybrid-feed-btn";
+    if (!feed.online) {
+      btn.classList.add("offline");
+    }
+    if (feed.id === hybridSelectedFeedId) {
+      btn.classList.add("active");
+    }
+    btn.textContent = feed.label || feed.id;
+    btn.title = `${feed.id} | fps ${feed.fps} | kbps ${feed.kbps} | clients ${feed.clients}`;
+    btn.addEventListener("click", () => {
+      setHybridSelectedFeed(feed.id);
+      renderHybridFeedOptions();
+      startHybridPreview(feed.id, { force: true });
+    });
+    feedButtonsEl.appendChild(btn);
+  });
+
+  startHybridPreview(hybridSelectedFeedId, { force: false });
+}
+
+function stopHybridArrowHold() {
+  if (hybridHoldState.timer) {
+    clearInterval(hybridHoldState.timer);
+    hybridHoldState.timer = null;
+  }
+  if (hybridHoldState.button) {
+    hybridHoldState.button.classList.remove("active");
+  }
+  hybridHoldState.axis = "";
+  hybridHoldState.delta = 0;
+  hybridHoldState.button = null;
+}
+
+function startHybridArrowHold(axis, delta, buttonEl) {
+  stopHybridArrowHold();
+  hybridHoldState.axis = String(axis || "").trim();
+  hybridHoldState.delta = Number(delta) || 0;
+  hybridHoldState.button = buttonEl || null;
+  if (!hybridHoldState.axis || !hybridHoldState.delta) {
+    return;
+  }
+  if (hybridHoldState.button) {
+    hybridHoldState.button.classList.add("active");
+  }
+  applyHybridDeltas({ [hybridHoldState.axis]: hybridHoldState.delta }, { force: true });
+  hybridHoldState.timer = setInterval(() => {
+    applyHybridDeltas({ [hybridHoldState.axis]: hybridHoldState.delta }, { force: true });
+  }, HYBRID_HOLD_INTERVAL_MS);
+}
+
+function onHybridArrowPointerDown(event) {
+  if (event.button !== 0) {
+    return;
+  }
+  const buttonEl = event.currentTarget;
+  const axis = buttonEl.dataset.axis || "";
+  const delta = Number(buttonEl.dataset.delta) || 0;
+  if (!axis || !delta) {
+    return;
+  }
+  event.preventDefault();
+  startHybridArrowHold(axis, delta, buttonEl);
+  if (typeof buttonEl.setPointerCapture === "function") {
+    try {
+      buttonEl.setPointerCapture(event.pointerId);
+    } catch (err) {}
+  }
+}
+
+function onHybridArrowPointerStop(event) {
+  event.preventDefault();
+  stopHybridArrowHold();
+}
+
+function hybridDragMode(event) {
+  if (event.shiftKey) {
+    return "roll_height";
+  }
+  if (event.ctrlKey || event.metaKey) {
+    return "translate";
+  }
+  return "yaw_pitch";
+}
+
+function endHybridDragSession() {
+  hybridDragState.active = false;
+  hybridDragState.pointerId = null;
+  const dragSurface = document.getElementById("hybridDragSurface");
+  if (dragSurface) {
+    dragSurface.classList.remove("dragging");
+  }
+}
+
+function onHybridDragPointerDown(event) {
+  if (event.button !== 0) {
+    return;
+  }
+  hybridDragState.active = true;
+  hybridDragState.pointerId = event.pointerId;
+  hybridDragState.lastX = event.clientX;
+  hybridDragState.lastY = event.clientY;
+  const dragSurface = event.currentTarget;
+  dragSurface.classList.add("dragging");
+  if (typeof dragSurface.setPointerCapture === "function") {
+    try {
+      dragSurface.setPointerCapture(event.pointerId);
+    } catch (err) {}
+  }
+  event.preventDefault();
+}
+
+function onHybridDragPointerMove(event) {
+  if (!hybridDragState.active || event.pointerId !== hybridDragState.pointerId) {
+    return;
+  }
+
+  const dx = event.clientX - hybridDragState.lastX;
+  const dy = event.clientY - hybridDragState.lastY;
+  hybridDragState.lastX = event.clientX;
+  hybridDragState.lastY = event.clientY;
+  if (!dx && !dy) {
+    return;
+  }
+
+  const mode = hybridDragMode(event);
+  const deltas = {};
+  if (mode === "translate") {
+    deltas.Y = dx * 2.0;
+    deltas.Z = -dy * 2.0;
+  } else if (mode === "roll_height") {
+    deltas.R = dx * 2.4;
+    deltas.H = -dy * 0.2;
+  } else {
+    deltas.X = dx * 2.4;
+    deltas.P = -dy * 2.4;
+  }
+
+  applyHybridDeltas(deltas, {
+    force: false,
+    minIntervalMs: HYBRID_COMMAND_INTERVAL_MS,
+  });
+  event.preventDefault();
+}
+
+function onHybridDragPointerStop(event) {
+  if (!hybridDragState.active || event.pointerId !== hybridDragState.pointerId) {
+    return;
+  }
+  event.preventDefault();
+  endHybridDragSession();
+}
+
+function onHybridDragWheel(event) {
+  event.preventDefault();
+  const direction = event.deltaY < 0 ? 1 : -1;
+  const step = event.shiftKey ? 4 : 2;
+  applyHybridDeltas({ H: direction * step }, {
+    force: true,
+    minIntervalMs: 25,
+  });
+}
+
+function setupHybridUi() {
+  if (hybridUiInitialized) {
+    return;
+  }
+  hybridUiInitialized = true;
+
+  hybridSyncPoseFromHeadControls();
+  renderHybridReadout();
+
+  const refreshBtn = document.getElementById("hybridRefreshFeedsBtn");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", () => {
+      refreshCameraFeeds().catch(() => {});
+    });
+  }
+
+  const dragSurface = document.getElementById("hybridDragSurface");
+  if (dragSurface) {
+    dragSurface.addEventListener("pointerdown", onHybridDragPointerDown);
+    dragSurface.addEventListener("pointermove", onHybridDragPointerMove);
+    dragSurface.addEventListener("pointerup", onHybridDragPointerStop);
+    dragSurface.addEventListener("pointercancel", onHybridDragPointerStop);
+    dragSurface.addEventListener("pointerleave", onHybridDragPointerStop);
+    dragSurface.addEventListener("wheel", onHybridDragWheel, { passive: false });
+    dragSurface.addEventListener("contextmenu", (event) => event.preventDefault());
+  }
+
+  document.querySelectorAll(".hybrid-arrow").forEach((buttonEl) => {
+    buttonEl.addEventListener("pointerdown", onHybridArrowPointerDown);
+    buttonEl.addEventListener("pointerup", onHybridArrowPointerStop);
+    buttonEl.addEventListener("pointercancel", onHybridArrowPointerStop);
+    buttonEl.addEventListener("pointerleave", onHybridArrowPointerStop);
+  });
+
+  window.addEventListener("pointerup", stopHybridArrowHold);
+  window.addEventListener("blur", () => {
+    stopHybridArrowHold();
+    endHybridDragSession();
+  });
+
+  renderHybridFeedOptions();
 }
 
 function getNumberValue(id, fallback = 0) {
@@ -3551,6 +4037,7 @@ window.addEventListener('load', async () => {
   syncAdapterConnectionInputs({ preserveUserInput: true });
   initNknRouterUi();
   setupStreamConfigUi();
+  setupHybridUi();
 
   if (queryConnection.adapterConfigured && queryConnection.passwordProvided) {
     logToConsole("[CONNECT] Adapter and password found in query; attempting auto-connect...");
@@ -3583,14 +4070,14 @@ window.addEventListener('load', async () => {
   } else if (queryConnection.adapterConfigured) {
     // We have adapter URL but no session - show connection modal
     logToConsole("[CONNECT] Adapter URL configured, please authenticate...");
-    if (initialRoute !== "streams" && initialRoute !== "orientation") {
+    if (initialRoute !== "streams" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
       showConnectionModal();
     } else {
       hideConnectionModal();
     }
   } else {
     // Show connection modal on first load
-    if (initialRoute !== "streams" && initialRoute !== "orientation") {
+    if (initialRoute !== "streams" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
       showConnectionModal();
     } else {
       hideConnectionModal();
