@@ -506,6 +506,11 @@ function syncSidebarScrim() {
     scrim.hidden = !show;
 }
 
+function sidebarToggleIconMarkup(collapsed) {
+    const path = collapsed ? "m9 6 6 6-6 6" : "m15 6-6 6 6 6";
+    return `<span class="sidebar-toggle-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${path}"></path></svg></span>`;
+}
+
 function setSidebarCollapsed(collapsed, options = {}) {
     const shouldPersist = options.persist !== false;
     const nextCollapsed = !!collapsed;
@@ -513,9 +518,10 @@ function setSidebarCollapsed(collapsed, options = {}) {
 
     const toggleBtn = document.getElementById("sidebarToggleBtn");
     if (toggleBtn) {
-        toggleBtn.textContent = nextCollapsed ? ">" : "<";
+        toggleBtn.innerHTML = sidebarToggleIconMarkup(nextCollapsed);
         toggleBtn.setAttribute("aria-expanded", nextCollapsed ? "false" : "true");
         toggleBtn.setAttribute("aria-label", nextCollapsed ? "Expand sidebar" : "Collapse sidebar");
+        toggleBtn.setAttribute("title", nextCollapsed ? "Open sidebar" : "Close sidebar");
     }
 
     syncSidebarScrim();
