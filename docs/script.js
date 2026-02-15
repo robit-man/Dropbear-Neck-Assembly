@@ -42,6 +42,8 @@ let controlsMenuOpen = false;
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
 let hybridUiInitialized = false;
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "uiSidebarCollapsed";
+let sidebarUiInitialized = false;
 
 // Prevent browser zoom gestures (double-tap, pinch, ctrl+wheel) for touch control stability.
 (function installViewportZoomGuards() {
@@ -405,6 +407,67 @@ function initializeControlsNav() {
 
     setControlsMenuOpen(false);
     syncControlsNavState(getRouteFromLocation());
+}
+
+function setSidebarCollapsed(collapsed, options = {}) {
+    const shouldPersist = options.persist !== false;
+    const nextCollapsed = !!collapsed;
+    document.body.classList.toggle("sidebar-collapsed", nextCollapsed);
+
+    const toggleBtn = document.getElementById("sidebarToggleBtn");
+    if (toggleBtn) {
+        toggleBtn.textContent = nextCollapsed ? "Open" : "Close";
+        toggleBtn.setAttribute("aria-expanded", nextCollapsed ? "false" : "true");
+        toggleBtn.setAttribute("aria-label", nextCollapsed ? "Expand sidebar" : "Collapse sidebar");
+    }
+
+    if (shouldPersist) {
+        try {
+            localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, nextCollapsed ? "1" : "0");
+        } catch (err) {}
+    }
+}
+
+function initializeSidebarUi() {
+    if (sidebarUiInitialized) {
+        return;
+    }
+    sidebarUiInitialized = true;
+
+    const toggleBtn = document.getElementById("sidebarToggleBtn");
+    if (!toggleBtn) {
+        return;
+    }
+
+    let storedCollapsed = null;
+    try {
+        const raw = localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+        if (raw === "1") {
+            storedCollapsed = true;
+        } else if (raw === "0") {
+            storedCollapsed = false;
+        }
+    } catch (err) {}
+
+    const defaultCollapsed = window.innerWidth <= 900;
+    setSidebarCollapsed(storedCollapsed === null ? defaultCollapsed : storedCollapsed, { persist: false });
+
+    toggleBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+    });
+
+    const collapseOnSelect = () => {
+        if (window.innerWidth <= 900) {
+            setSidebarCollapsed(true);
+        }
+    };
+    document.querySelectorAll(".nav-link[data-route]").forEach((node) => {
+        node.addEventListener("click", collapseOnSelect);
+    });
+    document.querySelectorAll(".controls-menu-option[data-control-route]").forEach((node) => {
+        node.addEventListener("click", collapseOnSelect);
+    });
 }
 
 function getRouteFromLocation() {
@@ -1924,6 +1987,7 @@ const STREAM_MODE_JPEG = "jpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
 const CAMERA_FEED_POLL_INTERVAL_MS = 1500;
 const CAMERA_IMU_POLL_INTERVAL_MS = 200;
+const CAMERA_IMU_STREAM_RETRY_MS = 2200;
 const CAMERA_JPEG_POLL_INTERVAL_LOCAL_MS = 180;
 const CAMERA_JPEG_POLL_INTERVAL_TUNNEL_MS = 550;
 const CAMERA_JPEG_REQUEST_STALL_MS = 3500;
@@ -2008,6 +2072,10 @@ const hybridDragState = {
 let cameraImuPollTimer = null;
 let cameraImuPollInFlight = false;
 let cameraImuSnapshot = null;
+let cameraImuEventSource = null;
+let cameraImuStreamUrl = "";
+let cameraImuStreamActive = false;
+let cameraImuStreamRetryTimer = null;
 let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
 let cameraSessionRotateInFlight = false;
@@ -2094,6 +2162,14 @@ function cameraRouterImuPath() {
   return raw.startsWith("/") ? raw : `/${raw}`;
 }
 
+function cameraRouterImuStreamPath() {
+  const raw = String((cameraRouterRoutes && cameraRouterRoutes.imu_stream) || "/imu/stream").trim();
+  if (!raw) {
+    return "/imu/stream";
+  }
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
 function parseImuVector(raw) {
   if (Array.isArray(raw) && raw.length >= 3) {
     const x = Number(raw[0]);
@@ -2139,6 +2215,27 @@ function formatImuVector(vector) {
   return base;
 }
 
+function applyCameraImuPayload(rawPayload, sourceLabel = "poll") {
+  const payload = (rawPayload && typeof rawPayload === "object") ? rawPayload : {};
+  const accel = parseImuVector(payload.accel);
+  const gyro = parseImuVector(payload.gyro);
+  cameraImuSnapshot = {
+    accel,
+    gyro,
+    fetchedAtMs: Date.now(),
+    source: String(sourceLabel || "poll"),
+  };
+
+  const anyVector = !!(accel || gyro);
+  updateCameraImuReadouts(cameraImuSnapshot, {
+    message: anyVector
+      ? `IMU ${cameraImuSnapshot.source} live (${new Date(cameraImuSnapshot.fetchedAtMs).toLocaleTimeString()})`
+      : "IMU route reachable; waiting for motion samples",
+    error: false,
+  });
+  return anyVector;
+}
+
 function updateCameraImuReadouts(payload = null, options = {}) {
   const accel = payload && payload.accel ? payload.accel : null;
   const gyro = payload && payload.gyro ? payload.gyro : null;
@@ -2171,7 +2268,11 @@ function updateCameraImuReadouts(payload = null, options = {}) {
 
 async function refreshCameraImu(options = {}) {
   const silent = !!options.silent;
+  const force = !!options.force;
   if (cameraImuPollInFlight) {
+    return !!cameraImuSnapshot;
+  }
+  if (!force && cameraImuStreamActive) {
     return !!cameraImuSnapshot;
   }
   if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
@@ -2197,6 +2298,7 @@ async function refreshCameraImu(options = {}) {
       if (response.status === 401) {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
+        stopCameraImuStream();
       }
       cameraImuSnapshot = null;
       updateCameraImuReadouts(null, {
@@ -2206,20 +2308,7 @@ async function refreshCameraImu(options = {}) {
       return false;
     }
 
-    const accel = parseImuVector(data.accel);
-    const gyro = parseImuVector(data.gyro);
-    cameraImuSnapshot = {
-      accel,
-      gyro,
-      fetchedAtMs: Date.now(),
-    };
-
-    const anyVector = !!(accel || gyro);
-    updateCameraImuReadouts(cameraImuSnapshot, {
-      message: anyVector ? `IMU live (${new Date(cameraImuSnapshot.fetchedAtMs).toLocaleTimeString()})` : "IMU route reachable; waiting for motion samples",
-      error: false,
-    });
-    return anyVector;
+    return applyCameraImuPayload(data, "poll");
   } catch (err) {
     cameraImuSnapshot = null;
     updateCameraImuReadouts(null, {
@@ -2232,12 +2321,100 @@ async function refreshCameraImu(options = {}) {
   }
 }
 
+function stopCameraImuStream() {
+  if (cameraImuStreamRetryTimer) {
+    clearTimeout(cameraImuStreamRetryTimer);
+    cameraImuStreamRetryTimer = null;
+  }
+  cameraImuStreamActive = false;
+  cameraImuStreamUrl = "";
+  if (cameraImuEventSource) {
+    try {
+      cameraImuEventSource.close();
+    } catch (err) {}
+    cameraImuEventSource = null;
+  }
+}
+
+function scheduleCameraImuStreamRetry() {
+  if (cameraImuStreamRetryTimer) {
+    return;
+  }
+  cameraImuStreamRetryTimer = setTimeout(() => {
+    cameraImuStreamRetryTimer = null;
+    startCameraImuStream();
+  }, CAMERA_IMU_STREAM_RETRY_MS);
+}
+
+function startCameraImuStream() {
+  if (typeof EventSource === "undefined") {
+    return false;
+  }
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    stopCameraImuStream();
+    return false;
+  }
+  const streamUrl = cameraRouterUrl(cameraRouterImuStreamPath(), true);
+  if (!streamUrl) {
+    stopCameraImuStream();
+    return false;
+  }
+  if (cameraImuEventSource && cameraImuStreamUrl === streamUrl) {
+    return true;
+  }
+  stopCameraImuStream();
+  cameraImuStreamUrl = streamUrl;
+
+  try {
+    const eventSource = new EventSource(streamUrl);
+    cameraImuEventSource = eventSource;
+    cameraImuStreamActive = false;
+
+    const consume = (event) => {
+      let data = {};
+      try {
+        data = JSON.parse(event.data || "{}");
+      } catch (err) {
+        return;
+      }
+      cameraImuStreamActive = true;
+      applyCameraImuPayload(data, "stream");
+    };
+
+    eventSource.addEventListener("open", () => {
+      cameraImuStreamActive = true;
+    });
+    eventSource.addEventListener("imu", consume);
+    eventSource.onmessage = consume;
+    eventSource.onerror = () => {
+      cameraImuStreamActive = false;
+      if (cameraImuEventSource === eventSource) {
+        try {
+          eventSource.close();
+        } catch (err) {}
+        cameraImuEventSource = null;
+      }
+      scheduleCameraImuStreamRetry();
+    };
+    return true;
+  } catch (err) {
+    cameraImuStreamActive = false;
+    cameraImuEventSource = null;
+    scheduleCameraImuStreamRetry();
+    return false;
+  }
+}
+
 function startCameraImuPolling() {
   if (cameraImuPollTimer) {
     return;
   }
+  startCameraImuStream();
   refreshCameraImu({ silent: true }).catch(() => {});
   cameraImuPollTimer = setInterval(() => {
+    if (cameraImuStreamActive) {
+      return;
+    }
     refreshCameraImu({ silent: true }).catch(() => {});
   }, CAMERA_IMU_POLL_INTERVAL_MS);
 }
@@ -2878,12 +3055,14 @@ async function authenticateCameraRouter() {
 
     setStreamStatus(`Authenticated. Session timeout ${data.timeout}s`);
     await refreshCameraFeeds();
+    startCameraImuStream();
     await refreshCameraImu({ silent: true });
     syncPinnedPreviewSource();
     if (cameraPreview.desired) {
       await startCameraPreview({ autoRestart: true, reason: "session refresh" });
     }
   } catch (err) {
+    stopCameraImuStream();
     setStreamStatus(`Auth error: ${err}`, true);
     updateCameraImuReadouts(null, {
       message: "IMU unavailable until camera router auth succeeds",
@@ -2927,6 +3106,7 @@ async function rotateCameraRouterSessionKey() {
       if (response.status === 401) {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
+        stopCameraImuStream();
         syncPinnedPreviewSource();
         renderHybridFeedOptions();
         updateCameraImuReadouts(null, {
@@ -2949,6 +3129,7 @@ async function rotateCameraRouterSessionKey() {
 
     cameraRouterSessionKey = nextSessionKey;
     localStorage.setItem("cameraRouterSessionKey", cameraRouterSessionKey);
+    startCameraImuStream();
     syncPinnedPreviewSource({ forceRefresh: true });
     await refreshCameraFeeds({ silent: true, suppressErrors: true });
     await refreshCameraImu({ silent: true });
@@ -3189,6 +3370,7 @@ async function refreshCameraFeeds(options = {}) {
       if (response.status === 401) {
         cameraRouterSessionKey = "";
         localStorage.removeItem("cameraRouterSessionKey");
+        stopCameraImuStream();
         syncPinnedPreviewSource();
         renderHybridFeedOptions();
         updateCameraImuReadouts(null, {
@@ -3213,6 +3395,7 @@ async function refreshCameraFeeds(options = {}) {
         ...cameraRouterRoutes,
         ...data.routes,
       };
+      startCameraImuStream();
     }
     const preserveSelectors = silent && isCameraSelectInteractionActive();
     renderCameraFeedOptions({ preserveSelectors });
@@ -3490,6 +3673,7 @@ function setupStreamConfigUi() {
   initializePinnedPreviewUi();
   startCameraFeedPolling();
   startCameraImuPolling();
+  window.addEventListener("beforeunload", stopCameraImuStream, { once: true });
 
   if (baseInput) {
     baseInput.value = cameraRouterBaseUrl;
@@ -3498,8 +3682,10 @@ function setupStreamConfigUi() {
         cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
         localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
         hybridPreviewSourceKey = "";
+        stopCameraImuStream();
         syncPinnedPreviewSource();
         renderHybridFeedOptions();
+        startCameraImuStream();
         refreshCameraImu({ silent: true }).catch(() => {});
       } catch (err) {}
     });
@@ -3598,9 +3784,11 @@ function setupStreamConfigUi() {
   }
 
   if (cameraRouterBaseUrl && cameraRouterSessionKey) {
+    startCameraImuStream();
     refreshCameraFeeds();
     refreshCameraImu({ silent: true }).catch(() => {});
   } else {
+    stopCameraImuStream();
     setStreamStatus("Configure camera router URL + password, then authenticate");
     renderHybridFeedOptions();
     updateCameraImuReadouts(null, {
@@ -3686,12 +3874,29 @@ function buildHybridCommandPayload() {
   };
 }
 
+function syncHybridHeightControl(value) {
+  const sliderEl = document.getElementById("hybridHeightSlider");
+  const valueEl = document.getElementById("hybridHeightValue");
+  const nextHeight = Number.isFinite(Number(value))
+    ? Math.round(hybridClampValue("H", Number(value)))
+    : Math.round(hybridClampValue("H", hybridPose.H));
+
+  if (sliderEl) {
+    sliderEl.value = String(nextHeight);
+  }
+  if (valueEl) {
+    valueEl.textContent = `H${nextHeight}`;
+  }
+}
+
 function renderHybridReadout() {
   const readoutEl = document.getElementById("hybridControlReadout");
   if (!readoutEl) {
+    syncHybridHeightControl();
     return;
   }
   const payload = buildHybridCommandPayload();
+  syncHybridHeightControl(payload.values.H);
   readoutEl.textContent = payload.command;
 }
 
@@ -4042,6 +4247,24 @@ function setupHybridUi() {
     });
   }
 
+  const heightSlider = document.getElementById("hybridHeightSlider");
+  if (heightSlider) {
+    const onHeightSlide = () => {
+      const nextHeight = hybridClampValue("H", Number(heightSlider.value));
+      if (nextHeight !== hybridPose.H) {
+        hybridPose.H = nextHeight;
+        dispatchHybridCommand({
+          force: false,
+          minIntervalMs: 20,
+        });
+      } else {
+        renderHybridReadout();
+      }
+    };
+    heightSlider.addEventListener("input", onHeightSlide);
+    heightSlider.addEventListener("change", onHeightSlide);
+  }
+
   const dragSurface = document.getElementById("hybridDragSurface");
   if (dragSurface) {
     dragSurface.addEventListener("pointerdown", onHybridDragPointerDown);
@@ -4066,6 +4289,7 @@ function setupHybridUi() {
     endHybridDragSession();
   });
 
+  syncHybridHeightControl();
   renderHybridFeedOptions();
 }
 
@@ -4251,7 +4475,68 @@ function decQuatField(field, step) {
     updateQuatView();
 }
 
+async function ensureHybridAutoReady(initialRoute) {
+  if (initialRoute !== "hybrid") {
+    return;
+  }
+
+  if (!authenticated && HTTP_URL && PASSWORD) {
+    try {
+      const adapterReady = await authenticate(PASSWORD, WS_URL, HTTP_URL);
+      if (adapterReady) {
+        if (WS_URL) {
+          initWebSocket();
+        }
+        hideConnectionModal();
+      }
+    } catch (err) {}
+  }
+
+  if (!cameraRouterBaseUrl) {
+    return;
+  }
+  if (!cameraRouterSessionKey && !cameraRouterPassword) {
+    return;
+  }
+
+  try {
+    if (!cameraRouterSessionKey) {
+      await authenticateCameraRouter();
+    } else {
+      await refreshCameraFeeds({ silent: true, suppressErrors: true });
+      await refreshCameraImu({ silent: true, force: true });
+    }
+  } catch (err) {}
+
+  if (!cameraRouterSessionKey) {
+    return;
+  }
+
+  if (!Array.isArray(cameraRouterFeeds) || cameraRouterFeeds.length === 0) {
+    try {
+      await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    } catch (err) {}
+  }
+
+  if (!hybridSelectedFeedId) {
+    const fallbackFeed =
+      localStorage.getItem("cameraRouterSelectedFeed") ||
+      cameraPreview.targetCameraId ||
+      (cameraRouterFeeds[0] ? cameraRouterFeeds[0].id : "");
+    if (fallbackFeed) {
+      setHybridSelectedFeed(fallbackFeed);
+    }
+  }
+
+  renderHybridFeedOptions();
+  if (hybridSelectedFeedId) {
+    startHybridPreview(hybridSelectedFeedId, { force: true });
+    setHybridStatus(`Hybrid auto-ready on ${hybridSelectedFeedId}`);
+  }
+}
+
 window.addEventListener('load', async () => {
+  initializeSidebarUi();
   initializeRouting();
   initializeControlsNav();
   const initialRoute = getRouteFromLocation();
@@ -4272,9 +4557,11 @@ window.addEventListener('load', async () => {
       } else {
         hideConnectionModal();
       }
+      await ensureHybridAutoReady(initialRoute);
       return;
     }
     showConnectionModal();
+    await ensureHybridAutoReady(initialRoute);
     return;
   }
 
@@ -4307,6 +4594,8 @@ window.addEventListener('load', async () => {
       hideConnectionModal();
     }
   }
+
+  await ensureHybridAutoReady(initialRoute);
 });
 
 window.sendCommand = sendCommand;

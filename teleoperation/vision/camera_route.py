@@ -125,7 +125,7 @@ ensure_venv()
 # Imports after venv bootstrap
 # ---------------------------------------------------------------------------
 import cv2
-from flask import Flask, Response, jsonify, render_template_string, request
+from flask import Flask, Response, jsonify, render_template_string, request, stream_with_context
 from flask_cors import CORS
 
 WEBRTC_AVAILABLE = False
@@ -3858,6 +3858,7 @@ def list_cameras():
                 "config_schema": "/config/schema",
                 "config_save": "/config/save",
                 "imu": "/imu",
+                "imu_stream": "/imu/stream",
                 "snapshot": "/camera/<camera_id>",
                 "jpeg": "/jpeg/<camera_id>",
                 "stream": "/video/<camera_id>",
@@ -4161,6 +4162,37 @@ def imu_endpoint():
     with imu_lock:
         data = dict(imu_state)
     return jsonify(data)
+
+
+@app.route("/imu/stream", methods=["GET"])
+@require_session
+def imu_stream_endpoint():
+    hz = _as_int(request.args.get("hz"), 20, minimum=1, maximum=120)
+    interval_seconds = 1.0 / float(max(1, hz))
+
+    def generate():
+        while True:
+            with imu_lock:
+                data = dict(imu_state)
+            payload = {
+                "accel": data.get("accel"),
+                "gyro": data.get("gyro"),
+                "server_time_ms": int(time.time() * 1000),
+            }
+            yield f"event: imu\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+            time.sleep(interval_seconds)
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.route("/camera/<camera_id>")

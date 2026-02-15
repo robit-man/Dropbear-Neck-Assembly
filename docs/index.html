@@ -51,58 +51,75 @@
     </div>
   </div>
 
-  <div class="container">
-    <div class="metrics-bar">
-      <div class="metric">
-        <div class="metric-label">Control Transport</div>
-        <div id="metricStatus" class="metric-value">Checking...</div>
-        <div id="metricLatency" class="metric-meta">Latency --</div>
+  <div class="app-shell">
+    <aside id="appSidebar" class="app-sidebar">
+      <div class="sidebar-header">
+        <button id="sidebarToggleBtn" class="sidebar-toggle-btn" type="button" aria-expanded="true" aria-label="Collapse sidebar">Menu</button>
+        <div class="sidebar-brand">Dropbear Control</div>
       </div>
-      <div class="metric">
-        <div class="metric-label">Control Datastream</div>
-        <div id="metricRate" class="metric-value">0 cmd/s</div>
-        <div id="metricCommands" class="metric-meta">0 commands</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">Video Datastream</div>
-        <div id="metricVideoState" class="metric-value">Idle</div>
-        <div id="metricVideoStats" class="metric-meta">-- fps | -- kbps | -- clients</div>
-      </div>
-      <div style="margin-left:auto;align-self: flex-start;">
-        <button onclick="showConnectionModal(true)" class="nav-button">
-          Settings
-        </button>
-      </div>
-    </div>
-
-    <nav>
-      <div class="nav-container controls-nav" id="controlsNav">
-        <a href="#neck" class="nav-link" data-route="neck">Neck</a>
-        <a href="#hybrid" class="nav-link" data-route="hybrid">Hybrid</a>
-        <a href="#streams" class="nav-link" data-route="streams">Streams</a>
-        <button id="controlsMenuToggleBtn" class="nav-link controls-menu-toggle" type="button" aria-expanded="false" aria-controls="controlsMenuPanel">
-          Controls
-        </button>
-        <button id="controlsCurrentRouteGhost" class="nav-link controls-current-ghost" type="button" disabled>
-          No Control Selected
-        </button>
-        <div id="controlsMenuPanel" class="controls-menu-panel" hidden>
-          <div class="controls-menu-stack">
-            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="direct">Direct Motor</div>
-            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="euler">Euler</div>
-            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="head">Full Head</div>
-            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="quaternion">Quaternion</div>
-            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="headstream">Morphtarget</div>
-            <div class="controls-menu-option" role="button" tabindex="0" data-control-route="orientation">Orientation</div>
+      <div class="sidebar-content">
+        <details class="sidebar-section" open>
+          <summary>Status</summary>
+          <div class="metrics-bar">
+            <div class="metric">
+              <div class="metric-label">Control Transport</div>
+              <div id="metricStatus" class="metric-value">Checking...</div>
+              <div id="metricLatency" class="metric-meta">Latency --</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Control Datastream</div>
+              <div id="metricRate" class="metric-value">0 cmd/s</div>
+              <div id="metricCommands" class="metric-meta">0 commands</div>
+            </div>
+            <div class="metric">
+              <div class="metric-label">Video Datastream</div>
+              <div id="metricVideoState" class="metric-value">Idle</div>
+              <div id="metricVideoStats" class="metric-meta">-- fps | -- kbps | -- clients</div>
+            </div>
           </div>
-        </div>
+        </details>
+
+        <details class="sidebar-section" open>
+          <summary>Navigation</summary>
+          <nav>
+            <div class="nav-container controls-nav" id="controlsNav">
+              <a href="#neck" class="nav-link" data-route="neck">Neck</a>
+              <a href="#hybrid" class="nav-link" data-route="hybrid">Hybrid</a>
+              <a href="#streams" class="nav-link" data-route="streams">Streams</a>
+              <button id="controlsMenuToggleBtn" class="nav-link controls-menu-toggle" type="button" aria-expanded="false" aria-controls="controlsMenuPanel">
+                Controls
+              </button>
+              <button id="controlsCurrentRouteGhost" class="nav-link controls-current-ghost" type="button" disabled>
+                No Control Selected
+              </button>
+              <div id="controlsMenuPanel" class="controls-menu-panel" hidden>
+                <div class="controls-menu-stack">
+                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="direct">Direct Motor</div>
+                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="euler">Euler</div>
+                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="head">Full Head</div>
+                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="quaternion">Quaternion</div>
+                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="headstream">Morphtarget</div>
+                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="orientation">Orientation</div>
+                </div>
+              </div>
+            </div>
+          </nav>
+        </details>
+
+        <details class="sidebar-section" open>
+          <summary>Actions</summary>
+          <div class="sidebar-action-stack">
+            <button onclick="showConnectionModal(true)" class="nav-button">Settings</button>
+            <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>
+            <button onclick="sendHomeSoftCommand()" class="nav-button">HOME Soft</button>
+            <button onclick="resetAdapterPort(false)" class="nav-button">Reset Port</button>
+          </div>
+        </details>
       </div>
-      <div class="row">
-        <button onclick="sendHomeCommand()" class="nav-button">HOME Brute</button>
-        <button onclick="sendHomeSoftCommand()" class="nav-button">HOME Soft</button>
-        <button onclick="resetAdapterPort(false)" class="nav-button">Reset Port</button>
-      </div>
-    </nav>
+    </aside>
+
+    <main class="app-main">
+      <div class="container">
 
     <section class="view" data-view="connect">
       <h1>Robotic Neck Control</h1>
@@ -729,19 +746,26 @@
           <h3 style="margin-top:0;">Preview + Motion Overlay</h3>
           <button id="hybridRefreshFeedsBtn" type="button">Refresh Feeds</button>
         </div>
-        <div id="hybridPreviewWrap" class="hybrid-preview-wrap">
-          <img id="hybridPreviewImage" alt="Hybrid Preview" style="display:none;">
-          <div id="hybridPreviewEmpty" class="hybrid-preview-empty">Authenticate and select a camera feed.</div>
-          <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
-          <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
-          <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="8" aria-label="Yaw Right">&#9654;</button>
-          <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
-          <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Left">&#9664;</button>
+        <div class="hybrid-preview-layout">
+          <div id="hybridPreviewWrap" class="hybrid-preview-wrap">
+            <img id="hybridPreviewImage" alt="Hybrid Preview" style="display:none;">
+            <div id="hybridPreviewEmpty" class="hybrid-preview-empty">Authenticate and select a camera feed.</div>
+            <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
+            <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
+            <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Right">&#9654;</button>
+            <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
+            <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="8" aria-label="Yaw Left">&#9664;</button>
+          </div>
+          <div class="hybrid-height-control">
+            <label class="hybrid-height-label" for="hybridHeightSlider">Height</label>
+            <input id="hybridHeightSlider" class="hybrid-height-slider" type="range" min="0" max="70" step="1" value="0" aria-label="Hybrid height adjustment">
+            <output id="hybridHeightValue" class="hybrid-height-value" for="hybridHeightSlider">H0</output>
+          </div>
         </div>
         <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S1,A1,R0,P0</p>
         <p class="hybrid-control-hint">
           Drag: yaw/pitch. Ctrl/Cmd + drag: lateral/forward-back. Shift + drag: roll/height.
-          Scroll: height. Hold arrows for continuous trim.
+          Scroll or right slider: height. Hold arrows for continuous trim.
         </p>
         <div class="imu-readout-grid">
           <div class="imu-readout-item">
@@ -756,6 +780,10 @@
         <p id="hybridImuMeta" class="imu-readout-meta">IMU idle</p>
       </div>
     </section>
+      </div>
+
+      <footer id="console"></footer>
+    </main>
   </div>
 
   <div id="pinnedStreamPane" class="pinned-stream-pane" aria-label="Pinned stream preview">
@@ -764,6 +792,5 @@
     <div id="pinnedStreamResizeHandle" class="pinned-stream-resize" aria-hidden="true"></div>
   </div>
 
-  <footer id="console"></footer>
 </body>
 </html>
