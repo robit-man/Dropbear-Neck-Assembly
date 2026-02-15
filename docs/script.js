@@ -4518,10 +4518,13 @@ function onHybridDragPointerMove(event) {
   const mode = hybridDragMode(event, hybridDragState.button);
   const deltas = {};
   if (mode === "translate") {
-    deltas.Y = dx * 2.0;
-    deltas.Z = -dy * 2.0;
+    const lateralGain = hybridDragState.button === 2 ? -2.0 : 2.0;
+    const dorsalGain = hybridDragState.button === 2 ? 2.0 : -2.0;
+    deltas.Y = dx * lateralGain;
+    deltas.Z = dy * dorsalGain;
   } else if (mode === "roll_height") {
-    deltas.R = dx * 2.4;
+    const rollGain = hybridDragState.button === 1 ? -2.4 : 2.4;
+    deltas.R = dx * rollGain;
     deltas.H = -dy * 0.2;
   } else {
     deltas.X = dx * 2.4;
