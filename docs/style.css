@@ -76,15 +76,18 @@ html {
 
 .sidebar-toggle-btn {
     position: absolute;
-    top: 0.55rem;
-    right: 0.55rem;
-    width: 2.4rem;
-    height: 2.4rem;
+    top: 0;
+    right: 0;
+    aspect-ratio: 1 / 1;
+    height: 100%;
     padding: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     z-index: 2;
+    border-radius: unset;
+    border: unset;
+    background: unset!important;
 }
 
 .sidebar-toggle-icon {
@@ -117,7 +120,7 @@ html {
 .sidebar-content {
     padding: 0.7rem;
     display: flex;
-    flex-direction: column;
+    flex-flow: column;
     gap: 0.65rem;
     overflow-y: auto;
     transition: opacity 0.16s ease, visibility 0.16s ease;
