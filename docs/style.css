@@ -11,7 +11,7 @@
     --ui-control-font-size: 16px;
     --ui-control-font-weight: 700;
     --sidebar-width: 320px;
-    --sidebar-peek-width: 74px;
+    --sidebar-peek-width: 32px;
 }
 
 * {
