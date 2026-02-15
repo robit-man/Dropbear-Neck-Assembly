@@ -2349,7 +2349,7 @@ const HYBRID_PREVIEW_DEFAULT_ASPECT = "16 / 9";
 const HYBRID_COMMAND_INTERVAL_MS = 55;
 const HYBRID_HOLD_INTERVAL_MS = 95;
 const HYBRID_POSE_LIMITS = Object.freeze({
-  X: { min: -800, max: 800 },
+  X: { min: -500, max: 500 },
   Y: { min: -800, max: 800 },
   Z: { min: -800, max: 800 },
   H: { min: 0, max: 70 },
@@ -2381,6 +2381,7 @@ const hybridDragState = {
   pointerId: null,
   lastX: 0,
   lastY: 0,
+  button: 0,
 };
 let cameraImuPollTimer = null;
 let cameraImuPollInFlight = false;
@@ -4456,7 +4457,13 @@ function onHybridArrowPointerStop(event) {
   stopHybridArrowHold();
 }
 
-function hybridDragMode(event) {
+function hybridDragMode(event, dragButton = 0) {
+  if (dragButton === 2) {
+    return "translate";
+  }
+  if (dragButton === 1) {
+    return "roll_height";
+  }
   if (event.shiftKey) {
     return "roll_height";
   }
@@ -4469,6 +4476,7 @@ function hybridDragMode(event) {
 function endHybridDragSession() {
   hybridDragState.active = false;
   hybridDragState.pointerId = null;
+  hybridDragState.button = 0;
   const dragSurface = document.getElementById("hybridDragSurface");
   if (dragSurface) {
     dragSurface.classList.remove("dragging");
@@ -4476,13 +4484,14 @@ function endHybridDragSession() {
 }
 
 function onHybridDragPointerDown(event) {
-  if (event.button !== 0) {
+  if (event.button !== 0 && event.button !== 1 && event.button !== 2) {
     return;
   }
   hybridDragState.active = true;
   hybridDragState.pointerId = event.pointerId;
   hybridDragState.lastX = event.clientX;
   hybridDragState.lastY = event.clientY;
+  hybridDragState.button = event.button;
   const dragSurface = event.currentTarget;
   dragSurface.classList.add("dragging");
   if (typeof dragSurface.setPointerCapture === "function") {
@@ -4506,7 +4515,7 @@ function onHybridDragPointerMove(event) {
     return;
   }
 
-  const mode = hybridDragMode(event);
+  const mode = hybridDragMode(event, hybridDragState.button);
   const deltas = {};
   if (mode === "translate") {
     deltas.Y = dx * 2.0;
