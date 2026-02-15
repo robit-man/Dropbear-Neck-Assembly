@@ -163,7 +163,6 @@ html {
 .app-sidebar .metrics-bar {
     flex-direction: column;
     margin: 0;
-    padding: 0;
     border: 0;
     background: transparent;
     gap: 0.45rem;
@@ -193,7 +192,9 @@ html {
 .app-sidebar .nav-link,
 .app-sidebar .nav-button {
     width: 100%;
-    text-align: left;
+    text-align: left;  
+    flex-flow: row-reverse;
+  justify-content: space-between;
 }
 
 .app-sidebar .controls-menu-panel {
