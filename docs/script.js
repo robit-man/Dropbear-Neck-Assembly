@@ -1468,6 +1468,8 @@ const ROUTER_NKN_SUBCLIENTS = 4;
 const ROUTER_NKN_READY_TIMEOUT_MS = 16000;
 const ROUTER_NKN_RESOLVE_TIMEOUT_MS = 14000;
 const ROUTER_NKN_AUTO_RESOLVE_INTERVAL_MS = 45000;
+const ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS = 4;
+const ROUTER_NKN_SEND_RETRY_DELAY_MS = 450;
 
 let nknUiInitialized = false;
 let browserNknClient = null;
@@ -2064,8 +2066,59 @@ function applyResolvedEndpoints(resolved) {
   return changed;
 }
 
+function isNknTransportNotReadyError(err) {
+  const message = String((err && err.message) || err || "").toLowerCase();
+  return (
+    message.includes("failed to send with any client") ||
+    message.includes("rtcdatachannel.readystate is not 'open'") ||
+    message.includes("readystate is not 'open'") ||
+    message.includes("invalidstateerror")
+  );
+}
+
+async function sendResolvePayloadWithRetry(targetAddress, payload, timeoutMs) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || ROUTER_NKN_RESOLVE_TIMEOUT_MS);
+  let attempt = 0;
+  let lastError = null;
+
+  while (attempt < ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS && Date.now() < deadline) {
+    attempt += 1;
+    const shouldReconnect = attempt > 2;
+    const client = await ensureBrowserNknClient({ forceReconnect: shouldReconnect });
+    const waitBudget = Math.max(700, deadline - Date.now());
+    const ready = await waitForBrowserNknReady(waitBudget);
+    if (!ready) {
+      lastError = new Error("Browser NKN client is not ready");
+      if (attempt >= ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS) {
+        break;
+      }
+      await sleepMs(Math.min(ROUTER_NKN_SEND_RETRY_DELAY_MS * attempt, Math.max(200, deadline - Date.now())));
+      continue;
+    }
+
+    try {
+      await client.send(String(targetAddress || "").trim(), JSON.stringify(payload), { noReply: true });
+      return;
+    } catch (err) {
+      lastError = err;
+      if (!isNknTransportNotReadyError(err)) {
+        throw err;
+      }
+
+      if (attempt >= ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS) {
+        break;
+      }
+
+      const backoffMs = ROUTER_NKN_SEND_RETRY_DELAY_MS * attempt;
+      await sleepMs(Math.min(backoffMs, Math.max(200, deadline - Date.now())));
+    }
+  }
+
+  throw lastError || new Error("Failed to send NKN resolve request");
+}
+
 async function requestResolvedEndpointsViaNkn(targetAddress, timeoutMs = ROUTER_NKN_RESOLVE_TIMEOUT_MS) {
-  const client = await ensureBrowserNknClient();
+  await ensureBrowserNknClient();
   const ready = await waitForBrowserNknReady(timeoutMs + 3000);
   if (!ready) {
     throw new Error("Browser NKN client is not ready");
@@ -2082,7 +2135,7 @@ async function requestResolvedEndpointsViaNkn(targetAddress, timeoutMs = ROUTER_
 
     pendingNknResolveRequests.set(requestId, { resolve, reject, timeoutHandle });
     try {
-      await client.send(String(targetAddress || "").trim(), JSON.stringify(payload), { noReply: true });
+      await sendResolvePayloadWithRetry(targetAddress, payload, timeoutMs);
     } catch (err) {
       clearTimeout(timeoutHandle);
       pendingNknResolveRequests.delete(requestId);
