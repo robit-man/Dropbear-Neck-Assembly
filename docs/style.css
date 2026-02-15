@@ -67,6 +67,7 @@ html {
     position: relative;
     display: flex;
     align-items: center;
+    flex-flow:row-reverse;
     justify-content: space-between;
     gap: 0.4rem;
     padding: 0.7rem;
@@ -79,7 +80,6 @@ html {
     top: 0.55rem;
     right: 0.55rem;
     width: 2.4rem;
-    min-width: 2.4rem;
     height: 2.4rem;
     padding: 0;
     font-size: 1rem;
