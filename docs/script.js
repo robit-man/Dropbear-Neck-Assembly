@@ -1048,6 +1048,22 @@ async function connectToAdapter() {
 }
 
 // Parse query parameters for adapter URL
+function normalizeRouterNknTarget(rawValue) {
+  const raw = String(rawValue || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const plainHexMatch = raw.match(/^([0-9a-fA-F]{64})$/);
+  if (plainHexMatch) {
+    return `router.${plainHexMatch[1].toLowerCase()}`;
+  }
+  const prefixedMatch = raw.match(/^([a-zA-Z0-9._-]+)\.([0-9a-fA-F]{64})$/);
+  if (prefixedMatch) {
+    return `${prefixedMatch[1]}.${prefixedMatch[2].toLowerCase()}`;
+  }
+  return raw;
+}
+
 function parseConnectionFromQuery() {
   const urlParams = new URLSearchParams(window.location.search);
   const getFirstParam = (keys) => {
@@ -1063,9 +1079,10 @@ function parseConnectionFromQuery() {
   // Accept both legacy and shorthand aliases:
   // ?adapter=<url> or ?server=<url>
   // &password=<secret> or &pass=<secret>
+  // &nkn=<router.<pubkey-hex> | <pubkey-hex>>
   const adapterParam = getFirstParam(["adapter", "server"]);
   const passwordParam = getFirstParam(["password", "pass"]);
-  const routerNknParam = getFirstParam(["router_nkn", "nkn_router", "router_nkn_address"]);
+  const routerNknParam = getFirstParam(["nkn", "router_nkn", "nkn_router", "router_nkn_address"]);
 
   let adapterConfigured = false;
   let passwordProvided = false;
@@ -1092,8 +1109,14 @@ function parseConnectionFromQuery() {
   }
 
   if (routerNknParam) {
-    routerTargetNknAddress = routerNknParam;
-    localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+    const normalizedRouterNkn = normalizeRouterNknTarget(routerNknParam);
+    if (isLikelyNknAddress(normalizedRouterNkn)) {
+      routerTargetNknAddress = normalizedRouterNkn;
+      localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+      logToConsole(`[OK] Router NKN target configured from query: ${routerTargetNknAddress}`);
+    } else {
+      logToConsole("[WARN] Invalid nkn query parameter; expected 64-hex or prefix.64-hex");
+    }
   }
 
   return { adapterConfigured, passwordProvided };
