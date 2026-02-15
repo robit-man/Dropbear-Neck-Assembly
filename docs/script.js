@@ -409,6 +409,22 @@ function initializeControlsNav() {
     syncControlsNavState(getRouteFromLocation());
 }
 
+function isMobileSidebarViewport() {
+    return window.matchMedia("(max-width: 900px)").matches;
+}
+
+function syncSidebarScrim() {
+    const scrim = document.getElementById("sidebarScrim");
+    if (!scrim) {
+        document.body.classList.remove("sidebar-mobile-open");
+        return;
+    }
+    const isOpen = !document.body.classList.contains("sidebar-collapsed");
+    const show = isMobileSidebarViewport() && isOpen;
+    document.body.classList.toggle("sidebar-mobile-open", show);
+    scrim.hidden = !show;
+}
+
 function setSidebarCollapsed(collapsed, options = {}) {
     const shouldPersist = options.persist !== false;
     const nextCollapsed = !!collapsed;
@@ -416,10 +432,12 @@ function setSidebarCollapsed(collapsed, options = {}) {
 
     const toggleBtn = document.getElementById("sidebarToggleBtn");
     if (toggleBtn) {
-        toggleBtn.textContent = nextCollapsed ? "Open" : "Close";
+        toggleBtn.textContent = nextCollapsed ? ">" : "<";
         toggleBtn.setAttribute("aria-expanded", nextCollapsed ? "false" : "true");
         toggleBtn.setAttribute("aria-label", nextCollapsed ? "Expand sidebar" : "Collapse sidebar");
     }
+
+    syncSidebarScrim();
 
     if (shouldPersist) {
         try {
@@ -435,6 +453,7 @@ function initializeSidebarUi() {
     sidebarUiInitialized = true;
 
     const toggleBtn = document.getElementById("sidebarToggleBtn");
+    const scrim = document.getElementById("sidebarScrim");
     if (!toggleBtn) {
         return;
     }
@@ -457,8 +476,14 @@ function initializeSidebarUi() {
         setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
     });
 
+    if (scrim) {
+        scrim.addEventListener("click", () => {
+            setSidebarCollapsed(true, { persist: false });
+        });
+    }
+
     const collapseOnSelect = () => {
-        if (window.innerWidth <= 900) {
+        if (isMobileSidebarViewport()) {
             setSidebarCollapsed(true);
         }
     };
@@ -467,6 +492,16 @@ function initializeSidebarUi() {
     });
     document.querySelectorAll(".controls-menu-option[data-control-route]").forEach((node) => {
         node.addEventListener("click", collapseOnSelect);
+    });
+
+    window.addEventListener("resize", () => {
+        setSidebarCollapsed(document.body.classList.contains("sidebar-collapsed"), { persist: false });
+    });
+
+    window.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && isMobileSidebarViewport() && !document.body.classList.contains("sidebar-collapsed")) {
+            setSidebarCollapsed(true, { persist: false });
+        }
     });
 }
 
