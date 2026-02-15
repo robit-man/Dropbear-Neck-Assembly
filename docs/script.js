@@ -44,6 +44,87 @@ let orientationInitTriggered = false;
 let hybridUiInitialized = false;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "uiSidebarCollapsed";
 let sidebarUiInitialized = false;
+let buttonIconsObserver = null;
+let buttonIconApplyInProgress = false;
+let buttonIconApplyScheduled = false;
+
+const ROUTE_ICON_KEYS = Object.freeze({
+    neck: "head",
+    hybrid: "hybrid",
+    streams: "video",
+});
+
+const CONTROL_ROUTE_ICON_KEYS = Object.freeze({
+    direct: "sliders",
+    euler: "axis",
+    head: "head",
+    quaternion: "cube",
+    headstream: "spark",
+    orientation: "gyro",
+});
+
+const BUTTON_ICON_BY_ID = Object.freeze({
+    connectionModalCloseBtn: "close",
+    routerResolveBtn: "send",
+    routerRefreshInfoBtn: "refresh",
+    controlsMenuToggleBtn: "sliders",
+    pinnedStreamCloseBtn: "close",
+});
+
+const BUTTON_ICON_SVGS = Object.freeze({
+    settings:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19 12a7 7 0 0 0-.07-.95l2.02-1.57-2-3.46-2.45 1a7.2 7.2 0 0 0-1.64-.95L14.5 3h-5l-.36 3.07a7.2 7.2 0 0 0-1.64.95l-2.45-1-2 3.46 2.02 1.57A7 7 0 0 0 5 12c0 .32.02.63.07.95L3.05 14.5l2 3.46 2.45-1c.5.4 1.05.72 1.64.95L9.5 21h5l.36-3.07c.59-.23 1.14-.55 1.64-.95l2.45 1 2-3.46-2.02-1.57c.05-.32.07-.63.07-.95z"></path></svg>',
+    home:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5"></path><path d="M5 10.5V20h5v-5h4v5h5v-9.5"></path></svg>',
+    refresh:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><path d="M21 3v6h-6"></path></svg>',
+    plug:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 7v5a4 4 0 0 0 8 0V7"></path><path d="M9 3v4"></path><path d="M15 3v4"></path><path d="M12 16v5"></path></svg>',
+    link:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 13.5 13.5 10.5"></path><path d="M7 17a4 4 0 0 1 0-5.66l2.34-2.34A4 4 0 0 1 15 14.66l-.84.84"></path><path d="M17 7a4 4 0 0 1 0 5.66l-2.34 2.34A4 4 0 0 1 9 9.34l.84-.84"></path></svg>',
+    send:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 10 14"></path><path d="m21 3-7 18-4-7-7-4 18-7z"></path></svg>',
+    play:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"></path></svg>',
+    stop:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10"></rect></svg>',
+    lock:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>',
+    rotate:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4v6h6"></path><path d="M20 20v-6h-6"></path><path d="M20 9a8 8 0 0 0-13.66-3L4 8"></path><path d="M4 15a8 8 0 0 0 13.66 3L20 16"></path></svg>',
+    check:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 13 4 4 10-10"></path></svg>',
+    share:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="5" r="3"></circle><circle cx="6" cy="12" r="3"></circle><circle cx="18" cy="19" r="3"></circle><path d="m8.6 13.5 6.8 3.9"></path><path d="m15.4 7.6-6.8 3.9"></path></svg>',
+    target:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"></circle><circle cx="12" cy="12" r="2.5"></circle><path d="M12 2v3"></path><path d="M12 19v3"></path><path d="M2 12h3"></path><path d="M19 12h3"></path></svg>',
+    grid:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M3 12h18"></path><path d="M12 4v16"></path></svg>',
+    globe:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18"></path><path d="M12 3a14 14 0 0 0 0 18"></path></svg>',
+    video:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="14" height="12" rx="2"></rect><path d="m17 10 4-2v8l-4-2"></path></svg>',
+    sliders:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><circle cx="9" cy="6" r="2"></circle><path d="M4 12h16"></path><circle cx="15" cy="12" r="2"></circle><path d="M4 18h16"></path><circle cx="11" cy="18" r="2"></circle></svg>',
+    axis:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5"></path><path d="M5 5v14h14"></path><path d="M14 5h5v5"></path></svg>',
+    cube:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9z"></path><path d="m12 3 8 4.5-8 4.5-8-4.5z"></path><path d="M12 12v9"></path></svg>',
+    spark:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v6"></path><path d="M12 15v6"></path><path d="M3 12h6"></path><path d="M15 12h6"></path><path d="m6 6 4 4"></path><path d="m14 14 4 4"></path><path d="m18 6-4 4"></path><path d="m10 14-4 4"></path></svg>',
+    gyro:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="2.5"></circle><path d="M12 2a10 10 0 0 1 10 10"></path><path d="M2 12A10 10 0 0 1 12 2"></path><path d="M12 22A10 10 0 0 1 2 12"></path><path d="M22 12A10 10 0 0 1 12 22"></path></svg>',
+    head:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 11a4 4 0 1 1 8 0v4a4 4 0 0 1-8 0z"></path><path d="M10 19h4"></path><path d="M7 12H5"></path><path d="M19 12h-2"></path></svg>',
+    hybrid:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="8" width="14" height="9" rx="3"></rect><path d="M8 12h4"></path><path d="M10 10v4"></path><circle cx="16" cy="11" r="1"></circle><circle cx="17.5" cy="13.5" r="1"></circle></svg>',
+    arrow_right:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path></svg>',
+    close:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12"></path><path d="M18 6 6 18"></path></svg>',
+    pin:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10l-2 6v3l3 3v2h-5v3l-2-1-2 1v-3H4v-2l3-3V10z"></path></svg>',
+});
 
 // Prevent browser zoom gestures (double-tap, pinch, ctrl+wheel) for touch control stability.
 (function installViewportZoomGuards() {
@@ -502,6 +583,144 @@ function initializeSidebarUi() {
         if (event.key === "Escape" && isMobileSidebarViewport() && !document.body.classList.contains("sidebar-collapsed")) {
             setSidebarCollapsed(true, { persist: false });
         }
+    });
+}
+
+function normalizeButtonText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function inferButtonIconKey(element) {
+    if (!element) {
+        return "";
+    }
+
+    const elementId = String(element.id || "").trim();
+    if (elementId && BUTTON_ICON_BY_ID[elementId]) {
+        return BUTTON_ICON_BY_ID[elementId];
+    }
+
+    const route = String(element.dataset.route || "").trim().toLowerCase();
+    if (route && ROUTE_ICON_KEYS[route]) {
+        return ROUTE_ICON_KEYS[route];
+    }
+
+    const controlRoute = String(element.dataset.controlRoute || "").trim().toLowerCase();
+    if (controlRoute && CONTROL_ROUTE_ICON_KEYS[controlRoute]) {
+        return CONTROL_ROUTE_ICON_KEYS[controlRoute];
+    }
+
+    const text = normalizeButtonText(element.textContent);
+    if (!text || text === "+" || text === "-" || text === "<" || text === ">" || text === "x" || text === "×") {
+        return "";
+    }
+    if (text.includes("settings")) return "settings";
+    if (text.includes("home")) return "home";
+    if (text.includes("normalize")) return "link";
+    if (text.includes("reconnect")) return "refresh";
+    if (text.includes("connect")) return "plug";
+    if (text.includes("resolve")) return "send";
+    if (text === "send" || text.startsWith("send ")) return "send";
+    if (text.includes("authenticate") || text.includes("auth")) return "lock";
+    if (text.includes("refresh")) return "refresh";
+    if (text.includes("rotate")) return "rotate";
+    if (text.includes("apply")) return "check";
+    if (text.includes("copied")) return "check";
+    if (text.includes("share")) return "share";
+    if (text.includes("stop")) return "stop";
+    if (text.includes("start") || text.includes("play")) return "play";
+    if (text.includes("reset")) return "refresh";
+    if (text.includes("recenter")) return "target";
+    if (text.includes("planar")) return "grid";
+    if (text.includes("globe")) return "globe";
+    if (text.includes("proceed")) return "arrow_right";
+    if (text.includes("close")) return "close";
+    return "";
+}
+
+function applyIconToElement(element, iconKey) {
+    if (!element || !iconKey || !BUTTON_ICON_SVGS[iconKey]) {
+        return;
+    }
+    if (element.id === "sidebarToggleBtn") {
+        return;
+    }
+    if (element.classList.contains("hybrid-arrow")) {
+        return;
+    }
+    if (element.classList.contains("stream-pin-btn")) {
+        return;
+    }
+    if (element.querySelector("svg") && !element.querySelector(".ui-btn-icon")) {
+        return;
+    }
+
+    const labelText = String(element.textContent || "").trim();
+    if (!labelText) {
+        return;
+    }
+
+    element.textContent = "";
+    const iconNode = document.createElement("span");
+    iconNode.className = "ui-btn-icon";
+    iconNode.innerHTML = BUTTON_ICON_SVGS[iconKey];
+
+    element.appendChild(iconNode);
+    const compactCloseLabel = iconKey === "close" && (labelText === "x" || labelText === "X" || labelText === "×");
+    if (!compactCloseLabel) {
+        const labelNode = document.createElement("span");
+        labelNode.className = "ui-btn-label";
+        labelNode.textContent = labelText;
+        element.appendChild(labelNode);
+    }
+    element.classList.add("has-ui-icon");
+}
+
+function applyActionIcons() {
+    if (buttonIconApplyInProgress) {
+        return;
+    }
+    buttonIconApplyInProgress = true;
+    try {
+        const targets = document.querySelectorAll("button, .nav-link[data-route], .controls-menu-option[data-control-route]");
+        targets.forEach((element) => {
+            if (element.classList.contains("has-ui-icon") && element.querySelector(".ui-btn-icon")) {
+                return;
+            }
+            const iconKey = inferButtonIconKey(element);
+            applyIconToElement(element, iconKey);
+        });
+    } finally {
+        buttonIconApplyInProgress = false;
+    }
+}
+
+function scheduleActionIconRefresh() {
+    if (buttonIconApplyScheduled) {
+        return;
+    }
+    buttonIconApplyScheduled = true;
+    setTimeout(() => {
+        buttonIconApplyScheduled = false;
+        applyActionIcons();
+    }, 0);
+}
+
+function initializeActionIcons() {
+    applyActionIcons();
+    if (buttonIconsObserver || !document.body) {
+        return;
+    }
+    buttonIconsObserver = new MutationObserver(() => {
+        if (buttonIconApplyInProgress) {
+            return;
+        }
+        scheduleActionIconRefresh();
+    });
+    buttonIconsObserver.observe(document.body, {
+        subtree: true,
+        childList: true,
+        characterData: true,
     });
 }
 
@@ -4572,6 +4791,7 @@ async function ensureHybridAutoReady(initialRoute) {
 
 window.addEventListener('load', async () => {
   initializeSidebarUi();
+  initializeActionIcons();
   initializeRouting();
   initializeControlsNav();
   const initialRoute = getRouteFromLocation();
