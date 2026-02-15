@@ -11,7 +11,7 @@
     --ui-control-font-size: 16px;
     --ui-control-font-weight: 700;
     --sidebar-width: 320px;
-    --sidebar-peek-width: 58px;
+    --sidebar-peek-width: 74px;
 }
 
 * {
@@ -64,6 +64,7 @@ html {
 }
 
 .sidebar-header {
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -74,12 +75,16 @@ html {
 }
 
 .sidebar-toggle-btn {
+    position: absolute;
+    top: 0.55rem;
+    right: 0.55rem;
     width: 2.4rem;
     min-width: 2.4rem;
     height: 2.4rem;
     padding: 0;
     font-size: 1rem;
     line-height: 1;
+    z-index: 2;
 }
 
 .sidebar-brand {
@@ -87,6 +92,7 @@ html {
     font-weight: 800;
     color: var(--accent);
     white-space: nowrap;
+    padding-right: 3rem;
     transition: opacity 0.16s ease;
 }
 
@@ -199,6 +205,7 @@ body.sidebar-collapsed .app-sidebar {
 
 body.sidebar-collapsed .sidebar-header {
     justify-content: flex-end;
+    padding: 0.35rem 0.35rem;
 }
 
 body.sidebar-collapsed .sidebar-brand,
@@ -1100,6 +1107,7 @@ h3 {
 
     body.sidebar-collapsed .sidebar-header {
         justify-content: flex-end;
+        padding: 0.35rem 0.35rem;
     }
 
     body.sidebar-mobile-open .sidebar-scrim {
