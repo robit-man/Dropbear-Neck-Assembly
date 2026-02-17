@@ -230,6 +230,11 @@ let serviceAuthCurrentRequest = null;
 let serviceAuthModalDom = null;
 let serviceAuthModalResolver = null;
 const serviceAuthSkippedAt = new Map();
+const resolvedServiceAuthEndpoints = {
+    adapter: "",
+    camera: "",
+    audio: "",
+};
 
 function isControlTransportReady() {
     const hasSession = !!String(SESSION_KEY || "").trim();
@@ -2014,10 +2019,77 @@ function enqueueServiceAuthRequest(service, endpoint, options = {}) {
   });
 }
 
+function setResolvedServiceAuthEndpoint(service, endpoint) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key !== "adapter" && key !== "camera" && key !== "audio") {
+    return;
+  }
+  resolvedServiceAuthEndpoints[key] = normalizeServiceEndpointForAuth(key, endpoint || "");
+}
+
+function getServicePreferredAuthEndpoint(service) {
+  const key = String(service || "").trim().toLowerCase();
+  const resolved = String(resolvedServiceAuthEndpoints[key] || "").trim();
+  if (resolved) {
+    return resolved;
+  }
+  if (key === "adapter") {
+    return normalizeServiceEndpointForAuth("adapter", HTTP_URL || WS_URL || "");
+  }
+  if (key === "camera") {
+    return normalizeServiceEndpointForAuth("camera", cameraRouterBaseUrl || "");
+  }
+  if (key === "audio") {
+    return normalizeServiceEndpointForAuth("audio", audioRouterBaseUrl || "");
+  }
+  return "";
+}
+
+async function requestServiceAuthForAction(service, options = {}) {
+  const key = String(service || "").trim().toLowerCase();
+  const endpoint = normalizeServiceEndpointForAuth(
+    key,
+    options.endpoint || getServicePreferredAuthEndpoint(key)
+  );
+  if (!endpoint) {
+    return false;
+  }
+  if (isServiceSessionReady(key)) {
+    return true;
+  }
+
+  enqueueServiceAuthRequest(key, endpoint, { forcePrompt: true });
+
+  const timeoutMs = Math.max(1200, Number(options.timeoutMs) || 45000);
+  const deadline = Date.now() + timeoutMs;
+  const queueKey = buildServiceAuthQueueKey(key, endpoint);
+
+  while (Date.now() < deadline) {
+    if (isServiceSessionReady(key)) {
+      return true;
+    }
+    const activeMatch =
+      serviceAuthCurrentRequest &&
+      buildServiceAuthQueueKey(serviceAuthCurrentRequest.service, serviceAuthCurrentRequest.endpoint) === queueKey;
+    const queuedMatch = serviceAuthQueue.some((entry) => {
+      return buildServiceAuthQueueKey(entry.service, entry.endpoint) === queueKey;
+    });
+    if (!activeMatch && !queuedMatch && !serviceAuthQueueRunning) {
+      break;
+    }
+    await sleepMs(120);
+  }
+  return isServiceSessionReady(key);
+}
+
 function queueResolvedEndpointAuthentications(options = {}) {
   const adapterEndpoint = normalizeServiceEndpointForAuth("adapter", options.adapterEndpoint || "");
   const cameraEndpoint = normalizeServiceEndpointForAuth("camera", options.cameraEndpoint || "");
   const audioEndpoint = normalizeServiceEndpointForAuth("audio", options.audioEndpoint || "");
+
+  setResolvedServiceAuthEndpoint("adapter", adapterEndpoint);
+  setResolvedServiceAuthEndpoint("camera", cameraEndpoint);
+  setResolvedServiceAuthEndpoint("audio", audioEndpoint);
 
   if (adapterEndpoint && !isServiceSessionReady("adapter")) {
     enqueueServiceAuthRequest("adapter", adapterEndpoint);
@@ -2896,8 +2968,8 @@ function extractResolvedFromPayload(data) {
     cameraService.tunnel_url = pickFirstNonEmptyString(cameraService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
     cameraService.base_url = pickFirstNonEmptyString(
       cameraService.base_url,
-      service.base_url,
       tunnel.tunnel_url,
+      service.base_url,
       local.base_url
     );
     cameraService.list_url = pickFirstNonEmptyString(cameraService.list_url, service.list_url, tunnel.list_url, local.list_url);
@@ -2924,8 +2996,8 @@ function extractResolvedFromPayload(data) {
     audioService.tunnel_url = pickFirstNonEmptyString(audioService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
     audioService.base_url = pickFirstNonEmptyString(
       audioService.base_url,
-      service.base_url,
       tunnel.tunnel_url,
+      service.base_url,
       local.base_url
     );
     audioService.list_url = pickFirstNonEmptyString(audioService.list_url, service.list_url, tunnel.list_url, local.list_url);
@@ -3362,14 +3434,15 @@ function applyResolvedEndpoints(resolved) {
   const audioCandidate = pickFirstValidServiceOrigin(
     audio.tunnel_url,
     audioTunnel.tunnel_url,
-    audio.base_url,
-    audio.local_base_url,
-    audio.list_url,
-    audio.health_url,
-    audio.webrtc_offer_url,
+    audioTunnel.base_url,
     audioTunnel.list_url,
     audioTunnel.health_url,
     audioTunnel.webrtc_offer_url,
+    audio.base_url,
+    audio.list_url,
+    audio.health_url,
+    audio.webrtc_offer_url,
+    audio.local_base_url,
     audioLocal.base_url,
     audioLocal.list_url,
     audioLocal.health_url,
@@ -5342,6 +5415,29 @@ async function startCameraPreview(options = {}) {
   if (!feedSelect || !modeSelect) {
     return;
   }
+
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    if (autoRestart) {
+      setStreamStatus("Camera router authentication required before preview restart", true);
+      scheduleCameraPreviewRestart("camera auth required");
+      return;
+    }
+    const authEndpoint = getServicePreferredAuthEndpoint("camera");
+    if (!authEndpoint) {
+      setStreamStatus("Set camera router URL first", true);
+      return;
+    }
+    setStreamStatus("Camera auth required. Opening prompt...");
+    const authOk = await requestServiceAuthForAction("camera", {
+      endpoint: authEndpoint,
+      timeoutMs: 45000,
+    });
+    if (!authOk) {
+      setStreamStatus("Camera router authentication required before starting preview", true);
+      return;
+    }
+  }
+
   const cameraId =
     requestedCameraId ||
     cameraPreview.targetCameraId ||
@@ -6029,8 +6125,20 @@ async function startAudioBridge(options = {}) {
     return;
   }
   if (!audioRouterBaseUrl || !audioRouterSessionKey) {
-    setAudioStatus("Authenticate with audio router first", true);
-    return;
+    const authEndpoint = getServicePreferredAuthEndpoint("audio");
+    if (!authEndpoint) {
+      setAudioStatus("Set audio router URL first", true);
+      return;
+    }
+    setAudioStatus("Audio auth required. Opening prompt...");
+    const authOk = await requestServiceAuthForAction("audio", {
+      endpoint: authEndpoint,
+      timeoutMs: 45000,
+    });
+    if (!authOk || !audioRouterBaseUrl || !audioRouterSessionKey) {
+      setAudioStatus("Audio router authentication required before starting bridge", true);
+      return;
+    }
   }
   if (audioBridge.active && !forceRestart) {
     setAudioStatus("Audio bridge already active");
@@ -6426,7 +6534,7 @@ function renderHybridFeedOptions() {
 
   if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
     const note = document.createElement("div");
-    note.className = "stream-feed-row";
+    note.className = "hybrid-feed-note";
     note.textContent = "Authenticate camera router in Streams to load feeds.";
     feedButtonsEl.appendChild(note);
     showHybridPreviewPlaceholder("Authenticate and select a camera feed.");
@@ -6435,7 +6543,7 @@ function renderHybridFeedOptions() {
 
   if (!Array.isArray(cameraRouterFeeds) || cameraRouterFeeds.length === 0) {
     const note = document.createElement("div");
-    note.className = "stream-feed-row";
+    note.className = "hybrid-feed-note";
     note.textContent = "No feeds discovered yet. Use Refresh Feeds.";
     feedButtonsEl.appendChild(note);
     showHybridPreviewPlaceholder("No feeds discovered.");
@@ -6462,8 +6570,29 @@ function renderHybridFeedOptions() {
     if (feed.id === hybridSelectedFeedId) {
       btn.classList.add("active");
     }
-    btn.textContent = feed.label || feed.id;
+    btn.setAttribute("aria-label", `Camera feed ${feed.label || feed.id}`);
     btn.title = `${feed.id} | fps ${feed.fps} | kbps ${feed.kbps} | clients ${feed.clients}`;
+
+    const iconEl = document.createElement("span");
+    iconEl.className = "hybrid-feed-btn-icon";
+    iconEl.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="14" height="12" rx="2"></rect><path d="m17 10 4-2v8l-4-2"></path></svg>';
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "hybrid-feed-btn-label";
+    labelEl.textContent = String(feed.label || feed.id || "Camera");
+
+    const metaEl = document.createElement("span");
+    metaEl.className = "hybrid-feed-btn-meta";
+    if (!feed.online) {
+      metaEl.textContent = "Offline";
+    } else {
+      const fps = Math.round(Number(feed.fps) || 0);
+      metaEl.textContent = fps > 0 ? `${fps} fps` : "Ready";
+    }
+
+    btn.appendChild(iconEl);
+    btn.appendChild(labelEl);
+    btn.appendChild(metaEl);
     btn.addEventListener("click", () => {
       setHybridSelectedFeed(feed.id);
       renderHybridFeedOptions();

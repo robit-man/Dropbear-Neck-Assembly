@@ -1119,12 +1119,25 @@ h3 {
 
 .hybrid-feed-buttons {
     display: flex;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     gap: 0.45rem;
+    overflow-x: auto;
+    padding-bottom: 0.2rem;
+    scrollbar-width: thin;
 }
 
 .hybrid-feed-btn {
-    min-width: 120px;
+    width: 4.25rem;
+    min-width: 4.25rem;
+    height: 4.25rem;
+    padding: 0.28rem 0.22rem;
+    border-radius: 0.58rem;
+    display: grid;
+    grid-template-rows: 1fr auto auto;
+    justify-items: center;
+    align-items: center;
+    gap: 0.06rem;
+    text-align: center;
 }
 
 .hybrid-feed-btn.active {
@@ -1134,7 +1147,56 @@ h3 {
 }
 
 .hybrid-feed-btn.offline {
-    opacity: 0.55;
+    color: #ff5f5f;
+    border-color: #a13a3a;
+    opacity: 0.92;
+}
+
+.hybrid-feed-btn-icon {
+    width: 1.05rem;
+    height: 1.05rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hybrid-feed-btn-icon svg {
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.hybrid-feed-btn-label {
+    font-size: 0.58rem;
+    line-height: 1;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hybrid-feed-btn-meta {
+    font-size: 0.52rem;
+    line-height: 1;
+    opacity: 0.86;
+    letter-spacing: 0.03em;
+}
+
+.hybrid-feed-note {
+    padding: 0.42rem 0.55rem;
+    border: 1px solid var(--border-light);
+    border-radius: 0.45rem;
+    background: var(--bg-secondary);
+    font-size: 0.8rem;
+    line-height: 1.25;
+    opacity: 0.86;
 }
 
 .hybrid-preview-layout {
