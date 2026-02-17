@@ -427,6 +427,46 @@ body.sidebar-collapsed .app-main {
     margin-bottom: 1rem;
 }
 
+.service-auth-modal {
+    z-index: 1250;
+}
+
+.service-auth-modal-content {
+    max-width: 420px;
+    padding: 1.5rem;
+}
+
+.service-auth-title {
+    margin: 0;
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.service-auth-endpoint {
+    display: block;
+    width: 100%;
+    padding: 0.55rem 0.65rem;
+    border-radius: 0.4rem;
+    border: 1px solid var(--border-light);
+    background: var(--bg-secondary);
+    font-size: 0.76rem;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.service-auth-queue {
+    margin: 0;
+    font-size: 0.78rem;
+    opacity: 0.78;
+}
+
+.service-auth-error {
+    min-height: 1.1rem;
+    margin: 0;
+    color: #ff6666;
+    font-size: 0.8rem;
+}
+
 .nkn-identity-grid {
     display: grid;
     grid-template-columns: 1fr 120px;
@@ -791,6 +831,20 @@ button.primary {
 button.primary:hover {
     background: #ffcc00;
     border-color: #ffcc00;
+}
+
+button:disabled {
+    background: #2b2b2b;
+    border-color: #4a4a4a;
+    color: #9a9a9a;
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+button:disabled:hover {
+    background: #2b2b2b;
+    border-color: #4a4a4a;
+    color: #9a9a9a;
 }
 
 button.has-ui-icon,

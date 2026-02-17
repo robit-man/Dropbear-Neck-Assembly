@@ -96,6 +96,15 @@ function byId(id) {
   return document.getElementById(id);
 }
 
+function isControlTransportReady() {
+  if (typeof window.isControlTransportReady === "function") {
+    return !!window.isControlTransportReady();
+  }
+  const sessionKey = String(localStorage.getItem("sessionKey") || "").trim();
+  const httpUrl = String(localStorage.getItem("httpUrl") || "").trim();
+  return !!(sessionKey && httpUrl);
+}
+
 function logOrientation(message) {
   if (typeof logToConsole === "function") {
     logToConsole(message);
@@ -125,6 +134,11 @@ function updateStreamToggleUi() {
   }
   ui.streamToggleBtn.textContent = state.playbackEnabled ? "Pause Stream" : "Play Stream";
   ui.streamToggleBtn.classList.toggle("primary", !state.playbackEnabled);
+  const ready = isControlTransportReady();
+  ui.streamToggleBtn.disabled = !ready;
+  ui.streamToggleBtn.title = ready
+    ? "Play or pause orientation stream"
+    : "Control transport disconnected. Configure Auth first.";
 }
 
 function projectionMode() {
@@ -416,6 +430,15 @@ function buildCommand(snapshot) {
 
 function dispatchCommand(command) {
   if (!command) return;
+  if (!isControlTransportReady()) {
+    if (state.playbackEnabled) {
+      setPlaybackEnabled(false);
+    } else {
+      updateStreamToggleUi();
+    }
+    setOrientationStatus("Control transport disconnected. Configure Auth first.", true);
+    return;
+  }
   if (typeof window.sendCommandHttpOnly === "function") {
     window.sendCommandHttpOnly(command);
     return;
@@ -628,6 +651,12 @@ function stopLocalSensors() {
 }
 
 function setPlaybackEnabled(enabled) {
+  if (enabled && !isControlTransportReady()) {
+    state.playbackEnabled = false;
+    setOrientationStatus("Control transport disconnected. Configure Auth first.", true);
+    updateStreamToggleUi();
+    return;
+  }
   state.playbackEnabled = !!enabled;
   if (state.playbackEnabled) {
     setPlaybackBaselinePending("Play requested - waiting for baseline...");
@@ -640,6 +669,16 @@ function setPlaybackEnabled(enabled) {
     state.lastCommand = "";
     state.lastCommandSentAt = 0;
     processOrientationFrame();
+  }
+  updateStreamToggleUi();
+}
+
+function handleControlTransportChanged() {
+  const ready = isControlTransportReady();
+  if (!ready && state.playbackEnabled) {
+    setPlaybackEnabled(false);
+    setOrientationStatus("Control transport disconnected. Configure Auth first.", true);
+    return;
   }
   updateStreamToggleUi();
 }
@@ -805,6 +844,11 @@ function setProjectionMode(mode) {
 function bindCoreUi() {
   if (ui.streamToggleBtn) {
     ui.streamToggleBtn.addEventListener("click", async () => {
+      if (!isControlTransportReady()) {
+        setOrientationStatus("Control transport disconnected. Configure Auth first.", true);
+        updateStreamToggleUi();
+        return;
+      }
       if (!state.playbackEnabled && !state.sensorsEnabled) {
         const ok = await startLocalSensors();
         if (!ok) {
@@ -853,6 +897,7 @@ function initOrientationApp() {
   bindCoreUi();
   bindTuneablesUi();
   updateStreamToggleUi();
+  window.addEventListener("control-transport-changed", handleControlTransportChanged);
   initScene();
 
   window.addEventListener("resize", resizeScene);

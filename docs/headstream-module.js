@@ -46,6 +46,32 @@ function setStreamStatus(message, error = false) {
   streamStatusEl.style.color = error ? '#ff4444' : 'var(--accent)';
 }
 
+function isControlTransportReady() {
+  if (typeof window.isControlTransportReady === 'function') {
+    return !!window.isControlTransportReady();
+  }
+  const sessionKey = String(localStorage.getItem('sessionKey') || '').trim();
+  const httpUrl = String(localStorage.getItem('httpUrl') || '').trim();
+  return !!(sessionKey && httpUrl);
+}
+
+function updateControlAvailabilityUi(options = {}) {
+  const skipForcePause = !!options.skipForcePause;
+  const ready = isControlTransportReady();
+  const toggleBtn = document.getElementById('streamToggleBtn');
+  if (toggleBtn) {
+    toggleBtn.disabled = !ready;
+    toggleBtn.title = ready
+      ? 'Play or pause morphtarget stream'
+      : 'Control transport disconnected. Configure Auth first.';
+  }
+  if (!ready && streamPlaybackEnabled && !skipForcePause) {
+    setStreamPlaybackEnabled(false);
+    setStreamStatus('Control transport disconnected. Configure Auth first.', true);
+  }
+  return ready;
+}
+
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
@@ -85,10 +111,18 @@ function updateStreamToggleUi() {
     return;
   }
   toggleBtn.textContent = streamPlaybackEnabled ? 'Pause Stream' : 'Play Stream';
-  toggleBtn.className = streamPlaybackEnabled ? '' : 'primary';
+  toggleBtn.classList.toggle('primary', !streamPlaybackEnabled);
+  updateControlAvailabilityUi({ skipForcePause: true });
 }
 
 function setStreamPlaybackEnabled(enabled) {
+  if (enabled && !isControlTransportReady()) {
+    streamPlaybackEnabled = false;
+    baselinePendingOnPlay = false;
+    setStreamStatus('Control transport disconnected. Configure Auth first.', true);
+    updateStreamToggleUi();
+    return;
+  }
   streamPlaybackEnabled = !!enabled;
 
   if (streamPlaybackEnabled) {
@@ -208,6 +242,11 @@ function setupTuneablesUi() {
   const streamToggleBtn = document.getElementById('streamToggleBtn');
   if (streamToggleBtn) {
     streamToggleBtn.addEventListener('click', () => {
+      if (!isControlTransportReady()) {
+        setStreamStatus('Control transport disconnected. Configure Auth first.', true);
+        updateControlAvailabilityUi({ skipForcePause: true });
+        return;
+      }
       setStreamPlaybackEnabled(!streamPlaybackEnabled);
     });
   }
@@ -233,9 +272,22 @@ function setupTuneablesUi() {
 
   // Morphtarget starts disconnected from command streaming.
   setStreamPlaybackEnabled(false);
+  updateControlAvailabilityUi({ skipForcePause: true });
+  window.addEventListener('control-transport-changed', () => {
+    updateControlAvailabilityUi();
+  });
 }
 
 function sendCommandToNeck(commandStr) {
+  if (!isControlTransportReady()) {
+    setStreamStatus('Control transport disconnected. Configure Auth first.', true);
+    if (streamPlaybackEnabled) {
+      setStreamPlaybackEnabled(false);
+    } else {
+      updateControlAvailabilityUi({ skipForcePause: true });
+    }
+    return;
+  }
   if (typeof window.sendCommand === 'function') {
     window.sendCommand(commandStr);
     return;

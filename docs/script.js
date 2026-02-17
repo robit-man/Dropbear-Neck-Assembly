@@ -217,6 +217,37 @@ let metrics = {
     }
 };
 
+let controlTransportReadyState = null;
+const SERVICE_AUTH_LABELS = Object.freeze({
+    adapter: "Adapter",
+    camera: "Camera",
+    audio: "Audio",
+});
+const SERVICE_AUTH_SKIP_COOLDOWN_MS = 60000;
+const serviceAuthQueue = [];
+let serviceAuthQueueRunning = false;
+let serviceAuthCurrentRequest = null;
+let serviceAuthModalDom = null;
+let serviceAuthModalResolver = null;
+const serviceAuthSkippedAt = new Map();
+
+function isControlTransportReady() {
+    const hasSession = !!String(SESSION_KEY || "").trim();
+    const hasHttp = !!String(HTTP_URL || "").trim();
+    return !!(authenticated && hasSession && hasHttp);
+}
+
+function publishControlTransportState() {
+    const ready = isControlTransportReady();
+    if (controlTransportReadyState === ready) {
+        return;
+    }
+    controlTransportReadyState = ready;
+    window.__controlTransportReady = ready;
+    document.body.classList.toggle("control-transport-ready", ready);
+    window.dispatchEvent(new CustomEvent("control-transport-changed", { detail: { ready } }));
+}
+
 function getSelectedFeedStatus() {
     const feedSelect = document.getElementById("cameraFeedSelect");
     const preferredId =
@@ -345,6 +376,7 @@ function updateMetrics() {
         videoStatsEl.textContent = metrics.video.stats;
         videoStatsEl.className = 'metric-meta';
     }
+    publishControlTransportState();
     updateServiceHeaderChips();
 }
 
@@ -1565,6 +1597,433 @@ function ensureConnectionModalBindings() {
   });
 }
 
+function getServiceAuthLabel(service) {
+  return SERVICE_AUTH_LABELS[String(service || "").trim().toLowerCase()] || "Service";
+}
+
+function getServiceAuthPassword(service) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key === "adapter") {
+    return String(PASSWORD || localStorage.getItem("password") || "").trim();
+  }
+  if (key === "camera") {
+    return String(cameraRouterPassword || localStorage.getItem("cameraRouterPassword") || "").trim();
+  }
+  if (key === "audio") {
+    return String(audioRouterPassword || localStorage.getItem("audioRouterPassword") || "").trim();
+  }
+  return "";
+}
+
+function setServiceAuthPassword(service, password) {
+  const key = String(service || "").trim().toLowerCase();
+  const clean = String(password || "").trim();
+  if (key === "adapter") {
+    PASSWORD = clean;
+    if (clean) {
+      localStorage.setItem("password", clean);
+    }
+    const input = document.getElementById("passwordInput");
+    if (input) {
+      input.value = clean;
+    }
+    return;
+  }
+  if (key === "camera") {
+    cameraRouterPassword = clean;
+    if (clean) {
+      localStorage.setItem("cameraRouterPassword", clean);
+    }
+    const input = document.getElementById("cameraRouterPasswordInput");
+    if (input) {
+      input.value = clean;
+    }
+    return;
+  }
+  if (key === "audio") {
+    audioRouterPassword = clean;
+    if (clean) {
+      localStorage.setItem("audioRouterPassword", clean);
+    }
+    const input = document.getElementById("audioRouterPasswordInput");
+    if (input) {
+      input.value = clean;
+    }
+  }
+}
+
+function isServiceSessionReady(service) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key === "adapter") {
+    return isControlTransportReady();
+  }
+  if (key === "camera") {
+    return !!(cameraRouterBaseUrl && cameraRouterSessionKey);
+  }
+  if (key === "audio") {
+    return !!(audioRouterBaseUrl && audioRouterSessionKey);
+  }
+  return false;
+}
+
+function normalizeServiceEndpointForAuth(service, endpoint) {
+  const key = String(service || "").trim().toLowerCase();
+  const raw = String(endpoint || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (key === "adapter") {
+    const parsed = buildAdapterEndpoints(raw);
+    return parsed ? String(parsed.origin || "").trim() : "";
+  }
+  try {
+    return normalizeServiceOrigin(raw);
+  } catch (err) {
+    return "";
+  }
+}
+
+function buildServiceAuthQueueKey(service, endpoint) {
+  return `${String(service || "").trim().toLowerCase()}|${String(endpoint || "").trim().toLowerCase()}`;
+}
+
+function isServiceAuthCoolingDown(queueKey) {
+  const lastSkippedAt = Number(serviceAuthSkippedAt.get(queueKey) || 0);
+  if (!lastSkippedAt) {
+    return false;
+  }
+  return (Date.now() - lastSkippedAt) < SERVICE_AUTH_SKIP_COOLDOWN_MS;
+}
+
+function markServiceAuthSkipped(queueKey) {
+  if (!queueKey) {
+    return;
+  }
+  serviceAuthSkippedAt.set(queueKey, Date.now());
+}
+
+function clearServiceAuthSkipped(queueKey) {
+  if (!queueKey) {
+    return;
+  }
+  serviceAuthSkippedAt.delete(queueKey);
+}
+
+function ensureServiceAuthModalUi() {
+  if (serviceAuthModalDom) {
+    return serviceAuthModalDom;
+  }
+  if (!document.body) {
+    return null;
+  }
+
+  const modal = document.createElement("div");
+  modal.id = "serviceAuthModal";
+  modal.className = "modal service-auth-modal";
+  modal.innerHTML = `
+    <div class="modal-content service-auth-modal-content">
+      <button id="serviceAuthModalCloseBtn" class="modal-close-btn" type="button" aria-label="Skip Authentication">x</button>
+      <div class="modal-header">Service Authentication</div>
+      <div class="modal-section">
+        <p id="serviceAuthPromptTitle" class="service-auth-title">Authentication required</p>
+        <code id="serviceAuthPromptEndpoint" class="service-auth-endpoint"></code>
+        <p id="serviceAuthPromptQueue" class="service-auth-queue"></p>
+        <div class="column">
+          <label for="serviceAuthPasswordInput">Password:</label>
+          <input id="serviceAuthPasswordInput" type="password" autocomplete="current-password" placeholder="Enter password">
+        </div>
+        <p id="serviceAuthPromptError" class="service-auth-error" aria-live="polite"></p>
+        <div class="row">
+          <button id="serviceAuthSubmitBtn" class="primary" type="button">Authenticate</button>
+          <button id="serviceAuthSkipBtn" type="button">Skip</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const closeBtn = modal.querySelector("#serviceAuthModalCloseBtn");
+  const skipBtn = modal.querySelector("#serviceAuthSkipBtn");
+  const submitBtn = modal.querySelector("#serviceAuthSubmitBtn");
+  const passwordInput = modal.querySelector("#serviceAuthPasswordInput");
+  const titleEl = modal.querySelector("#serviceAuthPromptTitle");
+  const endpointEl = modal.querySelector("#serviceAuthPromptEndpoint");
+  const queueEl = modal.querySelector("#serviceAuthPromptQueue");
+  const errorEl = modal.querySelector("#serviceAuthPromptError");
+
+  const resolvePrompt = (result) => {
+    if (!serviceAuthModalResolver) {
+      return;
+    }
+    const resolver = serviceAuthModalResolver;
+    serviceAuthModalResolver = null;
+    modal.classList.remove("active");
+    resolver(result);
+  };
+
+  const onSubmit = () => {
+    const password = passwordInput ? String(passwordInput.value || "") : "";
+    resolvePrompt({ action: "submit", password });
+  };
+  const onSkip = () => resolvePrompt({ action: "skip", password: "" });
+
+  if (closeBtn) {
+    closeBtn.addEventListener("click", onSkip);
+  }
+  if (skipBtn) {
+    skipBtn.addEventListener("click", onSkip);
+  }
+  if (submitBtn) {
+    submitBtn.addEventListener("click", onSubmit);
+  }
+  if (passwordInput) {
+    passwordInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        onSubmit();
+      }
+    });
+  }
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) {
+      onSkip();
+    }
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("active")) {
+      onSkip();
+    }
+  });
+
+  serviceAuthModalDom = {
+    modal,
+    passwordInput,
+    titleEl,
+    endpointEl,
+    queueEl,
+    errorEl,
+  };
+  return serviceAuthModalDom;
+}
+
+async function promptServiceAuthPassword(request, options = {}) {
+  const ui = ensureServiceAuthModalUi();
+  if (!ui) {
+    return { action: "skip", password: "" };
+  }
+
+  const service = String((request && request.service) || "").trim().toLowerCase();
+  const endpoint = String((request && request.endpoint) || "").trim();
+  const label = getServiceAuthLabel(service);
+  const queueDepth = Number(options.queueDepth || 0);
+  const errorMessage = String(options.errorMessage || "").trim();
+  const prefillPassword = String(options.prefillPassword || "").trim();
+
+  if (ui.titleEl) {
+    ui.titleEl.textContent = `${label} endpoint requires authentication.`;
+  }
+  if (ui.endpointEl) {
+    ui.endpointEl.textContent = endpoint || "(endpoint unavailable)";
+  }
+  if (ui.queueEl) {
+    ui.queueEl.textContent = queueDepth > 0
+      ? `${queueDepth} service${queueDepth === 1 ? "" : "s"} remaining in queue.`
+      : "Last service in queue.";
+  }
+  if (ui.errorEl) {
+    ui.errorEl.textContent = errorMessage;
+  }
+  if (ui.passwordInput) {
+    ui.passwordInput.value = prefillPassword;
+  }
+
+  ui.modal.classList.add("active");
+  if (ui.passwordInput) {
+    setTimeout(() => {
+      ui.passwordInput.focus();
+      ui.passwordInput.select();
+    }, 0);
+  }
+
+  return new Promise((resolve) => {
+    serviceAuthModalResolver = resolve;
+  });
+}
+
+async function authenticateAdapterWithPassword(password, endpoint) {
+  const cleanPassword = String(password || "").trim();
+  if (!cleanPassword) {
+    return false;
+  }
+  const normalized = buildAdapterEndpoints(endpoint || HTTP_URL || WS_URL || "");
+  if (!normalized) {
+    return false;
+  }
+
+  HTTP_URL = String(normalized.httpUrl || "").trim();
+  WS_URL = String(normalized.wsUrl || "").trim();
+  localStorage.setItem("httpUrl", HTTP_URL);
+  localStorage.setItem("wsUrl", WS_URL);
+  setServiceAuthPassword("adapter", cleanPassword);
+  syncAdapterConnectionInputs({ preserveUserInput: false });
+
+  const success = await authenticate(cleanPassword, WS_URL, HTTP_URL);
+  if (!success) {
+    return false;
+  }
+
+  const activeRoute = getRouteFromLocation();
+  if (WS_URL && routeAllowsWebSocket(activeRoute)) {
+    initWebSocket();
+  } else {
+    useWS = false;
+    metrics.connected = true;
+    updateMetrics();
+  }
+  hideConnectionModal();
+  return true;
+}
+
+async function attemptServiceAuthWithPassword(service, password, endpoint, options = {}) {
+  const silent = !!options.silent;
+  const key = String(service || "").trim().toLowerCase();
+  if (key === "adapter") {
+    return authenticateAdapterWithPassword(password, endpoint);
+  }
+  if (key === "camera") {
+    return authenticateCameraRouterWithPassword(password, { baseUrl: endpoint, silent });
+  }
+  if (key === "audio") {
+    return authenticateAudioRouterWithPassword(password, { baseUrl: endpoint, silent });
+  }
+  return false;
+}
+
+async function processServiceAuthQueue() {
+  if (serviceAuthQueueRunning) {
+    return;
+  }
+  serviceAuthQueueRunning = true;
+
+  try {
+    while (serviceAuthQueue.length > 0) {
+      const request = serviceAuthQueue.shift();
+      const service = String((request && request.service) || "").trim().toLowerCase();
+      const endpoint = normalizeServiceEndpointForAuth(service, request && request.endpoint);
+      if (!service || !endpoint) {
+        continue;
+      }
+
+      const queueKey = buildServiceAuthQueueKey(service, endpoint);
+      serviceAuthCurrentRequest = { service, endpoint };
+      if (isServiceSessionReady(service)) {
+        clearServiceAuthSkipped(queueKey);
+        serviceAuthCurrentRequest = null;
+        continue;
+      }
+
+      let errorMessage = "";
+      const storedPassword = getServiceAuthPassword(service);
+      if (storedPassword && !request.forcePrompt) {
+        const autoSuccess = await attemptServiceAuthWithPassword(service, storedPassword, endpoint, {
+          silent: true,
+        });
+        if (autoSuccess) {
+          clearServiceAuthSkipped(queueKey);
+          serviceAuthCurrentRequest = null;
+          continue;
+        }
+        errorMessage = `${getServiceAuthLabel(service)} authentication failed with saved password.`;
+      }
+
+      while (!isServiceSessionReady(service)) {
+        const result = await promptServiceAuthPassword(request, {
+          queueDepth: serviceAuthQueue.length,
+          errorMessage,
+          prefillPassword: getServiceAuthPassword(service),
+        });
+        if (!result || result.action !== "submit") {
+          markServiceAuthSkipped(queueKey);
+          break;
+        }
+
+        const enteredPassword = String(result.password || "").trim();
+        if (!enteredPassword) {
+          errorMessage = "Password is required.";
+          continue;
+        }
+
+        const ok = await attemptServiceAuthWithPassword(service, enteredPassword, endpoint, {
+          silent: true,
+        });
+        if (ok) {
+          clearServiceAuthSkipped(queueKey);
+          break;
+        }
+        errorMessage = `${getServiceAuthLabel(service)} authentication failed. Retry or skip.`;
+      }
+
+      serviceAuthCurrentRequest = null;
+    }
+  } finally {
+    serviceAuthCurrentRequest = null;
+    serviceAuthQueueRunning = false;
+  }
+}
+
+function enqueueServiceAuthRequest(service, endpoint, options = {}) {
+  const key = String(service || "").trim().toLowerCase();
+  const normalizedEndpoint = normalizeServiceEndpointForAuth(key, endpoint);
+  if (!key || !normalizedEndpoint) {
+    return;
+  }
+  if (isServiceSessionReady(key)) {
+    return;
+  }
+
+  const queueKey = buildServiceAuthQueueKey(key, normalizedEndpoint);
+  if (!options.forcePrompt && isServiceAuthCoolingDown(queueKey)) {
+    return;
+  }
+  if (
+    serviceAuthCurrentRequest &&
+    buildServiceAuthQueueKey(serviceAuthCurrentRequest.service, serviceAuthCurrentRequest.endpoint) === queueKey
+  ) {
+    return;
+  }
+  const alreadyQueued = serviceAuthQueue.some((entry) => {
+    return buildServiceAuthQueueKey(entry.service, entry.endpoint) === queueKey;
+  });
+  if (alreadyQueued) {
+    return;
+  }
+
+  serviceAuthQueue.push({
+    service: key,
+    endpoint: normalizedEndpoint,
+    forcePrompt: !!options.forcePrompt,
+  });
+  processServiceAuthQueue().catch((err) => {
+    console.warn("Service auth queue failed:", err);
+  });
+}
+
+function queueResolvedEndpointAuthentications(options = {}) {
+  const adapterEndpoint = normalizeServiceEndpointForAuth("adapter", options.adapterEndpoint || "");
+  const cameraEndpoint = normalizeServiceEndpointForAuth("camera", options.cameraEndpoint || "");
+  const audioEndpoint = normalizeServiceEndpointForAuth("audio", options.audioEndpoint || "");
+
+  if (adapterEndpoint && !isServiceSessionReady("adapter")) {
+    enqueueServiceAuthRequest("adapter", adapterEndpoint);
+  }
+  if (cameraEndpoint && !isServiceSessionReady("camera")) {
+    enqueueServiceAuthRequest("camera", cameraEndpoint);
+  }
+  if (audioEndpoint && !isServiceSessionReady("audio")) {
+    enqueueServiceAuthRequest("audio", audioEndpoint);
+  }
+}
+
 let endpointInputBindingsInstalled = false;
 let endpointHydrateTimer = null;
 
@@ -2312,6 +2771,37 @@ function pickFirstNonEmptyString(...values) {
   return "";
 }
 
+function normalizeServiceOrigin(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const candidate = raw.includes("://") ? raw : `https://${raw}`;
+  const parsed = new URL(candidate);
+  const protocol = parsed.protocol === "ws:"
+    ? "http:"
+    : parsed.protocol === "wss:"
+      ? "https:"
+      : parsed.protocol;
+  return `${protocol}//${parsed.host}`;
+}
+
+function pickFirstValidServiceOrigin(...values) {
+  for (const value of values) {
+    const text = String(value || "").trim();
+    if (!text) {
+      continue;
+    }
+    try {
+      const origin = normalizeServiceOrigin(text);
+      if (origin) {
+        return origin;
+      }
+    } catch (err) {}
+  }
+  return "";
+}
+
 function getServiceData(root, serviceName) {
   const source = asObject(root);
   const services = asObject(source.services);
@@ -2703,40 +3193,48 @@ function applyResolvedEndpoints(resolved) {
   const audio = resolved.audio || {};
   const adapterTunnel = (adapter.tunnel && typeof adapter.tunnel === "object") ? adapter.tunnel : {};
   const adapterLocal = (adapter.local && typeof adapter.local === "object") ? adapter.local : {};
+  const cameraTunnel = (camera.tunnel && typeof camera.tunnel === "object") ? camera.tunnel : {};
+  const cameraLocal = (camera.local && typeof camera.local === "object") ? camera.local : {};
+  const audioTunnel = (audio.tunnel && typeof audio.tunnel === "object") ? audio.tunnel : {};
+  const audioLocal = (audio.local && typeof audio.local === "object") ? audio.local : {};
+  let resolvedAdapterEndpoint = "";
+  let resolvedCameraEndpoint = "";
+  let resolvedAudioEndpoint = "";
 
-  const adapterTunnelCandidate = String(adapter.tunnel_url || adapterTunnel.tunnel_url || "").trim();
-  const adapterHttpCandidate = String(
-    adapter.http_endpoint ||
-    adapter.local_http_endpoint ||
-    adapterTunnel.http_endpoint ||
-    adapterLocal.http_endpoint ||
-    ""
-  ).trim();
-  const adapterWsCandidate = String(
-    adapter.ws_endpoint ||
-    adapter.local_ws_endpoint ||
-    adapterTunnel.ws_endpoint ||
-    adapterLocal.ws_endpoint ||
-    ""
-  ).trim();
-  const adapterBaseCandidate = String(
-    adapter.base_url ||
-    adapter.origin ||
-    adapter.url ||
-    adapterLocal.base_url ||
-    ""
-  ).trim();
-
-  const adapterSourceCandidate =
-    adapterTunnelCandidate ||
-    adapterHttpCandidate ||
-    adapterWsCandidate ||
-    adapterBaseCandidate;
-
-  const adapterEndpoints = buildAdapterEndpoints(adapterSourceCandidate);
+  const adapterCandidates = [
+    adapter.tunnel_url,
+    adapterTunnel.tunnel_url,
+    adapter.http_endpoint,
+    adapterTunnel.http_endpoint,
+    adapter.local_http_endpoint,
+    adapterLocal.http_endpoint,
+    adapter.ws_endpoint,
+    adapterTunnel.ws_endpoint,
+    adapter.local_ws_endpoint,
+    adapterLocal.ws_endpoint,
+    adapter.base_url,
+    adapter.origin,
+    adapter.url,
+    adapter.local_base_url,
+    adapterLocal.base_url,
+  ];
+  let adapterEndpoints = null;
+  for (const candidate of adapterCandidates) {
+    const parsed = buildAdapterEndpoints(candidate);
+    if (parsed) {
+      adapterEndpoints = parsed;
+      break;
+    }
+  }
   if (adapterEndpoints) {
-    HTTP_URL = adapterEndpoints.httpUrl;
-    WS_URL = adapterEndpoints.wsUrl;
+    const nextHttp = String(adapterEndpoints.httpUrl || "").trim();
+    const nextWs = String(adapterEndpoints.wsUrl || "").trim();
+    const nextAddress = String(adapterEndpoints.origin || "").trim();
+    const adapterChanged = HTTP_URL !== nextHttp || WS_URL !== nextWs;
+    resolvedAdapterEndpoint = nextAddress;
+
+    HTTP_URL = nextHttp;
+    WS_URL = nextWs;
     localStorage.setItem("httpUrl", HTTP_URL);
     localStorage.setItem("wsUrl", WS_URL);
     const httpInput = document.getElementById("httpUrlInput");
@@ -2749,41 +3247,165 @@ function applyResolvedEndpoints(resolved) {
       wsInput.value = WS_URL;
     }
     if (addressInput) {
-      addressInput.value = adapterEndpoints.origin;
+      addressInput.value = nextAddress;
     }
-    hydrateEndpointInputs("address");
-    changed = true;
+    setAdapterEndpointPreview(HTTP_URL, WS_URL);
+    if (adapterChanged) {
+      SESSION_KEY = "";
+      authenticated = false;
+      localStorage.removeItem("sessionKey");
+      disableWebSocketMode();
+      publishControlTransportState();
+    }
+    changed = changed || adapterChanged;
+  } else if (Object.keys(adapter).length > 0 || Object.keys(adapterTunnel).length > 0 || Object.keys(adapterLocal).length > 0) {
+    const adapterHadValues = !!(HTTP_URL || WS_URL);
+    HTTP_URL = "";
+    WS_URL = "";
+    localStorage.removeItem("httpUrl");
+    localStorage.removeItem("wsUrl");
+    const httpInput = document.getElementById("httpUrlInput");
+    const wsInput = document.getElementById("wsUrlInput");
+    const addressInput = document.getElementById("adapterAddressInput");
+    if (httpInput) {
+      httpInput.value = "";
+    }
+    if (wsInput) {
+      wsInput.value = "";
+    }
+    if (addressInput) {
+      addressInput.value = "";
+    }
+    setAdapterEndpointPreview("", "");
+    if (adapterHadValues || SESSION_KEY || authenticated) {
+      SESSION_KEY = "";
+      authenticated = false;
+      localStorage.removeItem("sessionKey");
+      disableWebSocketMode();
+      publishControlTransportState();
+    }
+    changed = changed || adapterHadValues;
   }
 
-  const cameraCandidate = (camera.tunnel_url || camera.base_url || "").trim();
+  const cameraCandidate = pickFirstValidServiceOrigin(
+    camera.tunnel_url,
+    cameraTunnel.tunnel_url,
+    camera.base_url,
+    camera.local_base_url,
+    camera.list_url,
+    camera.health_url,
+    cameraTunnel.list_url,
+    cameraTunnel.health_url,
+    cameraLocal.base_url,
+    cameraLocal.list_url,
+    cameraLocal.health_url
+  );
   if (cameraCandidate) {
-    try {
-      cameraRouterBaseUrl = normalizeOrigin(cameraCandidate);
-      localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
-      const camInput = document.getElementById("cameraRouterBaseInput");
-      if (camInput) {
-        camInput.value = cameraRouterBaseUrl;
-      }
-      if (typeof syncPinnedPreviewSource === "function") {
+    const previousBase = cameraRouterBaseUrl;
+    cameraRouterBaseUrl = cameraCandidate;
+    resolvedCameraEndpoint = cameraRouterBaseUrl;
+    const cameraChanged = previousBase !== cameraRouterBaseUrl;
+    localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
+    const camInput = document.getElementById("cameraRouterBaseInput");
+    if (camInput) {
+      camInput.value = cameraRouterBaseUrl;
+    }
+    if (cameraChanged) {
+      cameraRouterSessionKey = "";
+      localStorage.removeItem("cameraRouterSessionKey");
+      stopCameraImuStream();
+      updateCameraImuReadouts(null, {
+        message: "Camera endpoint changed. Re-authenticating...",
+        error: false,
+      });
+      if (cameraPreview.desired) {
+        stopCameraPreview({ keepDesired: true });
+      } else if (typeof syncPinnedPreviewSource === "function") {
         syncPinnedPreviewSource();
       }
-      changed = true;
-    } catch (err) {}
-  }
-
-  const audioCandidate = (audio.tunnel_url || audio.base_url || "").trim();
-  if (audioCandidate) {
-    try {
-      audioRouterBaseUrl = normalizeOrigin(audioCandidate);
-      localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
-      const audioInput = document.getElementById("audioRouterBaseInput");
-      if (audioInput) {
-        audioInput.value = audioRouterBaseUrl;
+      if (typeof renderHybridFeedOptions === "function") {
+        renderHybridFeedOptions();
       }
-      changed = true;
-    } catch (err) {}
+    }
+    if (typeof syncPinnedPreviewSource === "function") {
+      syncPinnedPreviewSource();
+    }
+    changed = changed || cameraChanged;
+  } else if (Object.keys(camera).length > 0 || Object.keys(cameraTunnel).length > 0 || Object.keys(cameraLocal).length > 0) {
+    const cameraHadValue = !!cameraRouterBaseUrl;
+    cameraRouterBaseUrl = "";
+    cameraRouterSessionKey = "";
+    localStorage.removeItem("cameraRouterBaseUrl");
+    localStorage.removeItem("cameraRouterSessionKey");
+    const camInput = document.getElementById("cameraRouterBaseInput");
+    if (camInput) {
+      camInput.value = "";
+    }
+    stopCameraImuStream();
+    if (cameraPreview.desired) {
+      stopCameraPreview({ keepDesired: false });
+    } else if (typeof syncPinnedPreviewSource === "function") {
+      syncPinnedPreviewSource();
+    }
+    if (typeof renderHybridFeedOptions === "function") {
+      renderHybridFeedOptions();
+    }
+    changed = changed || cameraHadValue;
   }
 
+  const audioCandidate = pickFirstValidServiceOrigin(
+    audio.tunnel_url,
+    audioTunnel.tunnel_url,
+    audio.base_url,
+    audio.local_base_url,
+    audio.list_url,
+    audio.health_url,
+    audio.webrtc_offer_url,
+    audioTunnel.list_url,
+    audioTunnel.health_url,
+    audioTunnel.webrtc_offer_url,
+    audioLocal.base_url,
+    audioLocal.list_url,
+    audioLocal.health_url,
+    audioLocal.webrtc_offer_url
+  );
+  if (audioCandidate) {
+    const previousBase = audioRouterBaseUrl;
+    audioRouterBaseUrl = audioCandidate;
+    resolvedAudioEndpoint = audioRouterBaseUrl;
+    const audioChanged = previousBase !== audioRouterBaseUrl;
+    localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
+    const audioInput = document.getElementById("audioRouterBaseInput");
+    if (audioInput) {
+      audioInput.value = audioRouterBaseUrl;
+    }
+    if (audioChanged) {
+      audioRouterSessionKey = "";
+      localStorage.removeItem("audioRouterSessionKey");
+      stopAudioBridge({ keepDesired: true, silent: true }).catch(() => {});
+      setAudioConnectionMeta("Audio endpoint changed. Re-authenticating...");
+    }
+    changed = changed || audioChanged;
+  } else if (Object.keys(audio).length > 0 || Object.keys(audioTunnel).length > 0 || Object.keys(audioLocal).length > 0) {
+    const audioHadValue = !!audioRouterBaseUrl;
+    audioRouterBaseUrl = "";
+    audioRouterSessionKey = "";
+    localStorage.removeItem("audioRouterBaseUrl");
+    localStorage.removeItem("audioRouterSessionKey");
+    const audioInput = document.getElementById("audioRouterBaseInput");
+    if (audioInput) {
+      audioInput.value = "";
+    }
+    stopAudioBridge({ keepDesired: false, silent: true }).catch(() => {});
+    changed = changed || audioHadValue;
+  }
+
+  syncAdapterConnectionInputs({ preserveUserInput: false });
+  queueResolvedEndpointAuthentications({
+    adapterEndpoint: resolvedAdapterEndpoint,
+    cameraEndpoint: resolvedCameraEndpoint,
+    audioEndpoint: resolvedAudioEndpoint,
+  });
   return changed;
 }
 
@@ -4091,62 +4713,112 @@ async function cameraRouterFetch(path, options = {}, includeSession = true) {
   return response;
 }
 
+async function authenticateCameraRouterWithPassword(password, options = {}) {
+  const silent = !!options.silent;
+  const baseCandidate = String(options.baseUrl || cameraRouterBaseUrl || "").trim();
+  const cleanPassword = String(password || "").trim();
+
+  let normalizedBase = "";
+  try {
+    normalizedBase = normalizeOrigin(baseCandidate);
+  } catch (err) {
+    if (!silent) {
+      setStreamStatus(`Invalid camera router URL: ${err}`, true);
+    }
+    return false;
+  }
+
+  if (!normalizedBase || !cleanPassword) {
+    if (!silent) {
+      setStreamStatus("Enter both camera router URL and password", true);
+    }
+    return false;
+  }
+
+  cameraRouterBaseUrl = normalizedBase;
+  setServiceAuthPassword("camera", cleanPassword);
+  localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
+  const baseInput = document.getElementById("cameraRouterBaseInput");
+  if (baseInput) {
+    baseInput.value = cameraRouterBaseUrl;
+  }
+  syncPinnedPreviewSource();
+  renderHybridFeedOptions();
+
+  if (!silent) {
+    setStreamStatus("Authenticating with camera router...");
+  }
+
+  try {
+    const response = await cameraRouterFetch(
+      "/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: cleanPassword }),
+      },
+      false
+    );
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (err) {
+      data = {};
+    }
+
+    if (!response.ok || data.status !== "success") {
+      if (!silent) {
+        setStreamStatus(`Auth failed: ${data.message || response.status}`, true);
+      }
+      return false;
+    }
+
+    const nextSessionKey = String(data.session_key || "").trim();
+    if (!nextSessionKey) {
+      if (!silent) {
+        setStreamStatus("Auth failed: response missing session key", true);
+      }
+      return false;
+    }
+
+    cameraRouterSessionKey = nextSessionKey;
+    localStorage.setItem("cameraRouterSessionKey", cameraRouterSessionKey);
+    if (!silent) {
+      setStreamStatus(`Authenticated. Session timeout ${Number(data.timeout) || "--"}s`);
+    }
+
+    await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    startCameraImuStream();
+    await refreshCameraImu({ silent: true, force: true });
+    syncPinnedPreviewSource();
+    renderHybridFeedOptions();
+    if (cameraPreview.desired) {
+      await startCameraPreview({ autoRestart: true, reason: "session refresh" });
+    }
+    return true;
+  } catch (err) {
+    stopCameraImuStream();
+    if (!silent) {
+      setStreamStatus(`Auth error: ${err}`, true);
+      updateCameraImuReadouts(null, {
+        message: "IMU unavailable until camera router auth succeeds",
+        error: true,
+      });
+    }
+    return false;
+  }
+}
+
 async function authenticateCameraRouter() {
   const baseInput = document.getElementById("cameraRouterBaseInput");
   const passInput = document.getElementById("cameraRouterPasswordInput");
   if (!baseInput || !passInput) {
-    return;
+    return false;
   }
-
-  try {
-    cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
-  } catch (err) {
-    setStreamStatus(`Invalid camera router URL: ${err}`, true);
-    return;
-  }
-
-  cameraRouterPassword = passInput.value.trim();
-  if (!cameraRouterBaseUrl || !cameraRouterPassword) {
-    setStreamStatus("Enter both camera router URL and password", true);
-    return;
-  }
-
-  const authPath = "/auth";
-  setStreamStatus("Authenticating with camera router...");
-
-  try {
-    const response = await cameraRouterFetch(authPath, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: cameraRouterPassword }),
-    }, false);
-    const data = await response.json();
-    if (!response.ok || data.status !== "success") {
-      setStreamStatus(`Auth failed: ${data.message || response.status}`, true);
-      return;
-    }
-
-    cameraRouterSessionKey = data.session_key;
-    localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
-    localStorage.setItem("cameraRouterPassword", cameraRouterPassword);
-    localStorage.setItem("cameraRouterSessionKey", cameraRouterSessionKey);
-
-    setStreamStatus(`Authenticated. Session timeout ${data.timeout}s`);
-    await refreshCameraFeeds();
-    startCameraImuStream();
-    await refreshCameraImu({ silent: true });
-    syncPinnedPreviewSource();
-    if (cameraPreview.desired) {
-      await startCameraPreview({ autoRestart: true, reason: "session refresh" });
-    }
-  } catch (err) {
-    stopCameraImuStream();
-    setStreamStatus(`Auth error: ${err}`, true);
-    updateCameraImuReadouts(null, {
-      message: "IMU unavailable until camera router auth succeeds",
-      error: true,
-    });
-  }
+  return authenticateCameraRouterWithPassword(passInput.value, {
+    baseUrl: baseInput.value,
+    silent: false,
+  });
 }
 
 async function rotateCameraRouterSessionKey() {
@@ -5134,58 +5806,101 @@ async function refreshAudioDevices(options = {}) {
   }
 }
 
-async function authenticateAudioRouter() {
-  const baseInput = document.getElementById("audioRouterBaseInput");
-  const passInput = document.getElementById("audioRouterPasswordInput");
-  if (!baseInput || !passInput) {
-    return;
-  }
+async function authenticateAudioRouterWithPassword(password, options = {}) {
+  const silent = !!options.silent;
+  const baseCandidate = String(options.baseUrl || audioRouterBaseUrl || "").trim();
+  const cleanPassword = String(password || "").trim();
 
+  let normalizedBase = "";
   try {
-    audioRouterBaseUrl = normalizeOrigin(baseInput.value);
+    normalizedBase = normalizeOrigin(baseCandidate);
   } catch (err) {
-    setAudioStatus(`Invalid audio router URL: ${err}`, true);
-    return;
+    if (!silent) {
+      setAudioStatus(`Invalid audio router URL: ${err}`, true);
+    }
+    return false;
   }
 
-  audioRouterPassword = (passInput.value || "").trim();
-  if (!audioRouterBaseUrl || !audioRouterPassword) {
-    setAudioStatus("Enter both audio router URL and password", true);
-    return;
+  if (!normalizedBase || !cleanPassword) {
+    if (!silent) {
+      setAudioStatus("Enter both audio router URL and password", true);
+    }
+    return false;
   }
 
-  setAudioStatus("Authenticating with audio router...");
+  audioRouterBaseUrl = normalizedBase;
+  setServiceAuthPassword("audio", cleanPassword);
+  localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
+  const baseInput = document.getElementById("audioRouterBaseInput");
+  if (baseInput) {
+    baseInput.value = audioRouterBaseUrl;
+  }
+
+  if (!silent) {
+    setAudioStatus("Authenticating with audio router...");
+  }
+
   try {
     const response = await audioRouterFetch(
       "/auth",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: audioRouterPassword }),
+        body: JSON.stringify({ password: cleanPassword }),
       },
       false
     );
-    const data = await response.json();
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (err) {
+      data = {};
+    }
+
     if (!response.ok || data.status !== "success") {
-      setAudioStatus(`Auth failed: ${data.message || response.status}`, true);
-      return;
+      if (!silent) {
+        setAudioStatus(`Auth failed: ${data.message || response.status}`, true);
+      }
+      return false;
     }
 
-    audioRouterSessionKey = String(data.session_key || "").trim();
-    if (!audioRouterSessionKey) {
-      setAudioStatus("Auth failed: response missing session key", true);
-      return;
+    const nextSessionKey = String(data.session_key || "").trim();
+    if (!nextSessionKey) {
+      if (!silent) {
+        setAudioStatus("Auth failed: response missing session key", true);
+      }
+      return false;
     }
 
-    localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
-    localStorage.setItem("audioRouterPassword", audioRouterPassword);
+    audioRouterSessionKey = nextSessionKey;
     localStorage.setItem("audioRouterSessionKey", audioRouterSessionKey);
+    if (!silent) {
+      setAudioStatus(`Authenticated. Session timeout ${Number(data.timeout) || "--"}s`);
+    }
 
-    setAudioStatus(`Authenticated. Session timeout ${Number(data.timeout) || "--"}s`);
     await refreshAudioDevices({ silent: true });
+    if (audioBridge.desired) {
+      await startAudioBridge({ forceRestart: true });
+    }
+    return true;
   } catch (err) {
-    setAudioStatus(`Auth error: ${err}`, true);
+    if (!silent) {
+      setAudioStatus(`Auth error: ${err}`, true);
+    }
+    return false;
   }
+}
+
+async function authenticateAudioRouter() {
+  const baseInput = document.getElementById("audioRouterBaseInput");
+  const passInput = document.getElementById("audioRouterPasswordInput");
+  if (!baseInput || !passInput) {
+    return false;
+  }
+  return authenticateAudioRouterWithPassword(passInput.value, {
+    baseUrl: baseInput.value,
+    silent: false,
+  });
 }
 
 async function rotateAudioRouterSessionKey() {
@@ -6287,3 +7002,4 @@ window.authenticateCameraRouter = authenticateCameraRouter;
 window.refreshCameraFeeds = refreshCameraFeeds;
 window.startCameraPreview = startCameraPreview;
 window.stopCameraPreview = stopCameraPreview;
+window.isControlTransportReady = isControlTransportReady;
