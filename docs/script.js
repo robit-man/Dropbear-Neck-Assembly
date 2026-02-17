@@ -380,54 +380,60 @@ function updateMetrics() {
     updateServiceHeaderChips();
 }
 
-function paintServiceChip(chipId, label, value, state) {
+function paintServiceChip(chipId, label, connected, value) {
     const chipEl = document.getElementById(chipId);
     if (!chipEl) {
         return;
     }
-    chipEl.textContent = `${label}: ${value}`;
-    chipEl.classList.remove("ok", "warn", "bad");
-    if (state === "ok" || state === "warn" || state === "bad") {
-        chipEl.classList.add(state);
+    const isConnected = !!connected;
+    const stateText = String(value || (isConnected ? "Connected" : "Offline"));
+    chipEl.classList.toggle("connected", isConnected);
+    chipEl.classList.toggle("disconnected", !isConnected);
+    chipEl.setAttribute("aria-label", `${label} endpoint ${stateText}`);
+
+    const labelEl = chipEl.querySelector(".service-status-label");
+    const valueEl = chipEl.querySelector(".service-status-value");
+    if (labelEl) {
+        labelEl.textContent = label;
+    }
+    if (valueEl) {
+        valueEl.textContent = stateText;
+    } else {
+        chipEl.textContent = `${label}: ${stateText}`;
     }
 }
 
 function updateServiceHeaderChips() {
     const routerConnected = !!browserNknClientReady;
-    const routerState = routerConnected ? "ok" : (routerTargetNknAddress ? "warn" : "bad");
     const routerValue = routerConnected
         ? "Connected"
-        : (routerTargetNknAddress ? "Target Set" : "Idle");
-    paintServiceChip("svcChipRouter", "Router", routerValue, routerState);
+        : "Offline";
+    paintServiceChip("svcChipRouter", "Router", routerConnected, routerValue);
 
     const adapterReady = !!(authenticated && SESSION_KEY && HTTP_URL);
-    const adapterState = adapterReady ? "ok" : ((HTTP_URL || WS_URL) ? "warn" : "bad");
-    const adapterValue = adapterReady ? "Authenticated" : ((HTTP_URL || WS_URL) ? "Configured" : "Offline");
-    paintServiceChip("svcChipAdapter", "Adapter", adapterValue, adapterState);
+    const adapterValue = adapterReady ? "Connected" : "Offline";
+    paintServiceChip("svcChipAdapter", "Adapter", adapterReady, adapterValue);
 
     const cameraReady = !!(cameraRouterBaseUrl && cameraRouterSessionKey);
     const cameraLive = !!(cameraReady && cameraPreview.desired && cameraPreview.activeCameraId);
-    const cameraState = cameraLive ? "ok" : (cameraReady ? "warn" : (cameraRouterBaseUrl ? "warn" : "bad"));
     const cameraValue = cameraLive
-        ? `Live ${cameraPreview.activeCameraId}`
-        : (cameraReady ? "Ready" : (cameraRouterBaseUrl ? "Configured" : "Offline"));
-    paintServiceChip("svcChipCamera", "Camera", cameraValue, cameraState);
+        ? "Live"
+        : (cameraReady ? "Connected" : "Offline");
+    paintServiceChip("svcChipCamera", "Camera", cameraReady, cameraValue);
 
     const audioReady = !!(audioRouterBaseUrl && audioRouterSessionKey);
     const audioLive = !!audioBridge.active;
-    const audioState = audioLive ? "ok" : (audioReady ? "warn" : (audioRouterBaseUrl ? "warn" : "bad"));
     const audioValue = audioLive
         ? "Live"
-        : (audioReady ? "Ready" : (audioRouterBaseUrl ? "Configured" : "Offline"));
-    paintServiceChip("svcChipAudio", "Audio", audioValue, audioState);
+        : (audioReady ? "Connected" : "Offline");
+    paintServiceChip("svcChipAudio", "Audio", audioReady, audioValue);
 
     const hybridReady = !!(adapterReady && cameraReady);
     const hybridLive = !!(hybridReady && hybridSelectedFeedId && cameraPreview.desired);
-    const hybridState = hybridLive ? "ok" : (hybridReady ? "warn" : "bad");
     const hybridValue = hybridLive
-        ? `Live ${hybridSelectedFeedId}`
-        : (hybridReady ? "Ready" : "Blocked");
-    paintServiceChip("svcChipHybrid", "Hybrid", hybridValue, hybridState);
+        ? "Live"
+        : (hybridReady ? "Connected" : "Offline");
+    paintServiceChip("svcChipHybrid", "Hybrid", hybridReady, hybridValue);
 }
 
 // Calculate data rate

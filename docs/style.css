@@ -12,7 +12,7 @@
     --ui-control-font-weight: 700;
     --sidebar-width: 320px;
     --sidebar-peek-width: 0px;
-    --top-header-height: 64px;
+    --top-header-height: 94px;
 }
 
 * {
@@ -58,49 +58,100 @@ html {
     z-index: 980;
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    gap: 0.25rem;
-    padding: 0.35rem 0.9rem 0.4rem 0.9rem;
+    justify-content: flex-start;
+    gap: 0.2rem;
+    padding: 0.35rem 0.7rem 0.45rem 0.7rem;
 }
 
 .app-top-title {
     color: var(--accent);
     font-weight: 800;
     line-height: 1;
-    font-size: 0.92rem;
+    font-size: 0.84rem;
     letter-spacing: 0.02em;
 }
 
 .service-chip-row {
     display: flex;
-    align-items: center;
-    gap: 0.38rem;
-    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.34rem;
+    flex-wrap: nowrap;
 }
 
-.service-chip {
-    font-size: 0.71rem;
-    padding: 0.2rem 0.4rem;
-    border-radius: 999px;
-    border: 1px solid var(--border-light);
+.service-status-row {
+    width: max-content;
+    max-width: 100%;
+}
+
+.service-status-btn {
+    width: 3.2rem;
+    min-width: 3.2rem;
+    height: 3.2rem;
+    padding: 0.22rem 0.2rem;
+    border-radius: 0.58rem;
+    border: 2px solid var(--border-light);
     background: var(--bg-secondary);
-    color: #d8d8d8;
-    line-height: 1.05;
+    color: #ff5f5f;
+    display: grid;
+    grid-template-rows: 1fr auto auto;
+    align-items: center;
+    justify-items: center;
+    gap: 0.05rem;
+    cursor: default;
+    user-select: none;
+    touch-action: none;
 }
 
-.service-chip.ok {
-    border-color: #00a86b;
-    color: #00d08a;
+.service-status-btn:hover,
+.service-status-btn:focus-visible {
+    background: var(--bg-secondary);
+    color: inherit;
+    border-color: currentColor;
+    outline: none;
 }
 
-.service-chip.warn {
-    border-color: #b28727;
-    color: #ffcc66;
+.service-status-btn.connected {
+    color: #ffae00;
+    border-color: #ffae00;
+    box-shadow: inset 0 0 0 1px rgba(255, 174, 0, 0.2);
 }
 
-.service-chip.bad {
-    border-color: #943535;
-    color: #ff6666;
+.service-status-btn.disconnected {
+    color: #ff5f5f;
+    border-color: #a13a3a;
+}
+
+.service-status-icon {
+    width: 1.02rem;
+    height: 1.02rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.service-status-icon svg {
+    width: 100%;
+    height: 100%;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.service-status-label {
+    font-size: 0.54rem;
+    line-height: 1;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 700;
+}
+
+.service-status-value {
+    font-size: 0.5rem;
+    line-height: 1;
+    letter-spacing: 0.04em;
+    opacity: 0.92;
 }
 
 .sidebar-swipe-zone {
@@ -1381,7 +1432,7 @@ h3 {
 
 @media (max-width: 900px) {
     :root {
-        --top-header-height: 78px;
+        --top-header-height: 98px;
     }
 
     .app-sidebar {
