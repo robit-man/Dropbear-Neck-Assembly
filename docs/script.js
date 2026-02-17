@@ -2382,6 +2382,11 @@ let browserNknSeedHex = localStorage.getItem("browserNknSeedHex") || "";
 let browserNknPubHex = localStorage.getItem("browserNknPubHex") || "";
 const ROUTER_NKN_IDENTIFIER = "web";
 const ROUTER_NKN_SUBCLIENTS = 4;
+const ROUTER_NKN_SUBCLIENT_FALLBACKS = Object.freeze(
+  Array.from(new Set([ROUTER_NKN_SUBCLIENTS, 2, 1])).filter(
+    (value) => Number.isInteger(value) && value > 0
+  )
+);
 const ROUTER_NKN_READY_TIMEOUT_MS = 16000;
 const ROUTER_NKN_RESOLVE_TIMEOUT_MS = 14000;
 const ROUTER_NKN_AUTO_RESOLVE_INTERVAL_MS = 45000;
@@ -2393,6 +2398,7 @@ let nknUiInitialized = false;
 let browserNknClient = null;
 let browserNknClientReady = false;
 let browserNknClientAddress = "";
+let browserNknSubclientCount = ROUTER_NKN_SUBCLIENTS;
 let nknClientInitPromise = null;
 let nknResolveInFlight = false;
 let routerAutoResolveTimer = null;
@@ -3156,11 +3162,41 @@ function handleBrowserNknMessage(a, b) {
   }
 }
 
+function getNknSubclientRetryOrder(initialCount) {
+  const seed = Math.max(1, Number(initialCount) || ROUTER_NKN_SUBCLIENTS);
+  const order = [seed];
+  const lower = ROUTER_NKN_SUBCLIENT_FALLBACKS.filter((value) => Number(value) < seed);
+  const higher = ROUTER_NKN_SUBCLIENT_FALLBACKS.filter((value) => Number(value) > seed);
+  const combined = [...lower, ...higher];
+  combined.forEach((value) => {
+    const next = Math.max(1, Number(value) || 0);
+    if (!next || order.includes(next)) {
+      return;
+    }
+    order.push(next);
+  });
+  return order.length > 0 ? order : [ROUTER_NKN_SUBCLIENTS];
+}
+
+function syncBrowserNknReadyState(client) {
+  if (!client) {
+    return;
+  }
+  if (client.isReady && !browserNknClientReady) {
+    browserNknClientReady = true;
+    browserNknClientAddress = String(client.addr || "").trim();
+  }
+  if (client.isFailed && !browserNknClientReady) {
+    setBrowserNknSeedStatus("Connect failed", true);
+  }
+}
+
 function attachBrowserNknClientHandlers(client) {
   const onReady = () => {
     browserNknClientReady = true;
     browserNknClientAddress = String(client.addr || "").trim();
     const statusBits = ["Browser NKN client ready"];
+    statusBits.push(`subclients=${browserNknSubclientCount}`);
     if (browserNknClientAddress) {
       statusBits.push(browserNknClientAddress);
     }
@@ -3199,14 +3235,30 @@ function attachBrowserNknClientHandlers(client) {
     client.on("wsError", onWarning);
     client.on("message", handleBrowserNknMessage);
   }
+
+  // Some sdk builds can become ready before listeners are fully attached.
+  syncBrowserNknReadyState(client);
+  if (client.isReady) {
+    onReady();
+  } else if (client.isFailed) {
+    browserNknClientReady = false;
+    setRouterResolveStatus("NKN connect failed", true);
+    setBrowserNknSeedStatus("Connect failed", true);
+  }
 }
 
 async function ensureBrowserNknClient(options = {}) {
   const forceReconnect = !!options.forceReconnect;
+  const requestedSubclients = Math.max(
+    1,
+    Number(options.subclients) || Number(browserNknSubclientCount) || ROUTER_NKN_SUBCLIENTS
+  );
+  browserNknSubclientCount = requestedSubclients;
   if (forceReconnect) {
     closeBrowserNknClient();
   }
   if (browserNknClient) {
+    syncBrowserNknReadyState(browserNknClient);
     return browserNknClient;
   }
   if (nknClientInitPromise) {
@@ -3216,7 +3268,11 @@ async function ensureBrowserNknClient(options = {}) {
   nknClientInitPromise = (async () => {
     ensureBrowserNknIdentity();
 
-    if (typeof nkn === "undefined" || !nkn || typeof nkn.MultiClient !== "function") {
+    if (
+      typeof nkn === "undefined" ||
+      !nkn ||
+      (typeof nkn.MultiClient !== "function" && typeof nkn.Client !== "function")
+    ) {
       throw new Error("nkn-sdk browser library not loaded");
     }
     if (!/^[0-9a-f]{64}$/i.test(browserNknSeedHex)) {
@@ -3225,13 +3281,29 @@ async function ensureBrowserNknClient(options = {}) {
 
     browserNknClientReady = false;
     browserNknClientAddress = "";
-    setRouterResolveStatus("Starting browser NKN client...");
+    const canUseMultiClient = typeof nkn.MultiClient === "function";
+    const nknClientType = canUseMultiClient ? "MultiClient" : "Client";
+    const startupSubclientInfo = canUseMultiClient
+      ? `subclients=${browserNknSubclientCount}`
+      : "single-client fallback";
+    setRouterResolveStatus(
+      `Starting browser NKN ${nknClientType} (${startupSubclientInfo})...`
+    );
     setBrowserNknSeedStatus("Connecting to NKN...");
-    const client = new nkn.MultiClient({
-      seed: browserNknSeedHex,
-      identifier: ROUTER_NKN_IDENTIFIER,
-      numSubClients: ROUTER_NKN_SUBCLIENTS,
-    });
+    let client = null;
+    if (canUseMultiClient) {
+      client = new nkn.MultiClient({
+        seed: browserNknSeedHex,
+        identifier: ROUTER_NKN_IDENTIFIER,
+        numSubClients: browserNknSubclientCount,
+      });
+    } else {
+      browserNknSubclientCount = 1;
+      client = new nkn.Client({
+        seed: browserNknSeedHex,
+        identifier: ROUTER_NKN_IDENTIFIER,
+      });
+    }
     browserNknClient = client;
     attachBrowserNknClientHandlers(client);
 
@@ -3252,11 +3324,16 @@ async function waitForBrowserNknReady(timeoutMs = ROUTER_NKN_READY_TIMEOUT_MS) {
   const timeout = Math.max(500, Number(timeoutMs) || ROUTER_NKN_READY_TIMEOUT_MS);
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
+    syncBrowserNknReadyState(browserNknClient);
     if (browserNknClientReady) {
       return true;
     }
+    if (browserNknClient && browserNknClient.isFailed) {
+      return false;
+    }
     await sleepMs(120);
   }
+  syncBrowserNknReadyState(browserNknClient);
   return browserNknClientReady;
 }
 
@@ -3502,11 +3579,17 @@ async function sendResolvePayloadWithRetry(targetAddress, payload, timeoutMs) {
   const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || ROUTER_NKN_RESOLVE_TIMEOUT_MS);
   let attempt = 0;
   let lastError = null;
+  const subclientOrder = getNknSubclientRetryOrder(browserNknSubclientCount);
 
   while (attempt < ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS && Date.now() < deadline) {
     attempt += 1;
     const shouldReconnect = attempt > 2;
-    const client = await ensureBrowserNknClient({ forceReconnect: shouldReconnect });
+    const fallbackIndex = shouldReconnect ? Math.min(attempt - 2, subclientOrder.length - 1) : 0;
+    const selectedSubclients = subclientOrder[Math.max(0, fallbackIndex)] || browserNknSubclientCount;
+    const client = await ensureBrowserNknClient({
+      forceReconnect: shouldReconnect,
+      subclients: selectedSubclients,
+    });
     const waitBudget = Math.max(700, deadline - Date.now());
     const ready = await waitForBrowserNknReady(waitBudget);
     if (!ready) {
@@ -3581,16 +3664,45 @@ async function refreshNknClientInfo(options = {}) {
   const quiet = !!options.quiet;
 
   try {
-    await ensureBrowserNknClient({ forceReconnect });
-    const ready = await waitForBrowserNknReady();
+    const subclientOrder = getNknSubclientRetryOrder(browserNknSubclientCount);
+    const attempts = forceReconnect ? subclientOrder.length : 1;
+    let ready = false;
+    for (let idx = 0; idx < attempts; idx += 1) {
+      const subclients = subclientOrder[idx] || browserNknSubclientCount;
+      await ensureBrowserNknClient({
+        forceReconnect: forceReconnect || idx > 0,
+        subclients,
+      });
+      ready = await waitForBrowserNknReady(
+        forceReconnect ? Math.min(7000, ROUTER_NKN_READY_TIMEOUT_MS) : ROUTER_NKN_READY_TIMEOUT_MS
+      );
+      if (ready) {
+        break;
+      }
+      if (forceReconnect && idx < attempts - 1) {
+        setRouterResolveStatus(
+          `NKN not ready with ${subclients} subclient(s); retrying...`,
+          true
+        );
+      }
+    }
+
     if (!ready) {
       if (!quiet) {
-        setRouterResolveStatus("Browser NKN client starting...");
+        if (forceReconnect) {
+          setRouterResolveStatus("Browser NKN connect failed after retrying subclient fallbacks", true);
+        } else {
+          setRouterResolveStatus("Browser NKN client starting...");
+        }
+      }
+      if (forceReconnect) {
+        setBrowserNknSeedStatus("Connect failed", true);
       }
       return false;
     }
 
     const statusBits = ["Browser NKN client ready"];
+    statusBits.push(`subclients=${browserNknSubclientCount}`);
     if (browserNknClientAddress) {
       statusBits.push(browserNknClientAddress);
     }
