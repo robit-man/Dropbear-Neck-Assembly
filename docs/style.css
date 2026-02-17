@@ -11,7 +11,8 @@
     --ui-control-font-size: 16px;
     --ui-control-font-weight: 700;
     --sidebar-width: 320px;
-    --sidebar-peek-width: 32px;
+    --sidebar-peek-width: 0px;
+    --top-header-height: 64px;
 }
 
 * {
@@ -30,6 +31,7 @@ body {
     overscroll-behavior: none;
     min-height: 100dvh;
     overflow-x: hidden;
+    padding-top: var(--top-header-height);
 }
 
 html {
@@ -45,13 +47,80 @@ html {
     padding: 1rem 0;
 }
 
+.app-top-header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: var(--top-header-height);
+    background: linear-gradient(180deg, #101010 0%, #161616 100%);
+    border-bottom: 2px solid var(--border-dark);
+    z-index: 980;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.25rem;
+    padding: 0.35rem 0.9rem 0.4rem 0.9rem;
+}
+
+.app-top-title {
+    color: var(--accent);
+    font-weight: 800;
+    line-height: 1;
+    font-size: 0.92rem;
+    letter-spacing: 0.02em;
+}
+
+.service-chip-row {
+    display: flex;
+    align-items: center;
+    gap: 0.38rem;
+    flex-wrap: wrap;
+}
+
+.service-chip {
+    font-size: 0.71rem;
+    padding: 0.2rem 0.4rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-light);
+    background: var(--bg-secondary);
+    color: #d8d8d8;
+    line-height: 1.05;
+}
+
+.service-chip.ok {
+    border-color: #00a86b;
+    color: #00d08a;
+}
+
+.service-chip.warn {
+    border-color: #b28727;
+    color: #ffcc66;
+}
+
+.service-chip.bad {
+    border-color: #943535;
+    color: #ff6666;
+}
+
+.sidebar-swipe-zone {
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(52vw, 360px);
+    height: 100%;
+    pointer-events: auto;
+    touch-action: pan-y;
+}
+
 .app-shell {
-    min-height: 100dvh;
+    min-height: calc(100dvh - var(--top-header-height));
 }
 
 .app-sidebar {
     position: fixed;
-    inset: 0 auto 0 0;
+    inset: var(--top-header-height) auto 0 0;
     width: var(--sidebar-width);
     background: linear-gradient(180deg, #171717 0%, #121212 100%);
     border-right: 2px solid var(--border-dark);
@@ -217,12 +286,12 @@ html {
 
 .app-main {
     margin-left: var(--sidebar-width);
-    min-height: 100dvh;
+    min-height: calc(100dvh - var(--top-header-height));
     transition: margin-left 0.26s ease;
 }
 
 body.sidebar-collapsed .app-sidebar {
-    transform: translateX(calc(-100% + var(--sidebar-peek-width)));
+    transform: translateX(-100%);
 }
 
 body.sidebar-collapsed .sidebar-header {
@@ -238,12 +307,12 @@ body.sidebar-collapsed .sidebar-content {
 }
 
 body.sidebar-collapsed .app-main {
-    margin-left: var(--sidebar-peek-width);
+    margin-left: 0;
 }
 
 .sidebar-scrim {
     position: fixed;
-    inset: 0;
+    inset: var(--top-header-height) 0 0 0;
     z-index: 850;
     background: rgba(0, 0, 0, 0.38);
     display: none;
@@ -260,6 +329,42 @@ body.sidebar-collapsed .app-main {
     border: 2px solid var(--border-dark);
     border-radius: 0.6rem;
     padding: 0.9rem;
+}
+
+.hybrid-tabs,
+.debug-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-bottom: 0.55rem;
+}
+
+.hybrid-tab,
+.debug-tab {
+    background: var(--bg-secondary);
+    border: 2px solid var(--border-light);
+    color: var(--text-primary);
+    padding: 0.42rem 0.75rem;
+    border-radius: 0.45rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.hybrid-tab.active,
+.debug-tab.active {
+    border-color: var(--accent);
+    background: rgba(255, 174, 0, 0.16);
+    color: var(--accent);
+}
+
+.hybrid-tab-panel,
+.debug-control-panel {
+    display: none;
+}
+
+.hybrid-tab-panel.active,
+.debug-control-panel.active {
+    display: block;
 }
 
 /* Modal Styles */
@@ -1221,6 +1326,10 @@ h3 {
 }
 
 @media (max-width: 900px) {
+    :root {
+        --top-header-height: 78px;
+    }
+
     .app-sidebar {
         width: min(86vw, 340px);
         transform: translateX(0);
@@ -1228,7 +1337,7 @@ h3 {
     }
 
     body.sidebar-collapsed .app-sidebar {
-        transform: translateX(calc(-100% + var(--sidebar-peek-width)));
+        transform: translateX(-100%);
     }
 
     .app-main,

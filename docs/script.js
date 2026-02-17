@@ -25,15 +25,25 @@ let socket = null;
 let useWS = false;
 let authenticated = false;
 let suppressCommandDispatch = false;
-const ROUTE_ALIASES = Object.freeze({ home: "neck" });
-const ROUTES = new Set(["connect", "neck", "hybrid", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams", "audio"]);
+const ROUTE_ALIASES = Object.freeze({
+    home: "auth",
+    connect: "auth",
+    neck: "auth",
+    streams: "auth",
+    audio: "auth",
+    direct: "debug",
+    euler: "debug",
+    head: "debug",
+    quaternion: "debug",
+    headstream: "hybrid",
+    orientation: "hybrid",
+});
+const ROUTES = new Set(["auth", "hybrid", "debug"]);
 const CONTROL_ROUTE_LABELS = Object.freeze({
     direct: "Direct Motor",
     euler: "Euler",
     head: "Full Head",
     quaternion: "Quaternion",
-    headstream: "Morphtarget",
-    orientation: "Orientation",
 });
 const CONTROL_ROUTE_STORAGE_KEY = "selectedControlRoute";
 let selectedControlRoute = localStorage.getItem(CONTROL_ROUTE_STORAGE_KEY) || "";
@@ -42,6 +52,11 @@ let controlsMenuOpen = false;
 let headstreamInitTriggered = false;
 let orientationInitTriggered = false;
 let hybridUiInitialized = false;
+let unifiedLayoutInitialized = false;
+let hybridTabsInitialized = false;
+let debugUiInitialized = false;
+let activeHybridTab = "touch";
+let activeDebugControl = "direct";
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "uiSidebarCollapsed";
 let sidebarUiInitialized = false;
 let buttonIconsObserver = null;
@@ -49,10 +64,9 @@ let buttonIconApplyInProgress = false;
 let buttonIconApplyScheduled = false;
 
 const ROUTE_ICON_KEYS = Object.freeze({
-    neck: "head",
+    auth: "lock",
     hybrid: "hybrid",
-    streams: "video",
-    audio: "mic",
+    debug: "sliders",
 });
 
 const CONTROL_ROUTE_ICON_KEYS = Object.freeze({
@@ -331,6 +345,57 @@ function updateMetrics() {
         videoStatsEl.textContent = metrics.video.stats;
         videoStatsEl.className = 'metric-meta';
     }
+    updateServiceHeaderChips();
+}
+
+function paintServiceChip(chipId, label, value, state) {
+    const chipEl = document.getElementById(chipId);
+    if (!chipEl) {
+        return;
+    }
+    chipEl.textContent = `${label}: ${value}`;
+    chipEl.classList.remove("ok", "warn", "bad");
+    if (state === "ok" || state === "warn" || state === "bad") {
+        chipEl.classList.add(state);
+    }
+}
+
+function updateServiceHeaderChips() {
+    const routerConnected = !!browserNknClientReady;
+    const routerState = routerConnected ? "ok" : (routerTargetNknAddress ? "warn" : "bad");
+    const routerValue = routerConnected
+        ? "Connected"
+        : (routerTargetNknAddress ? "Target Set" : "Idle");
+    paintServiceChip("svcChipRouter", "Router", routerValue, routerState);
+
+    const adapterReady = !!(authenticated && SESSION_KEY && HTTP_URL);
+    const adapterState = adapterReady ? "ok" : ((HTTP_URL || WS_URL) ? "warn" : "bad");
+    const adapterValue = adapterReady ? "Authenticated" : ((HTTP_URL || WS_URL) ? "Configured" : "Offline");
+    paintServiceChip("svcChipAdapter", "Adapter", adapterValue, adapterState);
+
+    const cameraReady = !!(cameraRouterBaseUrl && cameraRouterSessionKey);
+    const cameraLive = !!(cameraReady && cameraPreview.desired && cameraPreview.activeCameraId);
+    const cameraState = cameraLive ? "ok" : (cameraReady ? "warn" : (cameraRouterBaseUrl ? "warn" : "bad"));
+    const cameraValue = cameraLive
+        ? `Live ${cameraPreview.activeCameraId}`
+        : (cameraReady ? "Ready" : (cameraRouterBaseUrl ? "Configured" : "Offline"));
+    paintServiceChip("svcChipCamera", "Camera", cameraValue, cameraState);
+
+    const audioReady = !!(audioRouterBaseUrl && audioRouterSessionKey);
+    const audioLive = !!audioBridge.active;
+    const audioState = audioLive ? "ok" : (audioReady ? "warn" : (audioRouterBaseUrl ? "warn" : "bad"));
+    const audioValue = audioLive
+        ? "Live"
+        : (audioReady ? "Ready" : (audioRouterBaseUrl ? "Configured" : "Offline"));
+    paintServiceChip("svcChipAudio", "Audio", audioValue, audioState);
+
+    const hybridReady = !!(adapterReady && cameraReady);
+    const hybridLive = !!(hybridReady && hybridSelectedFeedId && cameraPreview.desired);
+    const hybridState = hybridLive ? "ok" : (hybridReady ? "warn" : "bad");
+    const hybridValue = hybridLive
+        ? `Live ${hybridSelectedFeedId}`
+        : (hybridReady ? "Ready" : "Blocked");
+    paintServiceChip("svcChipHybrid", "Hybrid", hybridValue, hybridState);
 }
 
 // Calculate data rate
@@ -384,7 +449,7 @@ function normalizeRoute(route) {
 }
 
 function isControlRoute(route) {
-    const normalized = normalizeRoute(route);
+    const normalized = String(route || "").trim().toLowerCase();
     return Object.prototype.hasOwnProperty.call(CONTROL_ROUTE_LABELS, normalized);
 }
 
@@ -418,16 +483,17 @@ function setControlsMenuOpen(open) {
 }
 
 function syncControlsNavState(route) {
-    const normalized = normalizeRoute(route);
-    if (isControlRoute(normalized)) {
-        selectedControlRoute = normalized;
+    const rawRoute = String(route || "").trim().toLowerCase();
+    const normalized = normalizeRoute(rawRoute);
+    if (isControlRoute(rawRoute)) {
+        selectedControlRoute = rawRoute;
         localStorage.setItem(CONTROL_ROUTE_STORAGE_KEY, selectedControlRoute);
     }
 
     updateControlGhostLabel();
 
-    const activeControl = isControlRoute(normalized)
-        ? normalized
+    const activeControl = isControlRoute(rawRoute)
+        ? rawRoute
         : (isControlRoute(selectedControlRoute) ? selectedControlRoute : "");
 
     document.querySelectorAll(".controls-menu-option[data-control-route]").forEach((option) => {
@@ -436,12 +502,12 @@ function syncControlsNavState(route) {
 
     const toggleBtn = document.getElementById("controlsMenuToggleBtn");
     if (toggleBtn) {
-        toggleBtn.classList.toggle("active", isControlRoute(normalized));
+        toggleBtn.classList.toggle("active", isControlRoute(rawRoute));
     }
 }
 
 function activateControlRoute(route) {
-    const normalized = normalizeRoute(route);
+    const normalized = String(route || "").trim().toLowerCase();
     if (!isControlRoute(normalized)) {
         return;
     }
@@ -512,8 +578,7 @@ function syncSidebarScrim() {
 }
 
 function sidebarToggleIconMarkup(collapsed) {
-    const path = collapsed ? "m9 6 6 6-6 6" : "m15 6-6 6 6 6";
-    return `<span class="sidebar-toggle-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="${path}"></path></svg></span>`;
+    return '<span class="sidebar-toggle-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="m6 6 12 12"></path><path d="m18 6-12 12"></path></svg></span>';
 }
 
 function setSidebarCollapsed(collapsed, options = {}) {
@@ -523,10 +588,10 @@ function setSidebarCollapsed(collapsed, options = {}) {
 
     const toggleBtn = document.getElementById("sidebarToggleBtn");
     if (toggleBtn) {
-        toggleBtn.innerHTML = sidebarToggleIconMarkup(nextCollapsed);
+        toggleBtn.innerHTML = sidebarToggleIconMarkup(false);
         toggleBtn.setAttribute("aria-expanded", nextCollapsed ? "false" : "true");
-        toggleBtn.setAttribute("aria-label", nextCollapsed ? "Expand sidebar" : "Collapse sidebar");
-        toggleBtn.setAttribute("title", nextCollapsed ? "Open sidebar" : "Close sidebar");
+        toggleBtn.setAttribute("aria-label", "Close sidebar");
+        toggleBtn.setAttribute("title", "Close sidebar");
     }
 
     syncSidebarScrim();
@@ -536,6 +601,68 @@ function setSidebarCollapsed(collapsed, options = {}) {
             localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, nextCollapsed ? "1" : "0");
         } catch (err) {}
     }
+}
+
+const sidebarSwipeState = {
+    active: false,
+    pointerId: null,
+    startX: 0,
+    startY: 0,
+};
+
+function installSidebarSwipeGesture() {
+    const zone = document.getElementById("sidebarSwipeZone");
+    if (!zone) {
+        return;
+    }
+
+    const reset = () => {
+        sidebarSwipeState.active = false;
+        sidebarSwipeState.pointerId = null;
+        sidebarSwipeState.startX = 0;
+        sidebarSwipeState.startY = 0;
+    };
+
+    const onPointerDown = (event) => {
+        if (!document.body.classList.contains("sidebar-collapsed")) {
+            return;
+        }
+        if (event.pointerType === "mouse" && event.button !== 0) {
+            return;
+        }
+        sidebarSwipeState.active = true;
+        sidebarSwipeState.pointerId = event.pointerId;
+        sidebarSwipeState.startX = event.clientX;
+        sidebarSwipeState.startY = event.clientY;
+        try {
+            zone.setPointerCapture(event.pointerId);
+        } catch (err) {}
+    };
+
+    const onPointerMove = (event) => {
+        if (!sidebarSwipeState.active || sidebarSwipeState.pointerId !== event.pointerId) {
+            return;
+        }
+        const dx = Number(event.clientX) - sidebarSwipeState.startX;
+        const dy = Number(event.clientY) - sidebarSwipeState.startY;
+        if (dx > 54 && Math.abs(dy) < Math.max(44, dx * 0.8)) {
+            setSidebarCollapsed(false);
+            reset();
+        }
+    };
+
+    const onPointerStop = (event) => {
+        if (!sidebarSwipeState.active || sidebarSwipeState.pointerId !== event.pointerId) {
+            return;
+        }
+        reset();
+    };
+
+    zone.addEventListener("pointerdown", onPointerDown);
+    zone.addEventListener("pointermove", onPointerMove);
+    zone.addEventListener("pointerup", onPointerStop);
+    zone.addEventListener("pointercancel", onPointerStop);
+    zone.addEventListener("pointerleave", onPointerStop);
 }
 
 function initializeSidebarUi() {
@@ -565,7 +692,7 @@ function initializeSidebarUi() {
 
     toggleBtn.addEventListener("click", (event) => {
         event.preventDefault();
-        setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"));
+        setSidebarCollapsed(true);
     });
 
     if (scrim) {
@@ -573,6 +700,8 @@ function initializeSidebarUi() {
             setSidebarCollapsed(true, { persist: false });
         });
     }
+
+    installSidebarSwipeGesture();
 
     const collapseOnSelect = () => {
         if (isMobileSidebarViewport()) {
@@ -736,16 +865,41 @@ function initializeActionIcons() {
 }
 
 function getRouteFromLocation() {
-    const hashRoute = normalizeRoute(window.location.hash.replace(/^#\/?/, ""));
+    const rawHashRoute = String(window.location.hash.replace(/^#\/?/, "") || "").trim().toLowerCase();
+    if (isControlRoute(rawHashRoute)) {
+        activeDebugControl = rawHashRoute;
+        return "debug";
+    }
+    if (rawHashRoute === "headstream") {
+        activeHybridTab = "morph";
+        return "hybrid";
+    }
+    if (rawHashRoute === "orientation") {
+        activeHybridTab = "orientation";
+        return "hybrid";
+    }
+    const hashRoute = normalizeRoute(rawHashRoute);
     if (ROUTES.has(hashRoute)) {
         return hashRoute;
     }
-    const pathRoute = window.location.pathname.split("/").filter(Boolean).pop();
+    const pathRoute = String(window.location.pathname.split("/").filter(Boolean).pop() || "").trim().toLowerCase();
+    if (isControlRoute(pathRoute)) {
+        activeDebugControl = pathRoute;
+        return "debug";
+    }
+    if (pathRoute === "headstream") {
+        activeHybridTab = "morph";
+        return "hybrid";
+    }
+    if (pathRoute === "orientation") {
+        activeHybridTab = "orientation";
+        return "hybrid";
+    }
     const normalizedPathRoute = normalizeRoute(pathRoute || "");
     if (normalizedPathRoute && ROUTES.has(normalizedPathRoute)) {
         return normalizedPathRoute;
     }
-    return "connect";
+    return "auth";
 }
 
 function setStreamsPanelFocus(targetPanel = "camera") {
@@ -762,48 +916,112 @@ function setStreamsPanelFocus(targetPanel = "camera") {
     cameraDetails.open = true;
 }
 
-function applyRoute(route) {
-    setControlsMenuOpen(false);
-    const displayRoute = route === "audio" ? "streams" : route;
-    document.querySelectorAll("[data-view]").forEach((view) => {
-        view.classList.toggle("active", view.dataset.view === displayRoute);
-    });
-    document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
-        link.classList.toggle("active", link.dataset.route === route);
-    });
-    syncControlsNavState(route);
+function setHybridTab(tab, options = {}) {
+    const requested = String(tab || "").trim().toLowerCase();
+    const nextTab = requested === "morph" || requested === "orientation" ? requested : "touch";
+    activeHybridTab = nextTab;
 
-    if (route === "headstream" && !headstreamInitTriggered && typeof window.initHeadstreamApp === "function") {
+    document.querySelectorAll(".hybrid-tab[data-hybrid-tab]").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.hybridTab === nextTab);
+    });
+    const touchPanel = document.getElementById("hybridTabTouch");
+    const morphPanel = document.getElementById("hybridTabMorph");
+    const orientationPanel = document.getElementById("hybridTabOrientation");
+    if (touchPanel) touchPanel.classList.toggle("active", nextTab === "touch");
+    if (morphPanel) morphPanel.classList.toggle("active", nextTab === "morph");
+    if (orientationPanel) orientationPanel.classList.toggle("active", nextTab === "orientation");
+
+    if (nextTab === "morph" && !headstreamInitTriggered && typeof window.initHeadstreamApp === "function") {
         window.initHeadstreamApp();
         headstreamInitTriggered = true;
     }
-
-    if (route === "orientation" && !orientationInitTriggered && typeof window.initOrientationApp === "function") {
+    if (nextTab === "orientation" && !orientationInitTriggered && typeof window.initOrientationApp === "function") {
         window.initOrientationApp();
         orientationInitTriggered = true;
     }
 
-    if (route === "streams" || route === "audio") {
-        setupStreamConfigUi();
-        hideConnectionModal();
-        setStreamsPanelFocus(route === "audio" ? "audio" : "camera");
+    if (!options.skipMetrics) {
+        updateMetrics();
     }
-    if (route === "hybrid") {
+}
+
+function initializeHybridTabs() {
+    if (hybridTabsInitialized) {
+        return;
+    }
+    hybridTabsInitialized = true;
+    document.querySelectorAll(".hybrid-tab[data-hybrid-tab]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            setHybridTab(btn.dataset.hybridTab || "touch");
+        });
+    });
+    setHybridTab(activeHybridTab, { skipMetrics: true });
+}
+
+function setDebugControlTab(controlRoute) {
+    const requested = String(controlRoute || "").trim().toLowerCase();
+    const next = isControlRoute(requested) ? requested : "direct";
+    activeDebugControl = next;
+    selectedControlRoute = next;
+    localStorage.setItem(CONTROL_ROUTE_STORAGE_KEY, selectedControlRoute);
+
+    document.querySelectorAll(".debug-tab[data-debug-control]").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.debugControl === next);
+    });
+    document.querySelectorAll(".debug-control-panel[data-debug-control]").forEach((panel) => {
+        panel.classList.toggle("active", panel.dataset.debugControl === next);
+    });
+    updateMetrics();
+}
+
+function initializeDebugTabs() {
+    if (debugUiInitialized) {
+        return;
+    }
+    debugUiInitialized = true;
+    document.querySelectorAll(".debug-tab[data-debug-control]").forEach((btn) => {
+        btn.addEventListener("click", () => {
+            setDebugControlTab(btn.dataset.debugControl || "direct");
+        });
+    });
+    setDebugControlTab(activeDebugControl);
+}
+
+function applyRoute(route) {
+    setControlsMenuOpen(false);
+    const displayRoute = ROUTES.has(route) ? route : "auth";
+    document.querySelectorAll("[data-view]").forEach((view) => {
+        view.classList.toggle("active", view.dataset.view === displayRoute);
+    });
+    document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
+        link.classList.toggle("active", link.dataset.route === displayRoute);
+    });
+    syncControlsNavState(route);
+
+    if (displayRoute === "auth") {
+        setupStreamConfigUi();
+        initializeDebugAudioActions();
+    }
+    if (displayRoute === "hybrid") {
+        setupStreamConfigUi();
         setupHybridUi();
+        initializeHybridTabs();
         hybridSyncPoseFromHeadControls();
         renderHybridReadout();
-        hideConnectionModal();
         if (cameraRouterBaseUrl && cameraRouterSessionKey && cameraRouterFeeds.length === 0) {
             refreshCameraFeeds({ silent: true, suppressErrors: true }).catch(() => {});
         } else {
             renderHybridFeedOptions();
         }
     }
-    if (route === "orientation") {
-        disableWebSocketMode();
-        hideConnectionModal();
-    } else if (
-        routeAllowsWebSocket(route) &&
+    if (displayRoute === "debug") {
+        setupStreamConfigUi();
+        initializeDebugTabs();
+        initializeDebugAudioActions();
+    }
+
+    if (
+        routeAllowsWebSocket(displayRoute) &&
         WS_URL &&
         SESSION_KEY &&
         authenticated &&
@@ -811,11 +1029,25 @@ function applyRoute(route) {
     ) {
         initWebSocket();
     }
+
+    if (isMobileSidebarViewport()) {
+        setSidebarCollapsed(true);
+    }
+    updateMetrics();
 }
 
 function setRoute(route, updateHash = true) {
-    const normalizedRoute = normalizeRoute(route);
-    const normalized = ROUTES.has(normalizedRoute) ? normalizedRoute : "connect";
+    const rawRoute = String(route || "").trim().toLowerCase();
+    if (isControlRoute(rawRoute)) {
+        activeDebugControl = rawRoute;
+    }
+    if (rawRoute === "headstream") {
+        activeHybridTab = "morph";
+    } else if (rawRoute === "orientation") {
+        activeHybridTab = "orientation";
+    }
+    const normalizedRoute = normalizeRoute(rawRoute);
+    const normalized = ROUTES.has(normalizedRoute) ? normalizedRoute : "auth";
     applyRoute(normalized);
     if (updateHash && window.location.hash !== `#${normalized}`) {
         window.location.hash = `#${normalized}`;
@@ -833,6 +1065,135 @@ function initializeRouting() {
     window.addEventListener("hashchange", () => {
         setRoute(getRouteFromLocation(), false);
     });
+}
+
+function collectDirectChildSections(parentNode, className = "control-section") {
+    if (!parentNode) {
+        return [];
+    }
+    return Array.from(parentNode.children || []).filter((node) => {
+        return !!(node && node.classList && node.classList.contains(className));
+    });
+}
+
+function moveNodeToMount(node, mount) {
+    if (!node || !mount) {
+        return;
+    }
+    mount.appendChild(node);
+}
+
+function reorganizeUnifiedViews() {
+    if (unifiedLayoutInitialized) {
+        return;
+    }
+    unifiedLayoutInitialized = true;
+
+    const authRouterMount = document.getElementById("authRouterMount");
+    const authAdapterMount = document.getElementById("authAdapterMount");
+    const authCameraMount = document.getElementById("authCameraMount");
+    const authAudioMount = document.getElementById("authAudioMount");
+    const hybridAudioMount = document.getElementById("hybridAudioMount");
+    const hybridMorphMount = document.getElementById("hybridTabMorph");
+    const hybridOrientationMount = document.getElementById("hybridTabOrientation");
+    const debugControlMount = document.getElementById("debugControlMount");
+    const debugCameraMount = document.getElementById("debugCameraMount");
+
+    const routerDiscoverySection = document.querySelector("#connectionModal .modal-section");
+    moveNodeToMount(routerDiscoverySection, authRouterMount);
+
+    const neckView = document.querySelector('[data-view="neck"]');
+    const neckSections = collectDirectChildSections(neckView);
+    neckSections.forEach((section) => moveNodeToMount(section, authAdapterMount));
+
+    const cameraBody = document.querySelector("#streamsCameraDetails .streams-panel-body");
+    const cameraSections = collectDirectChildSections(cameraBody);
+    cameraSections.forEach((section, index) => {
+        if (index <= 1) {
+            moveNodeToMount(section, authCameraMount);
+            return;
+        }
+        moveNodeToMount(section, debugCameraMount);
+    });
+
+    const audioBody = document.querySelector("#streamsAudioDetails .streams-panel-body");
+    const audioSections = collectDirectChildSections(audioBody);
+    audioSections.forEach((section, index) => {
+        if (index <= 1) {
+            moveNodeToMount(section, authAudioMount);
+            return;
+        }
+        moveNodeToMount(section, hybridAudioMount);
+    });
+
+    const headstreamView = document.querySelector('[data-view="headstream"]');
+    if (headstreamView && hybridMorphMount) {
+        Array.from(headstreamView.childNodes || []).forEach((node) => hybridMorphMount.appendChild(node));
+    }
+    const orientationView = document.querySelector('[data-view="orientation"]');
+    if (orientationView && hybridOrientationMount) {
+        Array.from(orientationView.childNodes || []).forEach((node) => hybridOrientationMount.appendChild(node));
+    }
+
+    if (debugControlMount) {
+        const debugRoutes = ["direct", "euler", "head", "quaternion"];
+        debugRoutes.forEach((controlRoute) => {
+            const sourceView = document.querySelector(`[data-view="${controlRoute}"]`);
+            const panel = document.createElement("div");
+            panel.className = "debug-control-panel";
+            panel.dataset.debugControl = controlRoute;
+            const sections = collectDirectChildSections(sourceView);
+            sections.forEach((section) => panel.appendChild(section));
+            debugControlMount.appendChild(panel);
+        });
+    }
+
+    const modal = document.getElementById("connectionModal");
+    if (modal) {
+        modal.remove();
+    }
+}
+
+let debugAudioActionsInitialized = false;
+function setDebugAudioStatus(message, error = false) {
+    const statusEl = document.getElementById("debugAudioStatus");
+    if (!statusEl) {
+        return;
+    }
+    statusEl.textContent = String(message || "");
+    statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function initializeDebugAudioActions() {
+    if (debugAudioActionsInitialized) {
+        return;
+    }
+    debugAudioActionsInitialized = true;
+
+    const startBtn = document.getElementById("debugAudioStartBtn");
+    const stopBtn = document.getElementById("debugAudioStopBtn");
+    const refreshBtn = document.getElementById("debugAudioRefreshBtn");
+    if (startBtn) {
+        startBtn.addEventListener("click", () => {
+            startAudioBridge({ forceRestart: false })
+                .then(() => setDebugAudioStatus("Debug start requested"))
+                .catch((err) => setDebugAudioStatus(`Start failed: ${err}`, true));
+        });
+    }
+    if (stopBtn) {
+        stopBtn.addEventListener("click", () => {
+            stopAudioBridge({ keepDesired: false, silent: false })
+                .then(() => setDebugAudioStatus("Debug stop requested"))
+                .catch((err) => setDebugAudioStatus(`Stop failed: ${err}`, true));
+        });
+    }
+    if (refreshBtn) {
+        refreshBtn.addEventListener("click", () => {
+            refreshAudioDevices({ silent: false })
+                .then((ok) => setDebugAudioStatus(ok ? "Audio devices refreshed" : "Audio device refresh failed", !ok))
+                .catch((err) => setDebugAudioStatus(`Refresh failed: ${err}`, true));
+        });
+    }
 }
 
 // Send HOME command and then reset UI.
@@ -1100,20 +1461,17 @@ function initWebSocket() {
 
 // Show/hide connection modal
 function showConnectionModal(userInitiated = false) {
-  if (!userInitiated) {
-    return;
+  setRoute("auth");
+  ensureEndpointInputBindings();
+  initNknRouterUi();
+  const routerTargetInput = document.getElementById("routerNknAddressInput");
+  syncAdapterConnectionInputs();
+  if (routerTargetInput) {
+    routerTargetInput.value = routerTargetNknAddress || "";
   }
-  ensureConnectionModalBindings();
-  const modal = document.getElementById('connectionModal');
-  if (modal) {
-    modal.classList.add('active');
-    ensureEndpointInputBindings();
-    initNknRouterUi();
-    const routerTargetInput = document.getElementById("routerNknAddressInput");
-
-    syncAdapterConnectionInputs();
-    if (routerTargetInput) routerTargetInput.value = routerTargetNknAddress || '';
-    ensureBrowserNknIdentity();
+  ensureBrowserNknIdentity();
+  if (userInitiated || document.body.classList.contains("sidebar-collapsed")) {
+    setSidebarCollapsed(false, { persist: !!userInitiated });
   }
 }
 
@@ -5854,27 +6212,27 @@ async function ensureHybridAutoReady(initialRoute) {
 }
 
 window.addEventListener('load', async () => {
+  reorganizeUnifiedViews();
   initializeSidebarUi();
   initializeActionIcons();
-  initializeRouting();
   initializeControlsNav();
+  initializeRouting();
   const initialRoute = getRouteFromLocation();
-  ensureConnectionModalBindings();
   const queryConnection = parseConnectionFromQuery();
   ensureEndpointInputBindings();
   syncAdapterConnectionInputs({ preserveUserInput: true });
   initNknRouterUi();
   setupStreamConfigUi();
   setupHybridUi();
+  initializeDebugAudioActions();
+  updateMetrics();
 
   if (queryConnection.adapterConfigured && queryConnection.passwordProvided) {
     logToConsole("[CONNECT] Adapter and password found in query; attempting auto-connect...");
     const autoConnected = await authenticate(PASSWORD, WS_URL, HTTP_URL);
     if (autoConnected) {
-      if (WS_URL && initialRoute !== "orientation") {
+      if (WS_URL && routeAllowsWebSocket(initialRoute)) {
         initWebSocket();
-      } else {
-        hideConnectionModal();
       }
       await ensureHybridAutoReady(initialRoute);
       return;
@@ -5884,34 +6242,20 @@ window.addEventListener('load', async () => {
     return;
   }
 
-  // Check if we have a valid session
   if (SESSION_KEY && HTTP_URL) {
     logToConsole("[SESSION] Found saved session, attempting to reconnect...");
     metrics.connected = true;
     authenticated = true;
     updateMetrics();
 
-    // Try WebSocket if configured
-    if (WS_URL && initialRoute !== "orientation") {
+    if (WS_URL && routeAllowsWebSocket(initialRoute)) {
       initWebSocket();
-    } else {
-      hideConnectionModal();
     }
   } else if (queryConnection.adapterConfigured) {
-    // We have adapter URL but no session - show connection modal
     logToConsole("[CONNECT] Adapter URL configured, please authenticate...");
-    if (initialRoute !== "streams" && initialRoute !== "audio" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
-      showConnectionModal();
-    } else {
-      hideConnectionModal();
-    }
+    showConnectionModal();
   } else {
-    // Show connection modal on first load
-    if (initialRoute !== "streams" && initialRoute !== "audio" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
-      showConnectionModal();
-    } else {
-      hideConnectionModal();
-    }
+    logToConsole("[CONNECT] Configure service credentials on the Auth page.");
   }
 
   await ensureHybridAutoReady(initialRoute);

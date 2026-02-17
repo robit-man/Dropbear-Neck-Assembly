@@ -60,12 +60,24 @@
     </div>
   </div>
 
+  <header id="appTopHeader" class="app-top-header">
+    <div id="sidebarSwipeZone" class="sidebar-swipe-zone" aria-label="Swipe right to open menu"></div>
+    <div class="app-top-title">Dropbear Control</div>
+    <div class="service-chip-row">
+      <div id="svcChipRouter" class="service-chip">Router: --</div>
+      <div id="svcChipAdapter" class="service-chip">Adapter: --</div>
+      <div id="svcChipCamera" class="service-chip">Camera: --</div>
+      <div id="svcChipAudio" class="service-chip">Audio: --</div>
+      <div id="svcChipHybrid" class="service-chip">Hybrid: --</div>
+    </div>
+  </header>
+
   <div class="app-shell">
     <aside id="appSidebar" class="app-sidebar">
       <div class="sidebar-header">
-        <button id="sidebarToggleBtn" class="sidebar-toggle-btn" type="button" aria-expanded="true" aria-label="Collapse sidebar">
+        <button id="sidebarToggleBtn" class="sidebar-toggle-btn" type="button" aria-expanded="true" aria-label="Close sidebar">
           <span class="sidebar-toggle-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"></path></svg>
+            <svg viewBox="0 0 24 24"><path d="m6 6 12 12"></path><path d="m18 6-12 12"></path></svg>
           </span>
         </button>
         <div class="sidebar-brand">Dropbear Control</div>
@@ -96,38 +108,11 @@
           <summary>Navigation</summary>
           <nav>
             <div class="nav-container controls-nav" id="controlsNav">
-              <a href="#neck" class="nav-link" data-route="neck">Neck</a>
+              <a href="#auth" class="nav-link" data-route="auth">Auth</a>
               <a href="#hybrid" class="nav-link" data-route="hybrid">Hybrid</a>
-              <a href="#streams" class="nav-link" data-route="streams">Streams</a>
-              <a href="#audio" class="nav-link" data-route="audio">Audio</a>
-              <button id="controlsMenuToggleBtn" class="nav-link controls-menu-toggle" type="button" aria-expanded="false" aria-controls="controlsMenuPanel">
-                Controls
-              </button>
-              <button id="controlsCurrentRouteGhost" class="nav-link controls-current-ghost" type="button" disabled>
-                No Control Selected
-              </button>
-              <div id="controlsMenuPanel" class="controls-menu-panel" hidden>
-                <div class="controls-menu-stack">
-                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="direct">Direct Motor</div>
-                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="euler">Euler</div>
-                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="head">Full Head</div>
-                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="quaternion">Quaternion</div>
-                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="headstream">Morphtarget</div>
-                  <div class="controls-menu-option" role="button" tabindex="0" data-control-route="orientation">Orientation</div>
-                </div>
-              </div>
+              <a href="#debug" class="nav-link" data-route="debug">Debug</a>
             </div>
           </nav>
-        </details>
-
-        <details class="sidebar-section" open>
-          <summary>Actions</summary>
-          <div class="sidebar-action-stack">
-            <button onclick="showConnectionModal(true)" class="nav-button">Settings</button>
-            <button onclick="sendHomeCommand()" class="nav-button">Home Brute</button>
-            <button onclick="sendHomeSoftCommand()" class="nav-button">Home Soft</button>
-            <button onclick="resetAdapterPort(false)" class="nav-button">Reset Port</button>
-          </div>
         </details>
       </div>
     </aside>
@@ -135,6 +120,26 @@
 
     <main class="app-main">
       <div class="container">
+
+    <section class="view" data-view="auth">
+      <h2>Service Authentication</h2>
+      <details class="streams-panel" open>
+        <summary>Router NKN</summary>
+        <div id="authRouterMount" class="streams-panel-body"></div>
+      </details>
+      <details class="streams-panel" open>
+        <summary>Adapter Service</summary>
+        <div id="authAdapterMount" class="streams-panel-body"></div>
+      </details>
+      <details class="streams-panel" open>
+        <summary>Camera Service</summary>
+        <div id="authCameraMount" class="streams-panel-body"></div>
+      </details>
+      <details class="streams-panel" open>
+        <summary>Audio Service</summary>
+        <div id="authAudioMount" class="streams-panel-body"></div>
+      </details>
+    </section>
 
     <section class="view" data-view="connect">
       <h1>Robotic Neck Control</h1>
@@ -807,53 +812,108 @@
     </section>
 
     <section class="view" data-view="hybrid">
-      <h2>Hybrid Drive</h2>
-
-      <div class="control-section">
-        <h3 style="margin-top:0;">Feed Selection</h3>
-        <div id="hybridFeedButtons" class="hybrid-feed-buttons" role="group" aria-label="Available camera feeds"></div>
-        <p id="hybridStatus" style="margin:0.25rem 0 0 0;opacity:0.85;">Authenticate with camera router to load feeds.</p>
+      <h2>Hybrid Control</h2>
+      <div class="hybrid-tabs" role="tablist" aria-label="Hybrid Modes">
+        <button id="hybridTabTouchBtn" class="hybrid-tab active" data-hybrid-tab="touch" type="button">Touch</button>
+        <button id="hybridTabMorphBtn" class="hybrid-tab" data-hybrid-tab="morph" type="button">Morphtarget</button>
+        <button id="hybridTabOrientationBtn" class="hybrid-tab" data-hybrid-tab="orientation" type="button">Orientation</button>
       </div>
 
-      <div class="control-section">
-        <div class="section-header">
-          <h3 style="margin-top:0;">Preview + Motion Overlay</h3>
-          <button id="hybridRefreshFeedsBtn" type="button">Refresh Feeds</button>
+      <div id="hybridTabTouch" class="hybrid-tab-panel active">
+        <div class="control-section">
+          <h3 style="margin-top:0;">Feed Selection</h3>
+          <div id="hybridFeedButtons" class="hybrid-feed-buttons" role="group" aria-label="Available camera feeds"></div>
+          <p id="hybridStatus" style="margin:0.25rem 0 0 0;opacity:0.85;">Authenticate with camera router to load feeds.</p>
         </div>
-        <div class="hybrid-preview-layout">
-          <div id="hybridPreviewWrap" class="hybrid-preview-wrap">
-            <img id="hybridPreviewImage" alt="Hybrid Preview" style="display:none;">
-            <div id="hybridPreviewEmpty" class="hybrid-preview-empty">Authenticate and select a camera feed.</div>
-            <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
-            <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
-            <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Right">&#9654;</button>
-            <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
-            <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="8" aria-label="Yaw Left">&#9664;</button>
+
+        <div class="control-section">
+          <div class="section-header">
+            <h3 style="margin-top:0;">Preview + Motion Overlay</h3>
+            <button id="hybridRefreshFeedsBtn" type="button">Refresh Feeds</button>
           </div>
-          <div class="hybrid-height-control">
-            <label class="hybrid-height-label" for="hybridHeightSlider">Height</label>
-            <input id="hybridHeightSlider" class="hybrid-height-slider" type="range" min="0" max="70" step="1" value="0" aria-label="Hybrid height adjustment">
-            <output id="hybridHeightValue" class="hybrid-height-value" for="hybridHeightSlider">H0</output>
+          <div class="hybrid-preview-layout">
+            <div id="hybridPreviewWrap" class="hybrid-preview-wrap">
+              <img id="hybridPreviewImage" alt="Hybrid Preview" style="display:none;">
+              <div id="hybridPreviewEmpty" class="hybrid-preview-empty">Authenticate and select a camera feed.</div>
+              <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
+              <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
+              <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Right">&#9654;</button>
+              <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
+              <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="8" aria-label="Yaw Left">&#9664;</button>
+            </div>
+            <div class="hybrid-height-control">
+              <label class="hybrid-height-label" for="hybridHeightSlider">Height</label>
+              <input id="hybridHeightSlider" class="hybrid-height-slider" type="range" min="0" max="70" step="1" value="0" aria-label="Hybrid height adjustment">
+              <output id="hybridHeightValue" class="hybrid-height-value" for="hybridHeightSlider">H0</output>
+            </div>
           </div>
+          <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S1,A1,R0,P0</p>
+          <p class="hybrid-control-hint">
+            Left drag: yaw/pitch. Right drag (or Ctrl/Cmd + left drag): lateral/forward-back.
+            Middle drag (or Shift + left drag): roll/height.
+            Scroll or right slider: height. Hold arrows for continuous trim.
+          </p>
+          <div class="imu-readout-grid">
+            <div class="imu-readout-item">
+              <div class="imu-readout-label">Accel (m/s^2)</div>
+              <code id="hybridImuAccel" class="imu-readout-value">--</code>
+            </div>
+            <div class="imu-readout-item">
+              <div class="imu-readout-label">Gyro (rad/s)</div>
+              <code id="hybridImuGyro" class="imu-readout-value">--</code>
+            </div>
+          </div>
+          <p id="hybridImuMeta" class="imu-readout-meta">IMU idle</p>
         </div>
-        <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S1,A1,R0,P0</p>
-        <p class="hybrid-control-hint">
-          Left drag: yaw/pitch. Right drag (or Ctrl/Cmd + left drag): lateral/forward-back.
-          Middle drag (or Shift + left drag): roll/height.
-          Scroll or right slider: height. Hold arrows for continuous trim.
-        </p>
-        <div class="imu-readout-grid">
-          <div class="imu-readout-item">
-            <div class="imu-readout-label">Accel (m/s^2)</div>
-            <code id="hybridImuAccel" class="imu-readout-value">--</code>
-          </div>
-          <div class="imu-readout-item">
-            <div class="imu-readout-label">Gyro (rad/s)</div>
-            <code id="hybridImuGyro" class="imu-readout-value">--</code>
-          </div>
-        </div>
-        <p id="hybridImuMeta" class="imu-readout-meta">IMU idle</p>
+        <div id="hybridAudioMount"></div>
       </div>
+
+      <div id="hybridTabMorph" class="hybrid-tab-panel"></div>
+      <div id="hybridTabOrientation" class="hybrid-tab-panel"></div>
+    </section>
+
+    <section class="view" data-view="debug">
+      <h2>Debug</h2>
+      <details class="streams-panel" open>
+        <summary>Adapter Controls</summary>
+        <div class="streams-panel-body">
+          <div class="debug-tabs" role="tablist" aria-label="Debug Control Modes">
+            <button class="debug-tab active" data-debug-control="direct" type="button">Direct</button>
+            <button class="debug-tab" data-debug-control="euler" type="button">Euler</button>
+            <button class="debug-tab" data-debug-control="head" type="button">Head</button>
+            <button class="debug-tab" data-debug-control="quaternion" type="button">Quaternion</button>
+          </div>
+          <div id="debugControlMount"></div>
+        </div>
+      </details>
+      <details class="streams-panel">
+        <summary>Camera Stream Test</summary>
+        <div id="debugCameraMount" class="streams-panel-body"></div>
+      </details>
+      <details class="streams-panel">
+        <summary>Audio Stream Test</summary>
+        <div class="streams-panel-body">
+          <div id="debugAudioMount"></div>
+          <div class="control-section">
+            <div class="row">
+              <button id="debugAudioStartBtn" class="primary" type="button">Start Audio Bridge</button>
+              <button id="debugAudioStopBtn" type="button">Stop Audio Bridge</button>
+              <button id="debugAudioRefreshBtn" type="button">Refresh Audio Devices</button>
+            </div>
+            <p id="debugAudioStatus" class="imu-readout-meta">No debug audio actions yet.</p>
+          </div>
+        </div>
+      </details>
+      <details class="streams-panel">
+        <summary>Service Actions</summary>
+        <div class="streams-panel-body">
+          <div class="row">
+            <button onclick="sendHomeCommand()" type="button">Home Brute</button>
+            <button onclick="sendHomeSoftCommand()" type="button">Home Soft</button>
+            <button onclick="resetAdapterPort(false)" type="button">Reset Port</button>
+          </div>
+        </div>
+      </details>
     </section>
       </div>
 
