@@ -12,7 +12,8 @@
     --ui-control-font-weight: 700;
     --sidebar-width: 320px;
     --sidebar-peek-width: 0px;
-    --top-header-height: 94px;
+    --top-header-height: 74px;
+    --sidebar-top-offset: 8px;
 }
 
 * {
@@ -58,17 +59,9 @@ html {
     z-index: 980;
     display: flex;
     flex-direction: column;
-    justify-content: flex-start;
-    gap: 0.2rem;
-    padding: 0.35rem 0.7rem 0.45rem 0.7rem;
-}
-
-.app-top-title {
-    color: var(--accent);
-    font-weight: 800;
-    line-height: 1;
-    font-size: 0.84rem;
-    letter-spacing: 0.02em;
+    justify-content: center;
+    gap: 0;
+    padding: 0.3rem 0.7rem;
 }
 
 .service-chip-row {
@@ -171,7 +164,7 @@ html {
 
 .app-sidebar {
     position: fixed;
-    inset: var(--top-header-height) auto 0 0;
+    inset: calc(var(--top-header-height) + var(--sidebar-top-offset)) auto 0 0;
     width: var(--sidebar-width);
     background: linear-gradient(180deg, #171717 0%, #121212 100%);
     border-right: 2px solid var(--border-dark);
@@ -187,9 +180,10 @@ html {
     position: relative;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 0.4rem;
-    padding: 0.7rem;
+    justify-content: flex-end;
+    gap: 0;
+    min-height: 2.4rem;
+    padding: 0.35rem;
     border-bottom: 2px solid var(--border-dark);
     background: rgba(0, 0, 0, 0.2);
 }
@@ -226,15 +220,6 @@ html {
     stroke-width: 2.2;
     stroke-linecap: round;
     stroke-linejoin: round;
-}
-
-.sidebar-brand {
-    font-size: 1rem;
-    font-weight: 800;
-    color: var(--accent);
-    white-space: nowrap;
-    padding-right: 3rem;
-    transition: opacity 0.16s ease;
 }
 
 .sidebar-content {
@@ -350,7 +335,6 @@ body.sidebar-collapsed .sidebar-header {
     padding: 0.35rem 0.35rem;
 }
 
-body.sidebar-collapsed .sidebar-brand,
 body.sidebar-collapsed .sidebar-content {
     opacity: 0;
     pointer-events: none;
@@ -363,7 +347,7 @@ body.sidebar-collapsed .app-main {
 
 .sidebar-scrim {
     position: fixed;
-    inset: var(--top-header-height) 0 0 0;
+    inset: calc(var(--top-header-height) + var(--sidebar-top-offset)) 0 0 0;
     z-index: 850;
     background: rgba(0, 0, 0, 0.38);
     display: none;
@@ -1432,7 +1416,8 @@ h3 {
 
 @media (max-width: 900px) {
     :root {
-        --top-header-height: 98px;
+        --top-header-height: 78px;
+        --sidebar-top-offset: 10px;
     }
 
     .app-sidebar {
