@@ -6773,6 +6773,13 @@ function setupHybridUi() {
     });
   }
 
+  const homeSoftBtn = document.getElementById("hybridHomeSoftBtn");
+  if (homeSoftBtn) {
+    homeSoftBtn.addEventListener("click", () => {
+      sendHomeSoftCommand();
+    });
+  }
+
   const heightSlider = document.getElementById("hybridHeightSlider");
   if (heightSlider) {
     const onHeightSlide = () => {
