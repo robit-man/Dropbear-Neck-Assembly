@@ -9,6 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/tweetnacl@1.0.3/nacl-fast.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/nkn-sdk@1.3.6/dist/nkn.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
   <script type="importmap">
   {
     "imports": {
@@ -36,6 +37,7 @@
         <div class="row">
           <button id="routerResolveBtn" class="primary">Resolve Endpoints via NKN DM</button>
           <button id="routerRefreshInfoBtn">Reconnect Browser NKN</button>
+          <button id="routerScanQrBtn" type="button">Scan Router QR</button>
         </div>
         <div class="nkn-identity-grid">
           <div class="nkn-identity-meta">
@@ -45,6 +47,13 @@
             <code id="browserNknPubkey" class="nkn-code">Pending...</code>
           </div>
           <div id="browserNknQr" class="nkn-qr" aria-label="Browser NKN pubkey QR"></div>
+        </div>
+        <div id="routerQrScannerPanel" class="nkn-scan-panel" hidden>
+          <video id="routerQrScannerVideo" class="nkn-scan-video" autoplay muted playsinline></video>
+          <div class="row">
+            <button id="routerQrScannerStopBtn" type="button">Stop Scan</button>
+            <span id="routerQrScannerStatus" class="nkn-scan-status">Scanner idle</span>
+          </div>
         </div>
         <p id="routerResolveStatus" style="overflow:auto;font-size:0.85rem;opacity:0.85;margin:0.5rem 0 0 0;">NKN idle</p>
       </div>

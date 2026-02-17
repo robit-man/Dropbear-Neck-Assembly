@@ -1846,6 +1846,29 @@ ROUTER_DASHBOARD_HTML = """
         padding: 0.5rem;
         cursor: pointer;
       }
+      .router-qr {
+        width: 132px;
+        height: 132px;
+        padding: 4px;
+        border: 1px solid #444;
+        border-radius: 8px;
+        background: #fff;
+        color: #111;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 0.72rem;
+      }
+      .router-qr.empty {
+        background: #1b1b1b;
+        color: #bcbcbc;
+      }
+      .router-qr img,
+      .router-qr canvas {
+        width: 100% !important;
+        height: 100% !important;
+        display: block;
+      }
       .cards {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1928,6 +1951,10 @@ ROUTER_DASHBOARD_HTML = """
           <button id="refreshNowBtn" type="button">Refresh Now</button>
           <span class="small muted" id="copyStatus"></span>
         </div>
+        <div class="row" style="margin-top:10px">
+          <div id="routerAddressQr" class="router-qr empty">QR pending</div>
+          <span class="small muted">Scan this QR from the docs Settings modal to import router NKN address.</span>
+        </div>
       </div>
 
       <div class="panel">
@@ -1987,11 +2014,13 @@ ROUTER_DASHBOARD_HTML = """
       </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js"></script>
     <script>
       var state = {
         history: [],
         refreshEveryMs: 1000,
         lastAddress: "",
+        lastQrText: "",
         polling: false
       };
 
@@ -2182,6 +2211,38 @@ ROUTER_DASHBOARD_HTML = """
         fallbackCopyAddress(addr, status);
       }
 
+      function renderAddressQr(rawAddress) {
+        var qrNode = document.getElementById("routerAddressQr");
+        if (!qrNode) return;
+
+        var text = normalizeAddress(rawAddress);
+        if (!text || text === "N/A") {
+          state.lastQrText = "";
+          qrNode.className = "router-qr empty";
+          qrNode.textContent = "QR pending";
+          return;
+        }
+        if (state.lastQrText === text) {
+          return;
+        }
+        state.lastQrText = text;
+        qrNode.innerHTML = "";
+        qrNode.className = "router-qr";
+
+        if (typeof QRCode === "undefined") {
+          qrNode.className = "router-qr empty";
+          qrNode.textContent = "QR lib missing";
+          return;
+        }
+
+        new QRCode(qrNode, {
+          text: text,
+          width: 124,
+          height: 124,
+          correctLevel: QRCode.CorrectLevel.M,
+        });
+      }
+
       function hydrateAddressFromInfo(done) {
         fetchJson("/nkn/info?t=" + nowMs(), 4500, function (err, res, info) {
           if (err || !res || res.status < 200 || res.status >= 300 || !info || info.status !== "success") {
@@ -2275,6 +2336,7 @@ ROUTER_DASHBOARD_HTML = """
 
         var routerAddressNode = document.getElementById("routerAddress");
         if (routerAddressNode) routerAddressNode.textContent = state.lastAddress;
+        renderAddressQr(state.lastAddress);
 
         var ready = typeof infoReady === "boolean" ? infoReady : !!nkn.ready;
         var readyState = document.getElementById("readyState");

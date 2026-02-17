@@ -377,6 +377,31 @@ body.sidebar-collapsed .app-main {
     display: block;
 }
 
+.nkn-scan-panel {
+    margin-top: 0.4rem;
+    padding: 0.55rem;
+    border: 1px solid var(--border-light);
+    border-radius: 0.45rem;
+    background: var(--bg-secondary);
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+}
+
+.nkn-scan-video {
+    width: 100%;
+    max-height: 260px;
+    border: 1px solid var(--border-light);
+    border-radius: 0.35rem;
+    background: #000;
+    object-fit: cover;
+}
+
+.nkn-scan-status {
+    font-size: 0.82rem;
+    opacity: 0.86;
+}
+
 /* Metrics Display */
 .metrics-bar {
     display: flex;
@@ -1295,6 +1320,10 @@ h3 {
 
     .nkn-qr {
         justify-self: start;
+    }
+
+    .nkn-scan-video {
+        max-height: 200px;
     }
 
     .controls-menu-option {

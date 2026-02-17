@@ -68,6 +68,8 @@ const BUTTON_ICON_BY_ID = Object.freeze({
     connectionModalCloseBtn: "close",
     routerResolveBtn: "send",
     routerRefreshInfoBtn: "refresh",
+    routerScanQrBtn: "target",
+    routerQrScannerStopBtn: "stop",
     controlsMenuToggleBtn: "sliders",
     pinnedStreamCloseBtn: "close",
 });
@@ -1174,6 +1176,7 @@ function hideConnectionModal() {
   if (modal) {
     modal.classList.remove('active');
   }
+  stopRouterQrScanner({ quiet: true });
 }
 
 let connectionModalBindingsInstalled = false;
@@ -1489,6 +1492,7 @@ const ROUTER_NKN_RESOLVE_TIMEOUT_MS = 14000;
 const ROUTER_NKN_AUTO_RESOLVE_INTERVAL_MS = 45000;
 const ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS = 4;
 const ROUTER_NKN_SEND_RETRY_DELAY_MS = 450;
+const ROUTER_QR_SCAN_INTERVAL_MS = 140;
 
 let nknUiInitialized = false;
 let browserNknClient = null;
@@ -1498,6 +1502,13 @@ let nknClientInitPromise = null;
 let nknResolveInFlight = false;
 let routerAutoResolveTimer = null;
 const pendingNknResolveRequests = new Map();
+let routerQrScannerActive = false;
+let routerQrScannerTimer = null;
+let routerQrScannerStream = null;
+let routerQrScannerCanvas = null;
+let routerQrScannerCtx = null;
+let routerQrScannerDetector = null;
+let routerQrScannerDecoding = false;
 
 function bytesToHex(bytes) {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -1557,6 +1568,274 @@ function renderBrowserNknQr(text) {
     height: 112,
     correctLevel: QRCode.CorrectLevel.M,
   });
+}
+
+function setRouterQrScannerStatus(message, error = false) {
+  const statusEl = document.getElementById("routerQrScannerStatus");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = String(message || "");
+  statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function setRouterQrScannerUiState(active) {
+  const scanBtn = document.getElementById("routerScanQrBtn");
+  const stopBtn = document.getElementById("routerQrScannerStopBtn");
+  if (scanBtn) {
+    scanBtn.disabled = !!active;
+    scanBtn.textContent = active ? "Scanning..." : "Scan Router QR";
+  }
+  if (stopBtn) {
+    stopBtn.disabled = !active;
+  }
+}
+
+function extractRouterNknAddressFromQr(rawValue) {
+  const text = String(rawValue || "").trim();
+  if (!text) {
+    return "";
+  }
+
+  const candidates = [];
+  const pushCandidate = (value) => {
+    const cleaned = String(value || "").trim();
+    if (cleaned) {
+      candidates.push(cleaned);
+    }
+  };
+
+  pushCandidate(text);
+  if (/^nkn:/i.test(text)) {
+    pushCandidate(text.replace(/^nkn:/i, ""));
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      pushCandidate(parsed.router_address);
+      pushCandidate(parsed.target_address);
+      pushCandidate(parsed.nkn_address);
+      pushCandidate(parsed.address);
+      if (parsed.nkn && typeof parsed.nkn === "object") {
+        pushCandidate(parsed.nkn.address);
+      }
+    }
+  } catch (err) {}
+
+  try {
+    const parsedUrl = new URL(text);
+    ["nkn", "router_nkn", "router_address", "target_address", "address"].forEach((key) => {
+      pushCandidate(parsedUrl.searchParams.get(key));
+    });
+    if (parsedUrl.hash) {
+      pushCandidate(parsedUrl.hash.replace(/^#/, ""));
+    }
+  } catch (err) {}
+
+  const prefixedMatch = text.match(/[a-zA-Z0-9._-]+\.[0-9a-fA-F]{64}/);
+  if (prefixedMatch) {
+    pushCandidate(prefixedMatch[0]);
+  }
+  const hexMatch = text.match(/[0-9a-fA-F]{64}/);
+  if (hexMatch) {
+    pushCandidate(hexMatch[0]);
+  }
+
+  for (const candidate of candidates) {
+    const normalized = normalizeRouterNknTarget(candidate);
+    if (isLikelyNknAddress(normalized)) {
+      return normalized;
+    }
+  }
+  return "";
+}
+
+function consumeRouterNknAddressFromQr(rawValue) {
+  const normalized = extractRouterNknAddressFromQr(rawValue);
+  if (!normalized) {
+    setRouterQrScannerStatus("QR decoded, but no valid router NKN address found", true);
+    return false;
+  }
+
+  const targetInput = document.getElementById("routerNknAddressInput");
+  if (targetInput) {
+    targetInput.value = normalized;
+  }
+  routerTargetNknAddress = normalized;
+  localStorage.setItem("routerTargetNknAddress", routerTargetNknAddress);
+  setRouterQrScannerStatus(`Scanned ${normalized}`);
+  setRouterResolveStatus(`Scanned router QR: ${normalized}; resolving...`);
+  stopRouterQrScanner({ quiet: true });
+  resolveEndpointsViaNkn({ auto: false }).catch(() => {});
+  return true;
+}
+
+function scheduleRouterQrScannerTick(delayMs = ROUTER_QR_SCAN_INTERVAL_MS) {
+  if (!routerQrScannerActive) {
+    return;
+  }
+  if (routerQrScannerTimer) {
+    clearTimeout(routerQrScannerTimer);
+  }
+  routerQrScannerTimer = setTimeout(() => {
+    routerQrScannerTick().catch((err) => {
+      setRouterQrScannerStatus(`Scanner error: ${err}`, true);
+      scheduleRouterQrScannerTick(ROUTER_QR_SCAN_INTERVAL_MS * 2);
+    });
+  }, Math.max(40, Number(delayMs) || ROUTER_QR_SCAN_INTERVAL_MS));
+}
+
+async function routerQrScannerTick() {
+  if (!routerQrScannerActive) {
+    return;
+  }
+  const videoEl = document.getElementById("routerQrScannerVideo");
+  if (!videoEl || videoEl.readyState < 2 || !videoEl.videoWidth || !videoEl.videoHeight) {
+    scheduleRouterQrScannerTick();
+    return;
+  }
+
+  let decodedText = "";
+  if (routerQrScannerDetector && !routerQrScannerDecoding) {
+    routerQrScannerDecoding = true;
+    try {
+      const detections = await routerQrScannerDetector.detect(videoEl);
+      if (Array.isArray(detections) && detections.length > 0) {
+        decodedText = String(detections[0].rawValue || "").trim();
+      }
+    } catch (err) {}
+    routerQrScannerDecoding = false;
+  }
+
+  if (!decodedText && typeof jsQR === "function") {
+    const width = Math.max(80, Math.min(960, Number(videoEl.videoWidth) || 0));
+    const height = Math.max(80, Math.round(width * ((Number(videoEl.videoHeight) || 1) / (Number(videoEl.videoWidth) || 1))));
+    if (!routerQrScannerCanvas) {
+      routerQrScannerCanvas = document.createElement("canvas");
+      routerQrScannerCtx = routerQrScannerCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    if (routerQrScannerCanvas.width !== width || routerQrScannerCanvas.height !== height) {
+      routerQrScannerCanvas.width = width;
+      routerQrScannerCanvas.height = height;
+    }
+    if (routerQrScannerCtx) {
+      routerQrScannerCtx.drawImage(videoEl, 0, 0, width, height);
+      const imageData = routerQrScannerCtx.getImageData(0, 0, width, height);
+      const qrResult = jsQR(imageData.data, width, height, { inversionAttempts: "dontInvert" });
+      if (qrResult && qrResult.data) {
+        decodedText = String(qrResult.data || "").trim();
+      }
+    }
+  }
+
+  if (decodedText && consumeRouterNknAddressFromQr(decodedText)) {
+    return;
+  }
+  scheduleRouterQrScannerTick();
+}
+
+function stopRouterQrScanner(options = {}) {
+  const quiet = !!options.quiet;
+  const keepPanelOpen = !!options.keepPanelOpen;
+
+  routerQrScannerActive = false;
+  routerQrScannerDecoding = false;
+  if (routerQrScannerTimer) {
+    clearTimeout(routerQrScannerTimer);
+    routerQrScannerTimer = null;
+  }
+  if (routerQrScannerStream) {
+    try {
+      routerQrScannerStream.getTracks().forEach((track) => track.stop());
+    } catch (err) {}
+    routerQrScannerStream = null;
+  }
+
+  const videoEl = document.getElementById("routerQrScannerVideo");
+  if (videoEl) {
+    try {
+      videoEl.pause();
+    } catch (err) {}
+    videoEl.srcObject = null;
+  }
+
+  const panel = document.getElementById("routerQrScannerPanel");
+  if (panel && !keepPanelOpen) {
+    panel.hidden = true;
+  }
+  setRouterQrScannerUiState(false);
+  if (!quiet) {
+    setRouterQrScannerStatus("Scanner stopped");
+  }
+}
+
+async function startRouterQrScanner() {
+  if (routerQrScannerActive) {
+    return true;
+  }
+
+  const panel = document.getElementById("routerQrScannerPanel");
+  const videoEl = document.getElementById("routerQrScannerVideo");
+  if (!panel || !videoEl) {
+    setRouterResolveStatus("QR scanner UI unavailable", true);
+    return false;
+  }
+  if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+    setRouterQrScannerStatus("Camera scanning unsupported in this browser", true);
+    setRouterResolveStatus("Camera scanning unsupported in this browser", true);
+    return false;
+  }
+
+  stopRouterQrScanner({ quiet: true, keepPanelOpen: true });
+  panel.hidden = false;
+  setRouterQrScannerUiState(true);
+  setRouterQrScannerStatus("Requesting camera access...");
+
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: "environment" },
+      },
+      audio: false,
+    });
+  } catch (firstErr) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    } catch (secondErr) {
+      setRouterQrScannerUiState(false);
+      setRouterQrScannerStatus(`Camera permission failed: ${secondErr}`, true);
+      setRouterResolveStatus(`Camera permission failed: ${secondErr}`, true);
+      return false;
+    }
+  }
+
+  routerQrScannerStream = stream;
+  videoEl.srcObject = stream;
+  try {
+    await videoEl.play();
+  } catch (err) {}
+
+  routerQrScannerDetector = null;
+  if (typeof BarcodeDetector !== "undefined") {
+    try {
+      routerQrScannerDetector = new BarcodeDetector({ formats: ["qr_code"] });
+    } catch (err) {
+      routerQrScannerDetector = null;
+    }
+  }
+
+  if (!routerQrScannerDetector && typeof jsQR !== "function") {
+    setRouterQrScannerStatus("No QR decode backend available (BarcodeDetector/jsQR missing)", true);
+    stopRouterQrScanner({ quiet: true });
+    return false;
+  }
+
+  routerQrScannerActive = true;
+  setRouterQrScannerStatus("Scanning for router QR...");
+  scheduleRouterQrScannerTick(120);
+  return true;
 }
 
 function ensureBrowserNknIdentity() {
@@ -2354,6 +2633,8 @@ function initNknRouterUi() {
   const targetInput = document.getElementById("routerNknAddressInput");
   const resolveBtn = document.getElementById("routerResolveBtn");
   const refreshBtn = document.getElementById("routerRefreshInfoBtn");
+  const scanBtn = document.getElementById("routerScanQrBtn");
+  const scanStopBtn = document.getElementById("routerQrScannerStopBtn");
 
   if (targetInput) {
     targetInput.value = routerTargetNknAddress;
@@ -2376,8 +2657,26 @@ function initNknRouterUi() {
       refreshNknClientInfo({ forceReconnect: true, resolveNow: true }).catch(() => {});
     });
   }
+  if (scanBtn) {
+    scanBtn.addEventListener("click", () => {
+      startRouterQrScanner().catch((err) => {
+        setRouterQrScannerUiState(false);
+        setRouterQrScannerStatus(`Scanner start failed: ${err}`, true);
+      });
+    });
+  }
+  if (scanStopBtn) {
+    scanStopBtn.addEventListener("click", () => {
+      stopRouterQrScanner({ quiet: false });
+    });
+  }
 
   ensureBrowserNknIdentity();
+  setRouterQrScannerUiState(false);
+  setRouterQrScannerStatus("Scanner idle");
+  window.addEventListener("beforeunload", () => {
+    stopRouterQrScanner({ quiet: true });
+  });
   startRouterAutoResolveTimer();
   refreshNknClientInfo({ resolveNow: true }).catch(() => {});
 }
