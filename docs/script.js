@@ -1250,6 +1250,7 @@ function initializeDebugAudioActions() {
         return;
     }
     debugAudioActionsInitialized = true;
+    installAudioPlaybackGestureHooks();
 
     const startBtn = document.getElementById("debugAudioStartBtn");
     const stopBtn = document.getElementById("debugAudioStopBtn");
@@ -3950,16 +3951,18 @@ const HYBRID_POSE_LIMITS = Object.freeze({
   Y: { min: -800, max: 800 },
   Z: { min: -800, max: 800 },
   H: { min: 0, max: 70 },
-  R: { min: -800, max: 800 },
-  P: { min: -800, max: 800 },
+  S: { min: 0.6, max: 0.6 },
+  A: { min: 0.4, max: 0.4 },
+  R: { min: -300, max: 300 },
+  P: { min: -300, max: 300 },
 });
 const hybridPose = {
   X: 0,
   Y: 0,
   Z: 0,
   H: 0,
-  S: 0.8,
-  A: 0.8,
+  S: 0.6,
+  A: 0.4,
   R: 0,
   P: 0,
 };
@@ -3991,6 +3994,7 @@ let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
 let cameraSessionRotateInFlight = false;
 let cameraSelectInteractionUntilMs = 0;
+const cameraProfileDraftByFeed = Object.create(null);
 let cameraShareButtonResetTimer = null;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
@@ -4031,6 +4035,7 @@ const audioBridge = {
 let audioPlaybackUnlockContext = null;
 let audioPlaybackUnlockInFlight = null;
 let audioPlaybackUnlocked = false;
+let audioPlaybackGestureHooksInstalled = false;
 
 function normalizeOrigin(rawInput) {
   const trimmed = (rawInput || "").trim();
@@ -5208,6 +5213,51 @@ function profileMatches(a, b) {
   return pixA === pixB && wA === wB && hA === hB && Math.abs(fpsA - fpsB) < 0.6;
 }
 
+function cameraProfileKey(profile) {
+  if (!profile) {
+    return "";
+  }
+  const pix = String(profile.pixel_format || "").toUpperCase();
+  const width = Number(profile.width) || 0;
+  const height = Number(profile.height) || 0;
+  const fps = Number(profile.fps) || 0;
+  return `${pix}|${width}|${height}|${fps.toFixed(3)}`;
+}
+
+function setCameraProfileDraft(cameraId, profile) {
+  const key = String(cameraId || "").trim();
+  const profileKey = cameraProfileKey(profile);
+  if (!key || !profileKey) {
+    return;
+  }
+  cameraProfileDraftByFeed[key] = profileKey;
+}
+
+function clearCameraProfileDraft(cameraId) {
+  const key = String(cameraId || "").trim();
+  if (!key) {
+    return;
+  }
+  delete cameraProfileDraftByFeed[key];
+}
+
+function getCameraProfileDraft(cameraId) {
+  const key = String(cameraId || "").trim();
+  if (!key) {
+    return "";
+  }
+  return String(cameraProfileDraftByFeed[key] || "");
+}
+
+function hasPendingCameraProfileSelection() {
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  const cameraId = String((feedSelect && feedSelect.value) || "").trim();
+  if (!cameraId) {
+    return false;
+  }
+  return !!getCameraProfileDraft(cameraId);
+}
+
 function renderCameraProfileOptions(cameraId) {
   const profileSelect = document.getElementById("cameraProfileSelect");
   const profileStatus = document.getElementById("cameraProfileStatus");
@@ -5235,6 +5285,8 @@ function renderCameraProfileOptions(cameraId) {
   const profiles = Array.isArray(feed.available_profiles) ? feed.available_profiles : [];
   const currentProfile = feed.capture_profile || null;
   const isMutable = String(feed.source_type || "") === "default";
+  const draftKey = getCameraProfileDraft(cameraId);
+  let draftMatched = false;
   let selectedIndex = 0;
 
   if (profiles.length > 0) {
@@ -5242,11 +5294,20 @@ function renderCameraProfileOptions(cameraId) {
       const opt = document.createElement("option");
       opt.value = String(idx);
       opt.textContent = formatProfileOption(profile);
+      opt.dataset.profileKey = cameraProfileKey(profile);
       profileSelect.appendChild(opt);
-      if (currentProfile && profileMatches(profile, currentProfile)) {
+      if (draftKey && opt.dataset.profileKey === draftKey) {
+        selectedIndex = idx;
+        draftMatched = true;
+        return;
+      }
+      if (!draftKey && currentProfile && profileMatches(profile, currentProfile)) {
         selectedIndex = idx;
       }
     });
+    if (draftKey && !draftMatched) {
+      clearCameraProfileDraft(cameraId);
+    }
     profileSelect.value = String(selectedIndex);
     profileSelect.disabled = !isMutable;
   } else {
@@ -5303,6 +5364,11 @@ async function applySelectedCameraProfile() {
     setStreamStatus("No profile available to apply", true);
     return;
   }
+  if (feed.capture_profile && profileMatches(requestedProfile, feed.capture_profile)) {
+    clearCameraProfileDraft(cameraId);
+    setStreamStatus(`Capture profile already active on ${cameraId}`);
+    return;
+  }
 
   try {
     setStreamStatus(`Applying profile to ${cameraId}...`);
@@ -5320,6 +5386,7 @@ async function applySelectedCameraProfile() {
       throw new Error(data.message || `HTTP ${response.status}`);
     }
 
+    clearCameraProfileDraft(cameraId);
     await refreshCameraFeeds({ silent: true, suppressErrors: true });
     renderCameraProfileOptions(cameraId);
     setStreamStatus(`Applied profile on ${cameraId}`);
@@ -5380,7 +5447,7 @@ async function refreshCameraFeeds(options = {}) {
       };
       startCameraImuStream();
     }
-    const preserveSelectors = silent && isCameraSelectInteractionActive();
+    const preserveSelectors = silent && (isCameraSelectInteractionActive() || hasPendingCameraProfileSelection());
     renderCameraFeedOptions({ preserveSelectors });
     refreshCameraImu({ silent: true }).catch(() => {});
     syncPinnedPreviewSource();
@@ -5771,7 +5838,24 @@ function setupStreamConfigUi() {
       markCameraSelectInteraction(350);
     });
     profileSelect.addEventListener("change", () => {
-      markCameraSelectInteraction(350);
+      markCameraSelectInteraction(12000);
+      const cameraId = String((feedSelect && feedSelect.value) || "").trim();
+      const feed = cameraRouterFeeds.find((item) => item.id === cameraId) || null;
+      if (!cameraId || !feed) {
+        return;
+      }
+      const profiles = Array.isArray(feed.available_profiles) ? feed.available_profiles : [];
+      const selectedIndex = parseInt(profileSelect.value, 10);
+      if (profiles.length > 0 && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < profiles.length) {
+        const selectedProfile = profiles[selectedIndex];
+        if (feed.capture_profile && profileMatches(selectedProfile, feed.capture_profile)) {
+          clearCameraProfileDraft(cameraId);
+        } else {
+          setCameraProfileDraft(cameraId, selectedProfile);
+        }
+      } else {
+        clearCameraProfileDraft(cameraId);
+      }
     });
   }
   if (modeSelect) {
@@ -5838,6 +5922,23 @@ function setAudioConnectionMeta(message, error = false) {
   metaEl.style.color = error ? "#ff4444" : "var(--accent)";
 }
 
+function installAudioPlaybackGestureHooks() {
+  if (audioPlaybackGestureHooksInstalled) {
+    return;
+  }
+  audioPlaybackGestureHooksInstalled = true;
+  const resumePlayback = () => {
+    requestAudioAutoplayUnlock().catch(() => {});
+    const audioEl = document.getElementById("audioRemotePlayer");
+    if (audioEl && audioEl.srcObject) {
+      playRemoteAudioElement(audioEl).catch(() => {});
+    }
+  };
+  ["pointerdown", "touchstart", "keydown"].forEach((eventName) => {
+    window.addEventListener(eventName, resumePlayback, { passive: true });
+  });
+}
+
 function requestAudioAutoplayUnlock() {
   if (audioPlaybackUnlocked) {
     return Promise.resolve(true);
@@ -5893,6 +5994,9 @@ function requestAudioAutoplayUnlock() {
     }
 
     audioPlaybackUnlocked = audioPlaybackUnlocked || unlocked;
+    if (audioPlaybackUnlocked && audioEl && audioEl.srcObject) {
+      await playRemoteAudioElement(audioEl).catch(() => false);
+    }
     return audioPlaybackUnlocked;
   })().finally(() => {
     audioPlaybackUnlockInFlight = null;
@@ -6423,8 +6527,18 @@ async function startAudioBridge(options = {}) {
         return;
       }
       audioEl.srcObject = stream;
+      audioEl.autoplay = true;
+      audioEl.setAttribute("playsinline", "");
+      audioEl.volume = 1;
       audioEl.muted = false;
-      playRemoteAudioElement(audioEl).catch(() => {});
+      const replay = () => {
+        playRemoteAudioElement(audioEl).catch(() => {});
+      };
+      audioEl.addEventListener("loadedmetadata", replay, { once: true });
+      audioEl.addEventListener("canplay", replay, { once: true });
+      requestAudioAutoplayUnlock()
+        .catch(() => false)
+        .finally(replay);
     };
 
     peer.onconnectionstatechange = () => {
@@ -6474,6 +6588,7 @@ function setupAudioConfigUi() {
     return;
   }
   audioUiInitialized = true;
+  installAudioPlaybackGestureHooks();
 
   const baseInput = document.getElementById("audioRouterBaseInput");
   const passInput = document.getElementById("audioRouterPasswordInput");
@@ -6565,7 +6680,7 @@ function setHybridPreviewAspect(width, height) {
 }
 
 function resetHybridPoseState() {
-  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.8, A: 0.8, R: 0, P: 0 };
+  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.6, A: 0.4, R: 0, P: 0 };
   Object.keys(defaults).forEach((axis) => {
     hybridPose[axis] = defaults[axis];
   });
@@ -6575,14 +6690,11 @@ function resetHybridPoseState() {
 }
 
 function hybridClampValue(axis, value) {
+  const limits = HYBRID_POSE_LIMITS[axis];
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
-    return 0;
+    return limits ? limits.min : 0;
   }
-  if (axis === "S" || axis === "A") {
-    return Math.max(0, Math.min(10, numeric));
-  }
-  const limits = HYBRID_POSE_LIMITS[axis];
   if (!limits) {
     return numeric;
   }
@@ -6590,7 +6702,7 @@ function hybridClampValue(axis, value) {
 }
 
 function hybridSyncPoseFromHeadControls() {
-  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.8, A: 0.8, R: 0, P: 0 };
+  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.6, A: 0.4, R: 0, P: 0 };
   Object.keys(defaults).forEach((axis) => {
     const el = document.getElementById(axis);
     const fallback = defaults[axis];

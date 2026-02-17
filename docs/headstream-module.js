@@ -30,8 +30,8 @@ const defaultTuneables = {
   heightGain: 2.5,
   smoothAlpha: 0.45,
   commandIntervalMs: COMMAND_INTERVAL_MS,
-  speed: 0.8,
-  acceleration: 0.6,
+  speed: 0.6,
+  acceleration: 0.4,
   offsetX: 0,
   offsetY: 0,
   offsetZ: 0,
@@ -345,8 +345,8 @@ function buildPoseCommand(transformObj, euler) {
   const yVal = Math.round(clamp(smoothed.lateral + tuneables.offsetY, -700, 700));
   const zVal = Math.round(clamp(smoothed.frontBack + tuneables.offsetZ, -700, 700));
   const hVal = Math.round(clamp(smoothed.height + tuneables.offsetH, 0, 70));
-  const rVal = Math.round(clamp(smoothed.roll + tuneables.offsetR, -700, 700));
-  const pVal = Math.round(clamp(smoothed.pitch + tuneables.offsetP, -700, 700));
+  const rVal = Math.round(clamp(smoothed.roll + tuneables.offsetR, -300, 300));
+  const pVal = Math.round(clamp(smoothed.pitch + tuneables.offsetP, -300, 300));
   const sVal = clamp(tuneables.speed, 0, 10);
   const aVal = clamp(tuneables.acceleration, 0, 10);
 

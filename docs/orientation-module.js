@@ -3,6 +3,7 @@ import * as THREE from "three";
 const PROJECTION_STORAGE_KEY = "orientationProjectionMode";
 
 const COMMAND_LIMIT = 700;
+const ROLL_PITCH_LIMIT = 300;
 const HEIGHT_MIN = 0;
 const HEIGHT_MAX = 70;
 const SPHERE_RADIUS = 6.0;
@@ -18,8 +19,8 @@ const defaultTuneables = {
   accelHGain: 11.0,
   smoothAlpha: 0.42,
   commandIntervalMs: 85,
-  speed: 0.8,
-  acceleration: 0.6,
+  speed: 0.6,
+  acceleration: 0.4,
   offsetX: 0,
   offsetY: 0,
   offsetZ: 0,
@@ -420,8 +421,8 @@ function buildCommand(snapshot) {
   const yVal = Math.round(clamp(state.smoothed.lateral + tuneables.offsetY, -COMMAND_LIMIT, COMMAND_LIMIT));
   const zVal = Math.round(clamp(state.smoothed.frontBack + tuneables.offsetZ, -COMMAND_LIMIT, COMMAND_LIMIT));
   const hVal = Math.round(clamp(state.smoothed.height + tuneables.offsetH, HEIGHT_MIN, HEIGHT_MAX));
-  const rVal = Math.round(clamp((-state.smoothed.roll) + tuneables.offsetR, -COMMAND_LIMIT, COMMAND_LIMIT));
-  const pVal = Math.round(clamp((-state.smoothed.pitch) + tuneables.offsetP, -COMMAND_LIMIT, COMMAND_LIMIT));
+  const rVal = Math.round(clamp((-state.smoothed.roll) + tuneables.offsetR, -ROLL_PITCH_LIMIT, ROLL_PITCH_LIMIT));
+  const pVal = Math.round(clamp((-state.smoothed.pitch) + tuneables.offsetP, -ROLL_PITCH_LIMIT, ROLL_PITCH_LIMIT));
 
   const speed = clamp(tuneables.speed, 0, 10);
   const accel = clamp(tuneables.acceleration, 0, 10);

@@ -337,6 +337,22 @@ def _unregister_active_capture_handle(feed_id, handle):
             active_capture_handles.pop(key, None)
 
 
+def _release_active_capture_handles(feed_id):
+    key = str(feed_id or "").strip()
+    if not key:
+        return 0
+    with active_capture_handles_lock:
+        handles = list(active_capture_handles.pop(key, []))
+    released = 0
+    for handle in handles:
+        try:
+            handle.release()
+            released += 1
+        except Exception:
+            pass
+    return released
+
+
 def _release_all_active_capture_handles():
     with active_capture_handles_lock:
         handles = []
@@ -4062,6 +4078,7 @@ def stream_options_for_camera(camera_id):
         changed = False
         applied_profile = current_profile
         next_revision = current_revision
+        released_handles = 0
         if profile_requested:
             requested = payload.get("profile", payload)
             if not isinstance(requested, dict):
@@ -4103,6 +4120,13 @@ def stream_options_for_camera(camera_id):
                 }
 
             changed, applied_profile, next_revision = feed.set_capture_profile(candidate)
+            if changed:
+                released_handles = _release_active_capture_handles(feed.camera_id)
+                if released_handles:
+                    log(
+                        f"[INFO] Capture profile update requested for {feed.device_path or camera_id}; "
+                        f"released {released_handles} active capture handle(s)"
+                    )
 
         if not rotation_key_present and not profile_requested:
             return jsonify(
@@ -4121,6 +4145,7 @@ def stream_options_for_camera(camera_id):
                 "profile_changed": bool(changed),
                 "profile_revision": int(next_revision),
                 "profile": applied_profile,
+                "profile_restart_forced": bool(released_handles > 0),
                 "rotation_changed": bool(rotation_changed),
                 "configured_rotation_degrees": configured_rotation,
                 "configured_rotation_key": configured_rotation_key,
