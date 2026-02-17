@@ -26,7 +26,7 @@ let useWS = false;
 let authenticated = false;
 let suppressCommandDispatch = false;
 const ROUTE_ALIASES = Object.freeze({ home: "neck" });
-const ROUTES = new Set(["connect", "neck", "hybrid", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams"]);
+const ROUTES = new Set(["connect", "neck", "hybrid", "direct", "euler", "head", "quaternion", "headstream", "orientation", "streams", "audio"]);
 const CONTROL_ROUTE_LABELS = Object.freeze({
     direct: "Direct Motor",
     euler: "Euler",
@@ -52,6 +52,7 @@ const ROUTE_ICON_KEYS = Object.freeze({
     neck: "head",
     hybrid: "hybrid",
     streams: "video",
+    audio: "mic",
 });
 
 const CONTROL_ROUTE_ICON_KEYS = Object.freeze({
@@ -104,6 +105,8 @@ const BUTTON_ICON_SVGS = Object.freeze({
         '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18"></path><path d="M12 3a14 14 0 0 1 0 18"></path><path d="M12 3a14 14 0 0 0 0 18"></path></svg>',
     video:
         '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="6" width="14" height="12" rx="2"></rect><path d="m17 10 4-2v8l-4-2"></path></svg>',
+    mic:
+        '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path><path d="M8 21h8"></path></svg>',
     sliders:
         '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><circle cx="9" cy="6" r="2"></circle><path d="M4 12h16"></path><circle cx="15" cy="12" r="2"></circle><path d="M4 18h16"></path><circle cx="11" cy="18" r="2"></circle></svg>',
     axis:
@@ -743,10 +746,25 @@ function getRouteFromLocation() {
     return "connect";
 }
 
+function setStreamsPanelFocus(targetPanel = "camera") {
+    const cameraDetails = document.getElementById("streamsCameraDetails");
+    const audioDetails = document.getElementById("streamsAudioDetails");
+    if (!cameraDetails || !audioDetails) {
+        return;
+    }
+    if (targetPanel === "audio") {
+        audioDetails.open = true;
+        cameraDetails.open = false;
+        return;
+    }
+    cameraDetails.open = true;
+}
+
 function applyRoute(route) {
     setControlsMenuOpen(false);
+    const displayRoute = route === "audio" ? "streams" : route;
     document.querySelectorAll("[data-view]").forEach((view) => {
-        view.classList.toggle("active", view.dataset.view === route);
+        view.classList.toggle("active", view.dataset.view === displayRoute);
     });
     document.querySelectorAll(".nav-link[data-route]").forEach((link) => {
         link.classList.toggle("active", link.dataset.route === route);
@@ -763,9 +781,10 @@ function applyRoute(route) {
         orientationInitTriggered = true;
     }
 
-    if (route === "streams") {
+    if (route === "streams" || route === "audio") {
         setupStreamConfigUi();
         hideConnectionModal();
+        setStreamsPanelFocus(route === "audio" ? "audio" : "camera");
     }
     if (route === "hybrid") {
         setupHybridUi();
@@ -1681,6 +1700,7 @@ function extractResolvedFromPayload(data) {
 
   const resolvedAdapter = asObject(resolved.adapter);
   const resolvedCamera = asObject(resolved.camera);
+  const resolvedAudio = asObject(resolved.audio);
 
   const adapterServiceCandidates = [
     getServiceData(snapshot, "adapter"),
@@ -1691,6 +1711,11 @@ function extractResolvedFromPayload(data) {
     getServiceData(snapshot, "camera"),
     getServiceData(replySnapshot, "camera"),
     getServiceData(source, "camera"),
+  ];
+  const audioServiceCandidates = [
+    getServiceData(snapshot, "audio"),
+    getServiceData(replySnapshot, "audio"),
+    getServiceData(source, "audio"),
   ];
 
   const adapterService = {};
@@ -1758,6 +1783,40 @@ function extractResolvedFromPayload(data) {
     }
   }
 
+  const audioService = {};
+  for (const candidate of audioServiceCandidates) {
+    const service = asObject(candidate);
+    const local = asObject(service.local);
+    const tunnel = asObject(service.tunnel);
+    audioService.tunnel_url = pickFirstNonEmptyString(audioService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
+    audioService.base_url = pickFirstNonEmptyString(
+      audioService.base_url,
+      service.base_url,
+      tunnel.tunnel_url,
+      local.base_url
+    );
+    audioService.list_url = pickFirstNonEmptyString(audioService.list_url, service.list_url, tunnel.list_url, local.list_url);
+    audioService.health_url = pickFirstNonEmptyString(
+      audioService.health_url,
+      service.health_url,
+      tunnel.health_url,
+      local.health_url
+    );
+    audioService.webrtc_offer_url = pickFirstNonEmptyString(
+      audioService.webrtc_offer_url,
+      service.webrtc_offer_url,
+      tunnel.webrtc_offer_url,
+      local.webrtc_offer_url
+    );
+    audioService.local_base_url = pickFirstNonEmptyString(audioService.local_base_url, service.local_base_url, local.base_url);
+    if (!audioService.local && Object.keys(local).length > 0) {
+      audioService.local = local;
+    }
+    if (!audioService.tunnel && Object.keys(tunnel).length > 0) {
+      audioService.tunnel = tunnel;
+    }
+  }
+
   return {
     ...resolved,
     adapter: {
@@ -1798,6 +1857,17 @@ function extractResolvedFromPayload(data) {
       local_base_url: pickFirstNonEmptyString(resolvedCamera.local_base_url, cameraService.local_base_url),
       local: Object.keys(asObject(resolvedCamera.local)).length > 0 ? asObject(resolvedCamera.local) : asObject(cameraService.local),
       tunnel: Object.keys(asObject(resolvedCamera.tunnel)).length > 0 ? asObject(resolvedCamera.tunnel) : asObject(cameraService.tunnel),
+    },
+    audio: {
+      ...resolvedAudio,
+      tunnel_url: pickFirstNonEmptyString(resolvedAudio.tunnel_url, audioService.tunnel_url),
+      base_url: pickFirstNonEmptyString(resolvedAudio.base_url, audioService.base_url),
+      list_url: pickFirstNonEmptyString(resolvedAudio.list_url, audioService.list_url),
+      health_url: pickFirstNonEmptyString(resolvedAudio.health_url, audioService.health_url),
+      webrtc_offer_url: pickFirstNonEmptyString(resolvedAudio.webrtc_offer_url, audioService.webrtc_offer_url),
+      local_base_url: pickFirstNonEmptyString(resolvedAudio.local_base_url, audioService.local_base_url),
+      local: Object.keys(asObject(resolvedAudio.local)).length > 0 ? asObject(resolvedAudio.local) : asObject(audioService.local),
+      tunnel: Object.keys(asObject(resolvedAudio.tunnel)).length > 0 ? asObject(resolvedAudio.tunnel) : asObject(audioService.tunnel),
     },
   };
 }
@@ -1993,6 +2063,7 @@ function applyResolvedEndpoints(resolved) {
   let changed = false;
   const adapter = resolved.adapter || {};
   const camera = resolved.camera || {};
+  const audio = resolved.audio || {};
   const adapterTunnel = (adapter.tunnel && typeof adapter.tunnel === "object") ? adapter.tunnel : {};
   const adapterLocal = (adapter.local && typeof adapter.local === "object") ? adapter.local : {};
 
@@ -2058,6 +2129,19 @@ function applyResolvedEndpoints(resolved) {
       }
       if (typeof syncPinnedPreviewSource === "function") {
         syncPinnedPreviewSource();
+      }
+      changed = true;
+    } catch (err) {}
+  }
+
+  const audioCandidate = (audio.tunnel_url || audio.base_url || "").trim();
+  if (audioCandidate) {
+    try {
+      audioRouterBaseUrl = normalizeOrigin(audioCandidate);
+      localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
+      const audioInput = document.getElementById("audioRouterBaseInput");
+      if (audioInput) {
+        audioInput.value = audioRouterBaseUrl;
       }
       changed = true;
     } catch (err) {}
@@ -2247,6 +2331,10 @@ async function resolveEndpointsViaNkn(options = {}) {
     if (cameraBaseInput && cameraRouterBaseUrl) {
       cameraBaseInput.value = cameraRouterBaseUrl;
     }
+    const audioBaseInput = document.getElementById("audioRouterBaseInput");
+    if (audioBaseInput && audioRouterBaseUrl) {
+      audioBaseInput.value = audioRouterBaseUrl;
+    }
     updateMetrics();
     return true;
   } catch (err) {
@@ -2411,6 +2499,25 @@ const pinnedPreviewInteraction = {
   startTop: 0,
   startWidth: 0,
   startHeight: 0,
+};
+
+const AUDIO_ROUTER_DEFAULT_BASE = localStorage.getItem("audioRouterBaseUrl") || "";
+let audioRouterBaseUrl = AUDIO_ROUTER_DEFAULT_BASE;
+let audioRouterPassword = localStorage.getItem("audioRouterPassword") || "";
+let audioRouterSessionKey = localStorage.getItem("audioRouterSessionKey") || "";
+let audioDevices = { inputs: [], outputs: [] };
+let audioDeviceRefreshInFlight = false;
+let audioSessionRotateInFlight = false;
+let audioUiInitialized = false;
+const audioBridge = {
+  desired: false,
+  starting: false,
+  peerConnection: null,
+  localStream: null,
+  remoteStream: null,
+  remoteTrack: null,
+  lastError: "",
+  active: false,
 };
 
 function normalizeOrigin(rawInput) {
@@ -3967,6 +4074,7 @@ async function startCameraPreview(options = {}) {
 }
 
 function setupStreamConfigUi() {
+  setupAudioConfigUi();
   if (streamUiInitialized) {
     return;
   }
@@ -4109,6 +4217,592 @@ function setupStreamConfigUi() {
       message: "Authenticate camera router to read /imu",
       error: false,
     });
+  }
+}
+
+function withAudioSession(path, includeSession = true) {
+  if (!includeSession || !audioRouterSessionKey) {
+    return path;
+  }
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}session_key=${encodeURIComponent(audioRouterSessionKey)}`;
+}
+
+function audioRouterUrl(path, includeSession = true) {
+  if (!audioRouterBaseUrl) {
+    return "";
+  }
+  return `${audioRouterBaseUrl}${withAudioSession(path, includeSession)}`;
+}
+
+function setAudioStatus(message, error = false) {
+  const statusEl = document.getElementById("audioStreamStatus");
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = String(message || "");
+  statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function setAudioConnectionMeta(message, error = false) {
+  const metaEl = document.getElementById("audioConnectionMeta");
+  if (!metaEl) {
+    return;
+  }
+  metaEl.textContent = String(message || "");
+  metaEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function resetAudioPlayer() {
+  const audioEl = document.getElementById("audioRemotePlayer");
+  if (!audioEl) {
+    return;
+  }
+  audioEl.srcObject = null;
+  audioEl.removeAttribute("src");
+  try {
+    audioEl.load();
+  } catch (err) {}
+}
+
+function renderAudioDeviceSelect(selectEl, devices, selectedIndex) {
+  if (!selectEl) {
+    return;
+  }
+  selectEl.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "default";
+  defaultOpt.textContent = "System Default";
+  selectEl.appendChild(defaultOpt);
+
+  (devices || []).forEach((device) => {
+    const opt = document.createElement("option");
+    const id = Number(device.id);
+    const host = String(device.hostapi || "").trim();
+    const name = String(device.name || `Device ${id}`);
+    const channelCount = Number(device.max_input_channels || device.max_output_channels || 0) || 0;
+    const defaultTag = device.is_default ? " [default]" : "";
+    opt.value = String(id);
+    opt.textContent = `${name}${defaultTag}${host ? ` (${host})` : ""} | ch ${channelCount}`;
+    selectEl.appendChild(opt);
+  });
+
+  if (Number.isInteger(selectedIndex) && String(selectedIndex) !== "") {
+    selectEl.value = String(selectedIndex);
+  } else {
+    selectEl.value = "default";
+  }
+}
+
+function renderAudioDeviceRows(payload) {
+  const rowsEl = document.getElementById("audioDeviceList");
+  if (!rowsEl) {
+    return;
+  }
+  rowsEl.innerHTML = "";
+
+  const audioInfo = asObject(payload.audio);
+  const inputInfo = asObject(audioInfo.input_device_info);
+  const outputInfo = asObject(audioInfo.output_device_info);
+  const peers = Number(asObject(payload.connections).active_webrtc_peers || 0) || 0;
+  const sampleRate = Number(audioInfo.sample_rate || 0) || 0;
+  const channels = Number(audioInfo.channels || 0) || 0;
+
+  const rows = [
+    `Input: ${inputInfo.name || "N/A"}${Number.isInteger(audioInfo.input_index) ? ` (#${audioInfo.input_index})` : ""}`,
+    `Output: ${outputInfo.name || "N/A"}${Number.isInteger(audioInfo.output_index) ? ` (#${audioInfo.output_index})` : ""}`,
+    `Format: ${sampleRate || "--"} Hz | ${channels || "--"} channel(s)`,
+    `Active peers: ${peers}`,
+  ];
+  rows.forEach((text) => {
+    const line = document.createElement("div");
+    line.className = "stream-feed-row";
+    line.textContent = text;
+    rowsEl.appendChild(line);
+  });
+}
+
+async function audioRouterFetch(path, options = {}, includeSession = true) {
+  if (!audioRouterBaseUrl) {
+    throw new Error("Audio Router URL is not configured");
+  }
+  const url = audioRouterUrl(path, includeSession);
+  let response = null;
+  try {
+    response = await fetch(url, options);
+  } catch (err) {
+    const detail = err && err.message ? err.message : String(err);
+    if (isTryCloudflareBase(audioRouterBaseUrl)) {
+      throw new Error(
+        "Audio router tunnel unreachable. This trycloudflare URL is likely expired or offline; refresh endpoint discovery."
+      );
+    }
+    throw new Error(detail);
+  }
+  if (response.status === 530 && isTryCloudflareBase(audioRouterBaseUrl)) {
+    throw new Error(
+      "Audio router tunnel is offline (Cloudflare 530). Refresh the tunnel URL from /router_info and retry."
+    );
+  }
+  return response;
+}
+
+async function stopAudioBridge(options = {}) {
+  const keepDesired = !!options.keepDesired;
+  const silent = !!options.silent;
+  audioBridge.starting = false;
+  if (!keepDesired) {
+    audioBridge.desired = false;
+  }
+
+  const pc = audioBridge.peerConnection;
+  audioBridge.peerConnection = null;
+  if (pc) {
+    try {
+      pc.ontrack = null;
+      pc.onconnectionstatechange = null;
+    } catch (err) {}
+    try {
+      pc.getSenders().forEach((sender) => {
+        if (sender && sender.track) {
+          sender.track.stop();
+        }
+      });
+    } catch (err) {}
+    try {
+      pc.close();
+    } catch (err) {}
+  }
+
+  if (audioBridge.localStream) {
+    try {
+      audioBridge.localStream.getTracks().forEach((track) => track.stop());
+    } catch (err) {}
+  }
+  if (audioBridge.remoteStream) {
+    try {
+      audioBridge.remoteStream.getTracks().forEach((track) => track.stop());
+    } catch (err) {}
+  }
+  audioBridge.localStream = null;
+  audioBridge.remoteStream = null;
+  audioBridge.remoteTrack = null;
+  audioBridge.active = false;
+  resetAudioPlayer();
+  updateMetrics();
+  if (!silent) {
+    setAudioStatus("Audio bridge stopped");
+    setAudioConnectionMeta("No active audio bridge.");
+  }
+}
+
+async function refreshAudioDevices(options = {}) {
+  const silent = !!options.silent;
+  if (audioDeviceRefreshInFlight) {
+    return false;
+  }
+  if (!audioRouterBaseUrl) {
+    if (!silent) {
+      setAudioStatus("Set audio router URL first", true);
+    }
+    return false;
+  }
+  if (!audioRouterSessionKey) {
+    if (!silent) {
+      setAudioStatus("Authenticate with audio router first", true);
+    }
+    return false;
+  }
+
+  audioDeviceRefreshInFlight = true;
+  try {
+    const response = await audioRouterFetch("/list", { cache: "no-store" }, true);
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (err) {
+      data = {};
+    }
+    if (!response.ok || data.status !== "success") {
+      if (response.status === 401) {
+        audioRouterSessionKey = "";
+        localStorage.removeItem("audioRouterSessionKey");
+        await stopAudioBridge({ silent: true });
+      }
+      if (!silent) {
+        setAudioStatus(`Device refresh failed: ${data.message || response.status}`, true);
+      }
+      return false;
+    }
+
+    audioDevices = {
+      inputs: Array.isArray(asObject(data.devices).inputs) ? asObject(data.devices).inputs : [],
+      outputs: Array.isArray(asObject(data.devices).outputs) ? asObject(data.devices).outputs : [],
+    };
+
+    const audioInfo = asObject(data.audio);
+    const inputIndex = Number.isInteger(audioInfo.input_index) ? audioInfo.input_index : null;
+    const outputIndex = Number.isInteger(audioInfo.output_index) ? audioInfo.output_index : null;
+
+    renderAudioDeviceSelect(
+      document.getElementById("audioInputDeviceSelect"),
+      audioDevices.inputs,
+      inputIndex
+    );
+    renderAudioDeviceSelect(
+      document.getElementById("audioOutputDeviceSelect"),
+      audioDevices.outputs,
+      outputIndex
+    );
+    renderAudioDeviceRows(data);
+
+    const peers = Number(asObject(data.connections).active_webrtc_peers || 0) || 0;
+    setAudioConnectionMeta(
+      peers > 0
+        ? `Audio peer active (${peers})`
+        : `Ready (${new Date().toLocaleTimeString()})`
+    );
+
+    if (!silent) {
+      setAudioStatus(`Loaded ${audioDevices.inputs.length} input and ${audioDevices.outputs.length} output device(s)`);
+    }
+    return true;
+  } catch (err) {
+    if (!silent) {
+      setAudioStatus(`Device refresh error: ${err}`, true);
+    }
+    return false;
+  } finally {
+    audioDeviceRefreshInFlight = false;
+  }
+}
+
+async function authenticateAudioRouter() {
+  const baseInput = document.getElementById("audioRouterBaseInput");
+  const passInput = document.getElementById("audioRouterPasswordInput");
+  if (!baseInput || !passInput) {
+    return;
+  }
+
+  try {
+    audioRouterBaseUrl = normalizeOrigin(baseInput.value);
+  } catch (err) {
+    setAudioStatus(`Invalid audio router URL: ${err}`, true);
+    return;
+  }
+
+  audioRouterPassword = (passInput.value || "").trim();
+  if (!audioRouterBaseUrl || !audioRouterPassword) {
+    setAudioStatus("Enter both audio router URL and password", true);
+    return;
+  }
+
+  setAudioStatus("Authenticating with audio router...");
+  try {
+    const response = await audioRouterFetch(
+      "/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: audioRouterPassword }),
+      },
+      false
+    );
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      setAudioStatus(`Auth failed: ${data.message || response.status}`, true);
+      return;
+    }
+
+    audioRouterSessionKey = String(data.session_key || "").trim();
+    if (!audioRouterSessionKey) {
+      setAudioStatus("Auth failed: response missing session key", true);
+      return;
+    }
+
+    localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
+    localStorage.setItem("audioRouterPassword", audioRouterPassword);
+    localStorage.setItem("audioRouterSessionKey", audioRouterSessionKey);
+
+    setAudioStatus(`Authenticated. Session timeout ${Number(data.timeout) || "--"}s`);
+    await refreshAudioDevices({ silent: true });
+  } catch (err) {
+    setAudioStatus(`Auth error: ${err}`, true);
+  }
+}
+
+async function rotateAudioRouterSessionKey() {
+  if (audioSessionRotateInFlight) {
+    return;
+  }
+  if (!audioRouterBaseUrl) {
+    setAudioStatus("Set audio router URL first", true);
+    return;
+  }
+  if (!audioRouterSessionKey) {
+    setAudioStatus("Authenticate with audio router before rotating session keys", true);
+    return;
+  }
+
+  audioSessionRotateInFlight = true;
+  const rotateBtn = document.getElementById("audioRouterRotateSessionBtn");
+  if (rotateBtn) {
+    rotateBtn.disabled = true;
+  }
+  setAudioStatus("Rotating audio session key...");
+
+  try {
+    const response = await audioRouterFetch(
+      "/session/rotate",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      },
+      true
+    );
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      if (response.status === 401) {
+        audioRouterSessionKey = "";
+        localStorage.removeItem("audioRouterSessionKey");
+        await stopAudioBridge({ silent: true });
+      }
+      setAudioStatus(`Session rotate failed: ${data.message || response.status}`, true);
+      return;
+    }
+
+    const nextSessionKey = String(data.session_key || "").trim();
+    if (!nextSessionKey) {
+      setAudioStatus("Session rotate failed: missing session key", true);
+      return;
+    }
+    audioRouterSessionKey = nextSessionKey;
+    localStorage.setItem("audioRouterSessionKey", audioRouterSessionKey);
+    await refreshAudioDevices({ silent: true });
+    setAudioStatus(`Session key rotated. Invalidated ${Number(data.invalidated_sessions) || 0} session(s).`);
+  } catch (err) {
+    setAudioStatus(`Session rotate error: ${err}`, true);
+  } finally {
+    audioSessionRotateInFlight = false;
+    if (rotateBtn) {
+      rotateBtn.disabled = false;
+    }
+  }
+}
+
+async function applyAudioDeviceSelection() {
+  if (!audioRouterBaseUrl || !audioRouterSessionKey) {
+    setAudioStatus("Authenticate with audio router before applying device selection", true);
+    return;
+  }
+  const inputSelect = document.getElementById("audioInputDeviceSelect");
+  const outputSelect = document.getElementById("audioOutputDeviceSelect");
+  if (!inputSelect || !outputSelect) {
+    return;
+  }
+
+  const parseDeviceValue = (raw) => {
+    const value = String(raw || "").trim();
+    if (!value || value === "default") {
+      return "default";
+    }
+    const asNum = Number(value);
+    if (Number.isInteger(asNum)) {
+      return asNum;
+    }
+    return "default";
+  };
+
+  const payload = {
+    input_device: parseDeviceValue(inputSelect.value),
+    output_device: parseDeviceValue(outputSelect.value),
+  };
+
+  try {
+    setAudioStatus("Applying audio device selection...");
+    const response = await audioRouterFetch(
+      "/devices/select",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      },
+      true
+    );
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      throw new Error(data.message || `HTTP ${response.status}`);
+    }
+    renderAudioDeviceRows(data);
+    await refreshAudioDevices({ silent: true });
+    setAudioStatus("Audio device selection applied");
+    if (audioBridge.desired) {
+      await startAudioBridge({ forceRestart: true });
+    }
+  } catch (err) {
+    setAudioStatus(`Device apply failed: ${err}`, true);
+  }
+}
+
+async function startAudioBridge(options = {}) {
+  const forceRestart = !!options.forceRestart;
+  if (audioBridge.starting) {
+    return;
+  }
+  if (!audioRouterBaseUrl || !audioRouterSessionKey) {
+    setAudioStatus("Authenticate with audio router first", true);
+    return;
+  }
+  if (audioBridge.active && !forceRestart) {
+    setAudioStatus("Audio bridge already active");
+    return;
+  }
+
+  audioBridge.starting = true;
+  audioBridge.desired = true;
+
+  try {
+    await stopAudioBridge({ keepDesired: true, silent: true });
+    const sendBrowserMic = !!(document.getElementById("audioBrowserMicToggle") || {}).checked;
+
+    setAudioStatus("Starting bidirectional audio bridge...");
+    if (!window.RTCPeerConnection) {
+      throw new Error("WebRTC is not available in this browser");
+    }
+
+    const peer = new RTCPeerConnection();
+    audioBridge.peerConnection = peer;
+    peer.addTransceiver("audio", { direction: "recvonly" });
+
+    if (sendBrowserMic) {
+      audioBridge.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      audioBridge.localStream.getAudioTracks().forEach((track) => {
+        peer.addTrack(track, audioBridge.localStream);
+      });
+    }
+
+    peer.ontrack = (event) => {
+      if (!event.streams || !event.streams[0]) {
+        return;
+      }
+      const stream = event.streams[0];
+      audioBridge.remoteStream = stream;
+      audioBridge.remoteTrack = stream.getAudioTracks()[0] || null;
+      const audioEl = document.getElementById("audioRemotePlayer");
+      if (!audioEl) {
+        return;
+      }
+      audioEl.srcObject = stream;
+      audioEl.muted = false;
+      audioEl.play().catch(() => {});
+    };
+
+    peer.onconnectionstatechange = () => {
+      const state = String(peer.connectionState || "");
+      if (state === "failed" || state === "disconnected" || state === "closed") {
+        setAudioConnectionMeta(`Audio bridge ${state}`, true);
+        if (audioBridge.desired) {
+          setAudioStatus(`Audio bridge ${state}`, true);
+        }
+      }
+    };
+
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
+    const response = await audioRouterFetch(
+      "/webrtc/offer",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+      },
+      true
+    );
+    const data = await response.json();
+    if (!response.ok || data.status !== "success") {
+      throw new Error(data.message || `HTTP ${response.status}`);
+    }
+
+    await peer.setRemoteDescription(data.answer);
+    audioBridge.active = true;
+    audioBridge.lastError = "";
+    setAudioStatus("Bidirectional audio bridge active");
+    setAudioConnectionMeta(`Bridge live${sendBrowserMic ? " | browser mic uplink on" : ""}`);
+    updateMetrics();
+  } catch (err) {
+    audioBridge.lastError = String(err || "");
+    setAudioStatus(`Audio bridge failed: ${err}`, true);
+    setAudioConnectionMeta(`Bridge error: ${err}`, true);
+    await stopAudioBridge({ keepDesired: false, silent: true });
+  } finally {
+    audioBridge.starting = false;
+  }
+}
+
+function setupAudioConfigUi() {
+  if (audioUiInitialized) {
+    return;
+  }
+  audioUiInitialized = true;
+
+  const baseInput = document.getElementById("audioRouterBaseInput");
+  const passInput = document.getElementById("audioRouterPasswordInput");
+  const authBtn = document.getElementById("audioRouterAuthBtn");
+  const refreshBtn = document.getElementById("audioRouterRefreshBtn");
+  const rotateBtn = document.getElementById("audioRouterRotateSessionBtn");
+  const applyDevicesBtn = document.getElementById("audioDeviceApplyBtn");
+  const startBtn = document.getElementById("audioBridgeStartBtn");
+  const stopBtn = document.getElementById("audioBridgeStopBtn");
+
+  if (baseInput) {
+    baseInput.value = audioRouterBaseUrl;
+    baseInput.addEventListener("change", () => {
+      try {
+        audioRouterBaseUrl = normalizeOrigin(baseInput.value);
+        localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
+      } catch (err) {}
+    });
+  }
+  if (passInput) {
+    passInput.value = audioRouterPassword;
+  }
+
+  if (authBtn) {
+    authBtn.addEventListener("click", authenticateAudioRouter);
+  }
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", () => {
+      refreshAudioDevices({ silent: false }).catch(() => {});
+    });
+  }
+  if (rotateBtn) {
+    rotateBtn.addEventListener("click", rotateAudioRouterSessionKey);
+  }
+  if (applyDevicesBtn) {
+    applyDevicesBtn.addEventListener("click", applyAudioDeviceSelection);
+  }
+  if (startBtn) {
+    startBtn.addEventListener("click", () => {
+      startAudioBridge({ forceRestart: false }).catch(() => {});
+    });
+  }
+  if (stopBtn) {
+    stopBtn.addEventListener("click", () => {
+      stopAudioBridge({ keepDesired: false, silent: false }).catch(() => {});
+    });
+  }
+
+  window.addEventListener("beforeunload", () => {
+    stopAudioBridge({ keepDesired: false, silent: true }).catch(() => {});
+  }, { once: true });
+
+  if (audioRouterBaseUrl && audioRouterSessionKey) {
+    refreshAudioDevices({ silent: true }).catch(() => {});
+    setAudioStatus("Audio router session restored");
+  } else {
+    setAudioStatus("Configure audio router URL + password, then authenticate");
+    setAudioConnectionMeta("No active audio bridge.");
   }
 }
 
@@ -4907,14 +5601,14 @@ window.addEventListener('load', async () => {
   } else if (queryConnection.adapterConfigured) {
     // We have adapter URL but no session - show connection modal
     logToConsole("[CONNECT] Adapter URL configured, please authenticate...");
-    if (initialRoute !== "streams" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
+    if (initialRoute !== "streams" && initialRoute !== "audio" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
       showConnectionModal();
     } else {
       hideConnectionModal();
     }
   } else {
     // Show connection modal on first load
-    if (initialRoute !== "streams" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
+    if (initialRoute !== "streams" && initialRoute !== "audio" && initialRoute !== "orientation" && initialRoute !== "hybrid") {
       showConnectionModal();
     } else {
       hideConnectionModal();

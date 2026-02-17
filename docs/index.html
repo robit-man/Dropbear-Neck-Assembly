@@ -90,6 +90,7 @@
               <a href="#neck" class="nav-link" data-route="neck">Neck</a>
               <a href="#hybrid" class="nav-link" data-route="hybrid">Hybrid</a>
               <a href="#streams" class="nav-link" data-route="streams">Streams</a>
+              <a href="#audio" class="nav-link" data-route="audio">Audio</a>
               <button id="controlsMenuToggleBtn" class="nav-link controls-menu-toggle" type="button" aria-expanded="false" aria-controls="controlsMenuPanel">
                 Controls
               </button>
@@ -655,86 +656,145 @@
 
     <section class="view" data-view="streams">
       <h2>Stream Configuration</h2>
-
-      <div class="control-section">
-        <h3 style="margin-top:0;">Camera Router Connection</h3>
-        <div class="row">
-          <label for="cameraRouterBaseInput">Camera Router URL:</label>
-          <input type="text" id="cameraRouterBaseInput" placeholder="https://example.trycloudflare.com" style="flex:1;">
-        </div>
-        <div class="row">
-          <label for="cameraRouterPasswordInput">Password:</label>
-          <input type="password" id="cameraRouterPasswordInput" placeholder="camera router password" style="flex:1;">
-        </div>
-        <div class="row">
-          <button id="cameraRouterAuthBtn" class="primary">Authenticate</button>
-          <button id="cameraRouterRefreshBtn">Refresh Feeds</button>
-          <button id="cameraRouterRotateSessionBtn">Rotate Session Key</button>
-        </div>
-        <p id="streamConfigStatus" style="margin:0.5rem 0 0 0;opacity:0.85;">Idle</p>
-      </div>
-
-      <div class="control-section">
-        <h3 style="margin-top:0;">Mode and Feed</h3>
-        <div class="row">
-          <label for="cameraFeedSelect">Camera Feed:</label>
-          <select id="cameraFeedSelect" style="flex:1;"></select>
-        </div>
-        <div class="row">
-          <label for="cameraModeSelect">Protocol:</label>
-          <select id="cameraModeSelect" style="flex:1;">
-            <option value="webrtc" disabled>WebRTC (disabled)</option>
-            <option value="mjpeg" selected>MJPEG stream (default)</option>
-            <option value="jpeg">JPEG polling (fallback)</option>
-            <option value="mpegts" disabled>MPEG-TS stream (disabled)</option>
-          </select>
-        </div>
-        <div class="row">
-          <label for="cameraProfileSelect">Capture Profile:</label>
-          <select id="cameraProfileSelect" style="flex:1;"></select>
-          <button id="cameraProfileApplyBtn" type="button">Apply</button>
-        </div>
-        <p id="cameraProfileStatus" style="margin:0.25rem 0 0 0;opacity:0.82;font-size:0.85rem;">No camera profile selected</p>
-        <div class="row">
-          <button id="cameraPreviewStartBtn" class="primary">Start Preview</button>
-          <button id="cameraPreviewStopBtn">Stop Preview</button>
-        </div>
-      </div>
-
-      <div class="control-section">
-        <div class="section-header">
-          <h3 style="margin-top:0;">Preview</h3>
-          <button id="cameraPreviewShareBtn" type="button">Share</button>
-        </div>
-        <div class="stream-preview-wrap">
-          <button id="cameraPreviewPinBtn" class="stream-pin-btn" type="button" aria-label="Pin stream preview" title="Pin stream preview">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M7 3h10l-2 6v3l3 3v2h-5v4l-2-1-2 1v-4H4v-2l3-3V9L7 3z"></path>
-            </svg>
-          </button>
-          <img id="cameraPreviewImage" alt="Camera Preview" style="display:none;">
-          <video id="cameraPreviewVideo" autoplay muted playsinline controls style="display:none;"></video>
-        </div>
-      </div>
-
-      <div class="control-section">
-        <h3 style="margin-top:0;">Feed Status</h3>
-        <div id="cameraFeedList" class="stream-feed-list"></div>
-      </div>
-      <div class="control-section">
-        <h3 style="margin-top:0;">IMU Telemetry</h3>
-        <div class="imu-readout-grid">
-          <div class="imu-readout-item">
-            <div class="imu-readout-label">Accel (m/s^2)</div>
-            <code id="streamImuAccel" class="imu-readout-value">--</code>
+      <details id="streamsCameraDetails" class="streams-panel" open>
+        <summary>Camera Streaming</summary>
+        <div class="streams-panel-body">
+          <div class="control-section">
+            <h3 style="margin-top:0;">Camera Router Connection</h3>
+            <div class="row">
+              <label for="cameraRouterBaseInput">Camera Router URL:</label>
+              <input type="text" id="cameraRouterBaseInput" placeholder="https://example.trycloudflare.com" style="flex:1;">
+            </div>
+            <div class="row">
+              <label for="cameraRouterPasswordInput">Password:</label>
+              <input type="password" id="cameraRouterPasswordInput" placeholder="camera router password" style="flex:1;">
+            </div>
+            <div class="row">
+              <button id="cameraRouterAuthBtn" class="primary">Authenticate</button>
+              <button id="cameraRouterRefreshBtn">Refresh Feeds</button>
+              <button id="cameraRouterRotateSessionBtn">Rotate Session Key</button>
+            </div>
+            <p id="streamConfigStatus" style="margin:0.5rem 0 0 0;opacity:0.85;">Idle</p>
           </div>
-          <div class="imu-readout-item">
-            <div class="imu-readout-label">Gyro (rad/s)</div>
-            <code id="streamImuGyro" class="imu-readout-value">--</code>
+
+          <div class="control-section">
+            <h3 style="margin-top:0;">Mode and Feed</h3>
+            <div class="row">
+              <label for="cameraFeedSelect">Camera Feed:</label>
+              <select id="cameraFeedSelect" style="flex:1;"></select>
+            </div>
+            <div class="row">
+              <label for="cameraModeSelect">Protocol:</label>
+              <select id="cameraModeSelect" style="flex:1;">
+                <option value="webrtc" disabled>WebRTC (disabled)</option>
+                <option value="mjpeg" selected>MJPEG stream (default)</option>
+                <option value="jpeg">JPEG polling (fallback)</option>
+                <option value="mpegts" disabled>MPEG-TS stream (disabled)</option>
+              </select>
+            </div>
+            <div class="row">
+              <label for="cameraProfileSelect">Capture Profile:</label>
+              <select id="cameraProfileSelect" style="flex:1;"></select>
+              <button id="cameraProfileApplyBtn" type="button">Apply</button>
+            </div>
+            <p id="cameraProfileStatus" style="margin:0.25rem 0 0 0;opacity:0.82;font-size:0.85rem;">No camera profile selected</p>
+            <div class="row">
+              <button id="cameraPreviewStartBtn" class="primary">Start Preview</button>
+              <button id="cameraPreviewStopBtn">Stop Preview</button>
+            </div>
+          </div>
+
+          <div class="control-section">
+            <div class="section-header">
+              <h3 style="margin-top:0;">Preview</h3>
+              <button id="cameraPreviewShareBtn" type="button">Share</button>
+            </div>
+            <div class="stream-preview-wrap">
+              <button id="cameraPreviewPinBtn" class="stream-pin-btn" type="button" aria-label="Pin stream preview" title="Pin stream preview">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M7 3h10l-2 6v3l3 3v2h-5v4l-2-1-2 1v-4H4v-2l3-3V9L7 3z"></path>
+                </svg>
+              </button>
+              <img id="cameraPreviewImage" alt="Camera Preview" style="display:none;">
+              <video id="cameraPreviewVideo" autoplay muted playsinline controls style="display:none;"></video>
+            </div>
+          </div>
+
+          <div class="control-section">
+            <h3 style="margin-top:0;">Feed Status</h3>
+            <div id="cameraFeedList" class="stream-feed-list"></div>
+          </div>
+          <div class="control-section">
+            <h3 style="margin-top:0;">IMU Telemetry</h3>
+            <div class="imu-readout-grid">
+              <div class="imu-readout-item">
+                <div class="imu-readout-label">Accel (m/s^2)</div>
+                <code id="streamImuAccel" class="imu-readout-value">--</code>
+              </div>
+              <div class="imu-readout-item">
+                <div class="imu-readout-label">Gyro (rad/s)</div>
+                <code id="streamImuGyro" class="imu-readout-value">--</code>
+              </div>
+            </div>
+            <p id="streamImuMeta" class="imu-readout-meta">IMU idle</p>
           </div>
         </div>
-        <p id="streamImuMeta" class="imu-readout-meta">IMU idle</p>
-      </div>
+      </details>
+
+      <details id="streamsAudioDetails" class="streams-panel">
+        <summary>Audio Streaming</summary>
+        <div class="streams-panel-body">
+          <div class="control-section">
+            <h3 style="margin-top:0;">Audio Router Connection</h3>
+            <div class="row">
+              <label for="audioRouterBaseInput">Audio Router URL:</label>
+              <input type="text" id="audioRouterBaseInput" placeholder="https://example.trycloudflare.com" style="flex:1;">
+            </div>
+            <div class="row">
+              <label for="audioRouterPasswordInput">Password:</label>
+              <input type="password" id="audioRouterPasswordInput" placeholder="audio router password" style="flex:1;">
+            </div>
+            <div class="row">
+              <button id="audioRouterAuthBtn" class="primary">Authenticate</button>
+              <button id="audioRouterRefreshBtn">Refresh Devices</button>
+              <button id="audioRouterRotateSessionBtn">Rotate Session Key</button>
+            </div>
+            <p id="audioStreamStatus" style="margin:0.5rem 0 0 0;opacity:0.85;">Idle</p>
+          </div>
+
+          <div class="control-section">
+            <h3 style="margin-top:0;">System Device Routing</h3>
+            <div class="row">
+              <label for="audioInputDeviceSelect">Service Input Device:</label>
+              <select id="audioInputDeviceSelect" style="flex:1;"></select>
+            </div>
+            <div class="row">
+              <label for="audioOutputDeviceSelect">Service Output Device:</label>
+              <select id="audioOutputDeviceSelect" style="flex:1;"></select>
+            </div>
+            <div class="row">
+              <button id="audioDeviceApplyBtn" type="button">Apply Device Selection</button>
+            </div>
+            <div id="audioDeviceList" class="stream-feed-list"></div>
+          </div>
+
+          <div class="control-section">
+            <div class="section-header">
+              <h3 style="margin-top:0;">Bidirectional Bridge</h3>
+              <label for="audioBrowserMicToggle" style="min-width:auto;display:flex;align-items:center;gap:0.4rem;">
+                <input id="audioBrowserMicToggle" type="checkbox" checked>
+                Send Browser Mic
+              </label>
+            </div>
+            <div class="row">
+              <button id="audioBridgeStartBtn" class="primary" type="button">Start Audio Bridge</button>
+              <button id="audioBridgeStopBtn" type="button">Stop Audio Bridge</button>
+            </div>
+            <audio id="audioRemotePlayer" autoplay controls playsinline></audio>
+            <p id="audioConnectionMeta" class="imu-readout-meta">No active audio bridge.</p>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section class="view" data-view="hybrid">

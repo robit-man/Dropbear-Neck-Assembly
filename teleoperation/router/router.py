@@ -4,7 +4,7 @@ NKN router sidecar for teleoperation discovery.
 
 Responsibilities:
 - Persist a local NKN seed and run an NKN sidecar client.
-- Reply to inbound NKN discovery DMs with current adapter/camera tunnel URLs.
+- Reply to inbound NKN discovery DMs with current adapter/camera/audio tunnel URLs.
 - Provide a local HTTP API for the docs frontend to resolve remote router endpoints.
 - Offer optional curses Terminal UI using local terminal_ui.py.
 """
@@ -117,6 +117,7 @@ LEGACY_ADAPTER_ROUTER_INFO_URLS = (
     "http://127.0.0.1:5001/router_info",
 )
 DEFAULT_CAMERA_ROUTER_INFO_URL = "http://127.0.0.1:8080/router_info"
+DEFAULT_AUDIO_ROUTER_INFO_URL = "http://127.0.0.1:8090/router_info"
 
 DEFAULT_NKN_ENABLE = True
 DEFAULT_NKN_IDENTIFIER = "router"
@@ -144,6 +145,7 @@ nkn_process_lock = Lock()
 service_endpoints = {
     "adapter_router_info_url": DEFAULT_ADAPTER_ROUTER_INFO_URL,
     "camera_router_info_url": DEFAULT_CAMERA_ROUTER_INFO_URL,
+    "audio_router_info_url": DEFAULT_AUDIO_ROUTER_INFO_URL,
 }
 service_snapshot = {
     "timestamp_ms": 0,
@@ -237,7 +239,7 @@ def _collect_endpoint_labels(resolved):
     labels = []
     if not isinstance(resolved, dict):
         return labels
-    for service_name in ("adapter", "camera"):
+    for service_name in ("adapter", "camera", "audio"):
         service_data = resolved.get(service_name)
         if not isinstance(service_data, dict):
             continue
@@ -615,6 +617,17 @@ def _load_router_settings(config):
     )
     promote("router.services.camera_router_info_url", camera_router_info_url)
 
+    audio_router_info_url = _as_nonempty_str(
+        _read_config_value(
+            config,
+            "router.services.audio_router_info_url",
+            DEFAULT_AUDIO_ROUTER_INFO_URL,
+            legacy_keys=("audio_router_info_url",),
+        ),
+        DEFAULT_AUDIO_ROUTER_INFO_URL,
+    )
+    promote("router.services.audio_router_info_url", audio_router_info_url)
+
     nkn_enable = _as_bool(
         _read_config_value(
             config,
@@ -705,6 +718,7 @@ def _load_router_settings(config):
         "listen_port": listen_port,
         "adapter_router_info_url": adapter_router_info_url,
         "camera_router_info_url": camera_router_info_url,
+        "audio_router_info_url": audio_router_info_url,
         "nkn_enable": nkn_enable,
         "seed_hex": seed_hex,
         "identifier": identifier,
@@ -768,6 +782,15 @@ def _build_router_config_spec():
                         value_type="str",
                         default=DEFAULT_CAMERA_ROUTER_INFO_URL,
                         description="Camera router /router_info endpoint.",
+                        restart_required=True,
+                    ),
+                    SettingSpec(
+                        id="audio_info",
+                        label="Audio Info URL",
+                        path="router.services.audio_router_info_url",
+                        value_type="str",
+                        default=DEFAULT_AUDIO_ROUTER_INFO_URL,
+                        description="Audio router /router_info endpoint.",
                         restart_required=True,
                     ),
                 ),
@@ -1284,6 +1307,26 @@ def _coerce_router_info_shape(name, query_url, data):
                     "ws_endpoint": tunnel_ws,
                 },
             }
+        if name == "audio":
+            return {
+                "status": data.get("status", "success"),
+                "service": "audio_router",
+                "local": {
+                    "base_url": base_local,
+                    "auth_url": f"{base_local}/auth",
+                    "list_url": f"{base_local}/list",
+                    "health_url": f"{base_local}/health",
+                    "webrtc_offer_url": f"{base_local}/webrtc/offer",
+                    "webrtc_ws_base": base_ws,
+                },
+                "tunnel": {
+                    "state": "active" if tunnel_url else "inactive",
+                    "tunnel_url": tunnel_url,
+                    "list_url": f"{tunnel_url}/list" if tunnel_url else "",
+                    "health_url": f"{tunnel_url}/health" if tunnel_url else "",
+                    "webrtc_offer_url": f"{tunnel_url}/webrtc/offer" if tunnel_url else "",
+                },
+            }
         return {
             "status": data.get("status", "success"),
             "service": "camera_router",
@@ -1320,6 +1363,25 @@ def _coerce_router_info_shape(name, query_url, data):
                     "tunnel_url": tunnel_url,
                     "http_endpoint": str(data.get("http_endpoint") or ""),
                     "ws_endpoint": str(data.get("ws_endpoint") or ""),
+                },
+            }
+        if name == "audio":
+            return {
+                "status": data.get("status", "success"),
+                "service": "audio_router",
+                "local": {
+                    "base_url": base_local,
+                    "auth_url": f"{base_local}/auth",
+                    "list_url": f"{base_local}/list",
+                    "health_url": f"{base_local}/health",
+                    "webrtc_offer_url": f"{base_local}/webrtc/offer",
+                },
+                "tunnel": {
+                    "state": "active" if tunnel_url else "inactive",
+                    "tunnel_url": tunnel_url,
+                    "list_url": f"{tunnel_url}/list" if tunnel_url else "",
+                    "health_url": f"{tunnel_url}/health" if tunnel_url else "",
+                    "webrtc_offer_url": f"{tunnel_url}/webrtc/offer" if tunnel_url else "",
                 },
             }
         return {
@@ -1443,15 +1505,20 @@ def fetch_service_info(name, query_url):
 def build_resolved_endpoints(services):
     adapter_record = services.get("adapter", {})
     camera_record = services.get("camera", {})
+    audio_record = services.get("audio", {})
 
     adapter_data = adapter_record.get("data", {}) if isinstance(adapter_record, dict) else {}
     camera_data = camera_record.get("data", {}) if isinstance(camera_record, dict) else {}
+    audio_data = audio_record.get("data", {}) if isinstance(audio_record, dict) else {}
 
     adapter_local = adapter_data.get("local", {}) if isinstance(adapter_data, dict) else {}
     adapter_tunnel = adapter_data.get("tunnel", {}) if isinstance(adapter_data, dict) else {}
 
     camera_local = camera_data.get("local", {}) if isinstance(camera_data, dict) else {}
     camera_tunnel = camera_data.get("tunnel", {}) if isinstance(camera_data, dict) else {}
+
+    audio_local = audio_data.get("local", {}) if isinstance(audio_data, dict) else {}
+    audio_tunnel = audio_data.get("tunnel", {}) if isinstance(audio_data, dict) else {}
 
     adapter_tunnel_url = str(adapter_tunnel.get("tunnel_url") or "").strip()
     adapter_local_base = str(adapter_local.get("base_url") or adapter_data.get("local_base_url") or "").strip()
@@ -1480,6 +1547,11 @@ def build_resolved_endpoints(services):
     camera_base = camera_tunnel_url
     if not camera_base:
         camera_base = str(camera_local.get("base_url") or "").strip()
+
+    audio_tunnel_url = str(audio_tunnel.get("tunnel_url") or "").strip()
+    audio_base = audio_tunnel_url
+    if not audio_base:
+        audio_base = str(audio_local.get("base_url") or "").strip()
 
     adapter_health = str(
         adapter_local.get("health_url") or (f"{adapter_base}/health" if adapter_base else "")
@@ -1513,6 +1585,18 @@ def build_resolved_endpoints(services):
             ).strip(),
             "local_base_url": str(camera_local.get("base_url") or "").strip(),
         },
+        "audio": {
+            "tunnel_url": audio_tunnel_url,
+            "base_url": audio_base,
+            "list_url": str(audio_tunnel.get("list_url") or (f"{audio_base}/list" if audio_base else "")).strip(),
+            "health_url": str(
+                audio_tunnel.get("health_url") or (f"{audio_base}/health" if audio_base else "")
+            ).strip(),
+            "webrtc_offer_url": str(
+                audio_tunnel.get("webrtc_offer_url") or (f"{audio_base}/webrtc/offer" if audio_base else "")
+            ).strip(),
+            "local_base_url": str(audio_local.get("base_url") or "").strip(),
+        },
     }
 
 
@@ -1524,6 +1608,7 @@ def collect_service_snapshot():
     fetched_services = {
         "adapter": fetch_service_info("adapter", service_endpoints["adapter_router_info_url"]),
         "camera": fetch_service_info("camera", service_endpoints["camera_router_info_url"]),
+        "audio": fetch_service_info("audio", service_endpoints["audio_router_info_url"]),
     }
     services = {
         "adapter": _merge_service_record_with_previous(
@@ -1533,6 +1618,10 @@ def collect_service_snapshot():
         "camera": _merge_service_record_with_previous(
             fetched_services.get("camera", {}),
             previous_services.get("camera", {}),
+        ),
+        "audio": _merge_service_record_with_previous(
+            fetched_services.get("audio", {}),
+            previous_services.get("audio", {}),
         ),
     }
 
@@ -1664,6 +1753,7 @@ def metrics_update_loop():
         resolved = snapshot.get("resolved", {})
         adapter = resolved.get("adapter", {})
         camera = resolved.get("camera", {})
+        audio = resolved.get("audio", {})
         with telemetry_lock:
             in_bytes = telemetry_state["inbound_bytes"]
             out_bytes = telemetry_state["outbound_bytes"]
@@ -1687,6 +1777,7 @@ def metrics_update_loop():
         ui.update_metric("Requests", str(request_counter["value"]))
         ui.update_metric("Adapter Tunnel", adapter.get("tunnel_url") or adapter.get("base_url") or "N/A")
         ui.update_metric("Camera Tunnel", camera.get("tunnel_url") or camera.get("base_url") or "N/A")
+        ui.update_metric("Audio Tunnel", audio.get("tunnel_url") or audio.get("base_url") or "N/A")
         time.sleep(1)
 
 app = Flask(__name__)
@@ -2535,6 +2626,7 @@ def main():
 
     service_endpoints["adapter_router_info_url"] = settings["adapter_router_info_url"]
     service_endpoints["camera_router_info_url"] = settings["camera_router_info_url"]
+    service_endpoints["audio_router_info_url"] = settings["audio_router_info_url"]
 
     nkn_settings["enable"] = settings["nkn_enable"]
     nkn_settings["seed_hex"] = settings["seed_hex"]
@@ -2576,6 +2668,7 @@ def main():
         ui.update_metric("LAN URL", lan_url)
         ui.update_metric("Adapter URL", service_endpoints["adapter_router_info_url"])
         ui.update_metric("Camera URL", service_endpoints["camera_router_info_url"])
+        ui.update_metric("Audio URL", service_endpoints["audio_router_info_url"])
         ui.update_metric("Pending", "0")
         ui.update_metric("Requests", "0")
         ui.running = True

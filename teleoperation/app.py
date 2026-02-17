@@ -237,6 +237,17 @@ class WatchdogManager:
                 activation_timeout_seconds=50.0,
             ),
             ServiceSpec(
+                "audio",
+                "Audio Router",
+                "audio/audio_route.py",
+                health_mode="http",
+                health_port=8090,
+                health_path="/health",
+                config_relpath="audio/config.json",
+                config_port_paths=("audio_router.network.listen_port", "listen_port", "port"),
+                activation_timeout_seconds=45.0,
+            ),
+            ServiceSpec(
                 "depth",
                 "Depth",
                 "depth/depth.py",

@@ -40,6 +40,28 @@
             "camera_rotation_degrees": {}
         }
     },
+    "audio_router": {
+        "network": {
+            "listen_host": "0.0.0.0",
+            "listen_port": 8090
+        },
+        "security": {
+            "password": "audio2026",
+            "session_timeout": 300,
+            "require_auth": true
+        },
+        "audio": {
+            "sample_rate": 48000,
+            "channels": 1,
+            "frame_ms": 20,
+            "input_device": "default",
+            "output_device": "default"
+        },
+        "tunnel": {
+            "enable": true,
+            "auto_install_cloudflared": true
+        }
+    },
     "adapter": {
         "serial": {
             "baudrate": 115200

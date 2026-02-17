@@ -587,6 +587,50 @@ nav {
     margin: 0;
 }
 
+.streams-panel {
+    border: 2px solid var(--border-dark);
+    border-radius: 0.6rem;
+    background: var(--bg-tertiary);
+    margin-bottom: 0.55rem;
+    overflow: hidden;
+}
+
+.streams-panel > summary {
+    list-style: none;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.75rem 0.9rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    border-bottom: 2px solid transparent;
+    background: rgba(255, 255, 255, 0.02);
+}
+
+.streams-panel > summary::-webkit-details-marker {
+    display: none;
+}
+
+.streams-panel[open] > summary {
+    color: var(--accent);
+    border-bottom-color: var(--border-light);
+    background: rgba(255, 174, 0, 0.06);
+}
+
+.streams-panel-body {
+    padding: 0.65rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+}
+
+#audioRemotePlayer {
+    width: 100%;
+    border-radius: 0.45rem;
+    border: 1px solid var(--border-light);
+    background: #111;
+}
+
 button {
     background: var(--bg-secondary);
     border: 2px solid var(--border-light);
