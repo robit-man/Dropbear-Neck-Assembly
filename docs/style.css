@@ -882,6 +882,57 @@ button:disabled:hover {
     color: #9a9a9a;
 }
 
+.toggle-checkbox-btn {
+    min-width: auto;
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.95rem;
+    border: 2px solid var(--border-light);
+    border-radius: 0.5rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: var(--ui-control-font-size);
+    font-weight: var(--ui-control-font-weight);
+    cursor: pointer;
+    user-select: none;
+    transition: all 0.2s;
+}
+
+.toggle-checkbox-btn:hover {
+    border-color: var(--accent);
+}
+
+.toggle-checkbox-btn:focus-within {
+    outline: 2px solid rgba(255, 174, 0, 0.5);
+    outline-offset: 2px;
+}
+
+.toggle-checkbox-btn input[type="checkbox"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.toggle-checkbox-btn.is-on {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(255, 174, 0, 0.13);
+}
+
+.toggle-checkbox-btn.is-off {
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+}
+
+.toggle-checkbox-btn-text {
+    line-height: 1;
+}
+
 button.has-ui-icon,
 .nav-link.has-ui-icon,
 .controls-menu-option.has-ui-icon {

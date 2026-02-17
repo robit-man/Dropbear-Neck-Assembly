@@ -53,6 +53,7 @@ import datetime
 import json
 import pathlib
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -83,6 +84,8 @@ DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
 HTTP_PROBE_TIMEOUT_SECONDS = 1.5
 PORT_DISCOVERY_SCAN_LIMIT = 64
 PORT_DISCOVERY_MAX_DELTA = 128
+PORT_RECLAIM_TERM_WAIT_SECONDS = 1.4
+PORT_RECLAIM_KILL_WAIT_SECONDS = 1.4
 AUTO_UPDATE_DEFAULT_REMOTE = "origin"
 AUTO_UPDATE_DEFAULT_BRANCH = "main"
 AUTO_UPDATE_DEFAULT_REPO_URL = "https://github.com/robit-man/Dropbear-Neck-Assembly.git"
@@ -304,6 +307,8 @@ class WatchdogManager:
         self._auto_update_poll_seconds = AUTO_UPDATE_POLL_SECONDS
         self._next_auto_update_check_at = 0.0
         self._auto_update_enabled = False
+        self._port_reclaim_enabled = self._env_flag("WATCHDOG_RECLAIM_PORTS", True)
+        self._port_reclaim_force = self._env_flag("WATCHDOG_RECLAIM_FORCE", False)
 
         self._os_name = platform.system().lower()
         self._terminal_emulator = self._detect_terminal_emulator()
@@ -342,6 +347,11 @@ class WatchdogManager:
 
         self._log("Watchdog initialized")
         self._log("Keys: Up/Down select, Space toggle, R restart, A toggle all, Q quit")
+        if self._port_reclaim_enabled:
+            reclaim_mode = "aggressive (includes foreign pids)" if self._port_reclaim_force else "owned-only"
+            self._log(f"[PORT] Auto reclaim enabled ({reclaim_mode})")
+        else:
+            self._log("[PORT] Auto reclaim disabled by WATCHDOG_RECLAIM_PORTS")
 
     def _load_desired_state(self) -> Dict[str, bool]:
         if not self.state_file.exists():
@@ -393,6 +403,12 @@ class WatchdogManager:
     # ------------------------------------------------------------------
     # Watchdog self-update helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        fallback = "1" if default else "0"
+        raw = str(os.environ.get(name, fallback)).strip().lower()
+        return raw not in ("0", "false", "no", "off", "")
+
     @staticmethod
     def _normalize_git_url(url: str) -> str:
         text = str(url or "").strip().lower()
@@ -779,6 +795,308 @@ class WatchdogManager:
             except Exception:
                 pass
         return sorted(ports)
+
+    def _list_listening_pids_for_port(self, port: int) -> List[int]:
+        try:
+            port_value = int(port)
+        except Exception:
+            return []
+        if port_value <= 0 or port_value > 65535:
+            return []
+
+        pids = set()
+        if self._os_name == "windows":
+            try:
+                result = subprocess.run(
+                    ["netstat", "-ano", "-p", "tcp"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                for raw in (result.stdout or "").splitlines():
+                    line = raw.strip()
+                    if not line or not line.upper().startswith("TCP"):
+                        continue
+                    parts = line.split()
+                    if len(parts) < 5:
+                        continue
+                    state = str(parts[3]).strip().upper()
+                    if state != "LISTENING":
+                        continue
+                    local = str(parts[1]).strip()
+                    if local.startswith("[") and "]:" in local:
+                        local_port = local.rsplit("]:", 1)[-1]
+                    else:
+                        local_port = local.rsplit(":", 1)[-1]
+                    try:
+                        line_port = int(local_port)
+                    except Exception:
+                        continue
+                    if line_port != port_value:
+                        continue
+                    try:
+                        pid = int(parts[4])
+                    except Exception:
+                        continue
+                    if pid > 0:
+                        pids.add(pid)
+            except Exception:
+                pass
+            return sorted(pids)
+
+        if shutil.which("lsof"):
+            try:
+                result = subprocess.run(
+                    ["lsof", "-nP", f"-iTCP:{port_value}", "-sTCP:LISTEN", "-t"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                for raw in (result.stdout or "").splitlines():
+                    try:
+                        pid = int(raw.strip())
+                    except Exception:
+                        continue
+                    if pid > 0:
+                        pids.add(pid)
+            except Exception:
+                pass
+            if pids:
+                return sorted(pids)
+
+        if shutil.which("ss"):
+            try:
+                result = subprocess.run(
+                    ["ss", "-ltnp", "sport", "=", f":{port_value}"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                for raw in (result.stdout or "").splitlines():
+                    for match in re.findall(r"pid=(\d+)", raw):
+                        try:
+                            pid = int(match)
+                        except Exception:
+                            continue
+                        if pid > 0:
+                            pids.add(pid)
+            except Exception:
+                pass
+            if pids:
+                return sorted(pids)
+
+        if shutil.which("netstat"):
+            try:
+                result = subprocess.run(
+                    ["netstat", "-ltnp"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                pattern = re.compile(rf":{port_value}\s+.*LISTEN\s+(\d+)/")
+                for raw in (result.stdout or "").splitlines():
+                    match = pattern.search(raw)
+                    if not match:
+                        continue
+                    try:
+                        pid = int(match.group(1))
+                    except Exception:
+                        continue
+                    if pid > 0:
+                        pids.add(pid)
+            except Exception:
+                pass
+
+        return sorted(pids)
+
+    def _read_process_commandline(self, pid: int) -> str:
+        if not pid or pid <= 0:
+            return ""
+        if self._os_name == "windows":
+            try:
+                ps_script = (
+                    f'$p=Get-CimInstance Win32_Process -Filter "ProcessId={int(pid)}"; '
+                    "if ($p) { $p.CommandLine }"
+                )
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_script],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                text = (result.stdout or "").strip()
+                if text:
+                    return text
+            except Exception:
+                pass
+            try:
+                result = subprocess.run(
+                    ["wmic", "process", "where", f"processid={int(pid)}", "get", "CommandLine", "/value"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    check=False,
+                    timeout=2.5,
+                )
+                for raw in (result.stdout or "").splitlines():
+                    line = raw.strip()
+                    if line.lower().startswith("commandline="):
+                        return line.split("=", 1)[1].strip()
+            except Exception:
+                pass
+            return ""
+
+        proc_cmdline = pathlib.Path(f"/proc/{int(pid)}/cmdline")
+        try:
+            if proc_cmdline.exists():
+                raw = proc_cmdline.read_bytes()
+                text = raw.replace(b"\x00", b" ").decode("utf-8", errors="ignore").strip()
+                if text:
+                    return text
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(
+                ["ps", "-p", str(int(pid)), "-o", "command="],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+                timeout=2.5,
+            )
+            return (result.stdout or "").strip()
+        except Exception:
+            return ""
+
+    def _pid_likely_owned_by_service(self, pid: int, svc: ServiceSpec) -> bool:
+        if not pid or pid <= 0:
+            return False
+        if int(pid) == int(os.getpid()):
+            return False
+        cmdline = self._read_process_commandline(int(pid))
+        if not cmdline:
+            return False
+        normalized = str(cmdline).replace("\\", "/").lower()
+        script_abs = str(svc.script_path(self.base_dir)).replace("\\", "/").lower()
+        script_rel = str(svc.script_relpath or "").replace("\\", "/").lower()
+        script_name = pathlib.Path(script_abs).name
+        if script_abs and script_abs in normalized:
+            return True
+        if script_rel and script_rel in normalized:
+            return True
+        if script_name and (
+            normalized.endswith(script_name)
+            or f"/{script_name}" in normalized
+            or f" {script_name} " in normalized
+        ):
+            return True
+        return False
+
+    def _wait_for_pid_exit(self, pid: int, timeout_seconds: float) -> bool:
+        deadline = time.time() + max(0.1, float(timeout_seconds))
+        while time.time() < deadline:
+            if not self._is_pid_running(int(pid)):
+                return True
+            time.sleep(0.1)
+        return not self._is_pid_running(int(pid))
+
+    def _terminate_pid_for_port_reclaim(self, pid: int) -> bool:
+        if not pid or pid <= 0:
+            return True
+        if int(pid) == int(os.getpid()):
+            return False
+        if not self._is_pid_running(int(pid)):
+            return True
+        self._send_signal(int(pid), signal.SIGTERM)
+        if self._wait_for_pid_exit(int(pid), PORT_RECLAIM_TERM_WAIT_SECONDS):
+            return True
+        self._send_signal(int(pid), signal.SIGKILL)
+        return self._wait_for_pid_exit(int(pid), PORT_RECLAIM_KILL_WAIT_SECONDS)
+
+    def _candidate_service_ports(self, svc: ServiceSpec, runtime: Optional[ServiceRuntime]) -> List[int]:
+        mode = str(svc.health_mode or "process").strip().lower()
+        if mode == "process":
+            return []
+        raw_candidates = []
+        if runtime is not None:
+            raw_candidates.append(getattr(runtime, "resolved_health_port", 0))
+        raw_candidates.append(svc.resolved_health_port(self.base_dir))
+        raw_candidates.append(getattr(svc, "health_port", 0))
+
+        ports = set()
+        for value in raw_candidates:
+            try:
+                port = int(value)
+            except Exception:
+                continue
+            if 1 <= port <= 65535:
+                ports.add(port)
+        return sorted(ports)
+
+    def _ensure_service_ports_available_for_launch(
+        self,
+        svc: ServiceSpec,
+        runtime: ServiceRuntime,
+    ) -> Tuple[bool, str]:
+        ports = self._candidate_service_ports(svc, runtime)
+        if not ports:
+            return True, ""
+
+        for port in ports:
+            observed = [pid for pid in self._list_listening_pids_for_port(port) if pid != os.getpid()]
+            if not observed:
+                continue
+
+            owned = []
+            foreign = []
+            for pid in observed:
+                if runtime.pid and int(pid) == int(runtime.pid):
+                    owned.append(int(pid))
+                elif self._pid_likely_owned_by_service(int(pid), svc):
+                    owned.append(int(pid))
+                else:
+                    foreign.append(int(pid))
+
+            reclaim_targets = []
+            if self._port_reclaim_enabled:
+                reclaim_targets.extend(owned)
+                if self._port_reclaim_force:
+                    reclaim_targets.extend(foreign)
+            reclaim_targets = list(dict.fromkeys(reclaim_targets))
+
+            if reclaim_targets:
+                self._log(
+                    f"[PORT] {svc.label} reclaiming port {port} from pid(s) "
+                    f"{','.join(str(pid) for pid in reclaim_targets)}"
+                )
+                for pid in reclaim_targets:
+                    if self._terminate_pid_for_port_reclaim(pid):
+                        self._log(f"[PORT] {svc.label} reclaimed port {port} from pid={pid}")
+                    else:
+                        self._log(f"[WARN] {svc.label} failed to terminate pid={pid} on port {port}")
+
+            remaining = [pid for pid in self._list_listening_pids_for_port(port) if pid != os.getpid()]
+            if not remaining:
+                continue
+
+            reason = (
+                f"port {port} in use by pid(s) {','.join(str(pid) for pid in remaining)}"
+            )
+            if foreign and not self._port_reclaim_force:
+                reason += " (foreign process; set WATCHDOG_RECLAIM_FORCE=1 to force)"
+            return False, reason
+
+        return True, ""
 
     def _discover_runtime_health_port(
         self,
@@ -1188,6 +1506,18 @@ class WatchdogManager:
         runtime.launch_grace_until = now + LAUNCH_GRACE_SECONDS
         runtime.process_stable_since = 0.0
         runtime.last_health_error = ""
+
+        ports_ok, port_reason = self._ensure_service_ports_available_for_launch(svc, runtime)
+        if not ports_ok:
+            self._mark_launch_failure(
+                svc,
+                runtime,
+                now,
+                f"Launch blocked: {port_reason}",
+            )
+            self._log(f"[ERROR] {svc.label} launch blocked: {port_reason}")
+            return
+
         self._set_state(
             svc,
             runtime,

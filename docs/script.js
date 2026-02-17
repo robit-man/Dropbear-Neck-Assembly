@@ -454,7 +454,7 @@ setInterval(() => {
 // All your original defaults:
 const DEFAULTS = {
     'motor': 0,'yaw': 0,'pitch': 0,'roll': 0,'height': 0,
-    'X': 0,'Y': 0,'Z': 0,'H': 0,'S': 1,'A': 1,'R': 0,'P': 0,
+    'X': 0,'Y': 0,'Z': 0,'H': 0,'S': 0.8,'A': 0.8,'R': 0,'P': 0,
     'w': 1,'x': 0,'y': 0,'z': 0,'qH': 0,'qS': 1,'qA': 1
 };
 
@@ -1207,6 +1207,44 @@ function setDebugAudioStatus(message, error = false) {
     statusEl.style.color = error ? "#ff4444" : "var(--accent)";
 }
 
+function syncCheckboxToggleButtonState(checkboxEl) {
+    if (!checkboxEl) {
+        return;
+    }
+    const buttonLabel = checkboxEl.closest(".toggle-checkbox-btn");
+    if (!buttonLabel) {
+        return;
+    }
+    const onText = String(buttonLabel.dataset.onText || "On");
+    const offText = String(buttonLabel.dataset.offText || "Off");
+    const isOn = !!checkboxEl.checked;
+
+    buttonLabel.classList.toggle("is-on", isOn);
+    buttonLabel.classList.toggle("is-off", !isOn);
+    buttonLabel.setAttribute("aria-pressed", isOn ? "true" : "false");
+
+    const textEl = buttonLabel.querySelector(".toggle-checkbox-btn-text");
+    if (textEl) {
+        textEl.textContent = isOn ? onText : offText;
+    }
+}
+
+function initializeCheckboxToggleButtons(rootNode = document) {
+    const root = rootNode || document;
+    if (!root || typeof root.querySelectorAll !== "function") {
+        return;
+    }
+    root.querySelectorAll(".toggle-checkbox-btn input[type='checkbox']").forEach((checkboxEl) => {
+        if (!checkboxEl.dataset.toggleButtonInit) {
+            checkboxEl.addEventListener("change", () => {
+                syncCheckboxToggleButtonState(checkboxEl);
+            });
+            checkboxEl.dataset.toggleButtonInit = "1";
+        }
+        syncCheckboxToggleButtonState(checkboxEl);
+    });
+}
+
 function initializeDebugAudioActions() {
     if (debugAudioActionsInitialized) {
         return;
@@ -1218,6 +1256,7 @@ function initializeDebugAudioActions() {
     const refreshBtn = document.getElementById("debugAudioRefreshBtn");
     if (startBtn) {
         startBtn.addEventListener("click", () => {
+            requestAudioAutoplayUnlock().catch(() => {});
             startAudioBridge({ forceRestart: false })
                 .then(() => setDebugAudioStatus("Debug start requested"))
                 .catch((err) => setDebugAudioStatus(`Start failed: ${err}`, true));
@@ -3919,8 +3958,8 @@ const hybridPose = {
   Y: 0,
   Z: 0,
   H: 0,
-  S: 1,
-  A: 1,
+  S: 0.8,
+  A: 0.8,
   R: 0,
   P: 0,
 };
@@ -3989,6 +4028,9 @@ const audioBridge = {
   lastError: "",
   active: false,
 };
+let audioPlaybackUnlockContext = null;
+let audioPlaybackUnlockInFlight = null;
+let audioPlaybackUnlocked = false;
 
 function normalizeOrigin(rawInput) {
   const trimmed = (rawInput || "").trim();
@@ -5796,6 +5838,88 @@ function setAudioConnectionMeta(message, error = false) {
   metaEl.style.color = error ? "#ff4444" : "var(--accent)";
 }
 
+function requestAudioAutoplayUnlock() {
+  if (audioPlaybackUnlocked) {
+    return Promise.resolve(true);
+  }
+  if (audioPlaybackUnlockInFlight) {
+    return audioPlaybackUnlockInFlight;
+  }
+
+  audioPlaybackUnlockInFlight = (async () => {
+    let unlocked = false;
+    const audioEl = document.getElementById("audioRemotePlayer");
+    if (audioEl) {
+      audioEl.autoplay = true;
+      audioEl.setAttribute("playsinline", "");
+    }
+
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextCtor) {
+      try {
+        if (!audioPlaybackUnlockContext) {
+          audioPlaybackUnlockContext = new AudioContextCtor();
+        }
+        if (audioPlaybackUnlockContext && audioPlaybackUnlockContext.state === "suspended") {
+          await audioPlaybackUnlockContext.resume();
+        }
+        if (audioPlaybackUnlockContext && audioPlaybackUnlockContext.state === "running") {
+          const oscillator = audioPlaybackUnlockContext.createOscillator();
+          const gain = audioPlaybackUnlockContext.createGain();
+          gain.gain.value = 0.00001;
+          oscillator.connect(gain);
+          gain.connect(audioPlaybackUnlockContext.destination);
+          oscillator.start();
+          oscillator.stop(audioPlaybackUnlockContext.currentTime + 0.01);
+          unlocked = true;
+        }
+      } catch (err) {}
+    }
+
+    if (audioEl) {
+      const previousMuted = !!audioEl.muted;
+      try {
+        audioEl.muted = true;
+        const playPromise = audioEl.play();
+        if (playPromise && typeof playPromise.then === "function") {
+          await playPromise;
+        }
+        audioEl.pause();
+        unlocked = true;
+      } catch (err) {
+      } finally {
+        audioEl.muted = previousMuted;
+      }
+    }
+
+    audioPlaybackUnlocked = audioPlaybackUnlocked || unlocked;
+    return audioPlaybackUnlocked;
+  })().finally(() => {
+    audioPlaybackUnlockInFlight = null;
+  });
+
+  return audioPlaybackUnlockInFlight;
+}
+
+async function playRemoteAudioElement(audioEl) {
+  if (!audioEl) {
+    return false;
+  }
+  try {
+    const playPromise = audioEl.play();
+    if (playPromise && typeof playPromise.then === "function") {
+      await playPromise;
+    }
+    return true;
+  } catch (err) {
+    setAudioConnectionMeta(
+      "Remote audio playback blocked by browser policy. Click Start Audio Bridge again.",
+      true
+    );
+    return false;
+  }
+}
+
 function resetAudioPlayer() {
   const audioEl = document.getElementById("audioRemotePlayer");
   if (!audioEl) {
@@ -6236,6 +6360,13 @@ async function startAudioBridge(options = {}) {
   if (audioBridge.starting) {
     return;
   }
+  const autoplayUnlocked = await requestAudioAutoplayUnlock().catch(() => false);
+  if (!autoplayUnlocked) {
+    setAudioConnectionMeta(
+      "Audio autoplay may be blocked; click Start Audio Bridge to grant playback.",
+      true
+    );
+  }
   if (!audioRouterBaseUrl || !audioRouterSessionKey) {
     const authEndpoint = getServicePreferredAuthEndpoint("audio");
     if (!authEndpoint) {
@@ -6293,7 +6424,7 @@ async function startAudioBridge(options = {}) {
       }
       audioEl.srcObject = stream;
       audioEl.muted = false;
-      audioEl.play().catch(() => {});
+      playRemoteAudioElement(audioEl).catch(() => {});
     };
 
     peer.onconnectionstatechange = () => {
@@ -6352,6 +6483,7 @@ function setupAudioConfigUi() {
   const applyDevicesBtn = document.getElementById("audioDeviceApplyBtn");
   const startBtn = document.getElementById("audioBridgeStartBtn");
   const stopBtn = document.getElementById("audioBridgeStopBtn");
+  const browserMicToggle = document.getElementById("audioBrowserMicToggle");
 
   if (baseInput) {
     baseInput.value = audioRouterBaseUrl;
@@ -6382,6 +6514,7 @@ function setupAudioConfigUi() {
   }
   if (startBtn) {
     startBtn.addEventListener("click", () => {
+      requestAudioAutoplayUnlock().catch(() => {});
       startAudioBridge({ forceRestart: false }).catch(() => {});
     });
   }
@@ -6394,6 +6527,10 @@ function setupAudioConfigUi() {
   window.addEventListener("beforeunload", () => {
     stopAudioBridge({ keepDesired: false, silent: true }).catch(() => {});
   }, { once: true });
+
+  if (browserMicToggle) {
+    initializeCheckboxToggleButtons(browserMicToggle.closest(".toggle-checkbox-btn") || document);
+  }
 
   if (audioRouterBaseUrl && audioRouterSessionKey) {
     refreshAudioDevices({ silent: true }).catch(() => {});
@@ -6428,7 +6565,7 @@ function setHybridPreviewAspect(width, height) {
 }
 
 function resetHybridPoseState() {
-  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 1, A: 1, R: 0, P: 0 };
+  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.8, A: 0.8, R: 0, P: 0 };
   Object.keys(defaults).forEach((axis) => {
     hybridPose[axis] = defaults[axis];
   });
@@ -6453,7 +6590,7 @@ function hybridClampValue(axis, value) {
 }
 
 function hybridSyncPoseFromHeadControls() {
-  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 1, A: 1, R: 0, P: 0 };
+  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.8, A: 0.8, R: 0, P: 0 };
   Object.keys(defaults).forEach((axis) => {
     const el = document.getElementById(axis);
     const fallback = defaults[axis];
@@ -7023,8 +7160,8 @@ function updateHeadView() {
         Y: Math.round(getNumberValue("Y", 0)),
         Z: Math.round(getNumberValue("Z", 0)),
         H: Math.round(getNumberValue("H", 0)),
-        S: getNumberValue("S", 1),
-        A: getNumberValue("A", 1),
+        S: getNumberValue("S", 0.8),
+        A: getNumberValue("A", 0.8),
         R: Math.round(getNumberValue("R", 0)),
         P: Math.round(getNumberValue("P", 0)),
     };
@@ -7049,14 +7186,14 @@ function updateHeadView() {
 }
 
 function incHeadField(field, step) {
-    const current = getNumberValue(field, field === "S" || field === "A" ? 1 : 0);
+    const current = getNumberValue(field, field === "S" || field === "A" ? 0.8 : 0);
     const next = current + step;
     setInputValue(field, field === "S" || field === "A" ? next.toFixed(1) : Math.round(next));
     updateHeadView();
 }
 
 function decHeadField(field, step) {
-    const current = getNumberValue(field, field === "S" || field === "A" ? 1 : 0);
+    const current = getNumberValue(field, field === "S" || field === "A" ? 0.8 : 0);
     const next = current - step;
     setInputValue(field, field === "S" || field === "A" ? next.toFixed(1) : Math.round(next));
     updateHeadView();
@@ -7184,6 +7321,7 @@ window.addEventListener('load', async () => {
   reorganizeUnifiedViews();
   initializeSidebarUi();
   initializeActionIcons();
+  initializeCheckboxToggleButtons();
   initializeControlsNav();
   initializeRouting();
   const initialRoute = getRouteFromLocation();

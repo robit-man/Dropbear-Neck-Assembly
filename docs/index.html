@@ -375,23 +375,23 @@
         <div class="row">
           <label>Speed (S):</label>
           <button onclick="decHeadField('S', 0.1)">-</button>
-          <input type="number" id="S" value="1" step="0.1" onchange="updateHeadView()" style="width:80px;">
+          <input type="number" id="S" value="0.8" step="0.1" onchange="updateHeadView()" style="width:80px;">
           <button onclick="incHeadField('S', 0.1)">+</button>
-          <input type="range" id="SSlider" min="0" max="10" step="0.1" value="1" oninput="document.getElementById('S').value=this.value; updateHeadView();">
+          <input type="range" id="SSlider" min="0" max="10" step="0.1" value="0.8" oninput="document.getElementById('S').value=this.value; updateHeadView();">
         </div>
         <div class="row">
           <label>Acceleration (A):</label>
           <button onclick="decHeadField('A', 0.1)">-</button>
-          <input type="number" id="A" value="1" step="0.1" onchange="updateHeadView()" style="width:80px;">
+          <input type="number" id="A" value="0.8" step="0.1" onchange="updateHeadView()" style="width:80px;">
           <button onclick="incHeadField('A', 0.1)">+</button>
-          <input type="range" id="ASlider" min="0" max="10" step="0.1" value="1" oninput="document.getElementById('A').value=this.value; updateHeadView();">
+          <input type="range" id="ASlider" min="0" max="10" step="0.1" value="0.8" oninput="document.getElementById('A').value=this.value; updateHeadView();">
         </div>
       </div>
 
       <div class="control-section">
         <h3 style="margin-top:0;">Manual Command</h3>
         <div class="row">
-          <input type="text" id="headCmdInput" placeholder="e.g., X30,Y0,Z10,H-40,S1,A1,R0,P0" style="flex:1;">
+          <input type="text" id="headCmdInput" placeholder="e.g., X30,Y0,Z10,H-40,S0.8,A0.8,R0,P0" style="flex:1;">
           <button onclick="sendCommand(document.getElementById('headCmdInput').value)" class="primary">Send</button>
         </div>
         <p style="margin:0.5rem 0 0 0;opacity:0.7;">Current: <span id="headCurrentCmd" class="current-command"></span></p>
@@ -461,7 +461,7 @@
       <div class="control-section">
         <h3 style="margin-top:0;">Manual Command</h3>
         <div class="row">
-          <input type="text" id="quatCmdInput" placeholder="e.g., Q:1,0,0,0,H50,S1,A1" style="flex:1;">
+          <input type="text" id="quatCmdInput" placeholder="e.g., Q:1,0,0,0,H50,S0.8,A0.8" style="flex:1;">
           <button onclick="sendCommand(document.getElementById('quatCmdInput').value)" class="primary">Send</button>
         </div>
         <p style="margin:0.5rem 0 0 0;opacity:0.7;">Current: <span id="quatCurrentCmd" class="current-command"></span></p>
@@ -823,9 +823,9 @@
           <div class="control-section">
             <div class="section-header">
               <h3 style="margin-top:0;">Bidirectional Bridge</h3>
-              <label for="audioBrowserMicToggle" style="min-width:auto;display:flex;align-items:center;gap:0.4rem;">
+              <label for="audioBrowserMicToggle" class="toggle-checkbox-btn" data-on-text="Send Browser Mic: On" data-off-text="Send Browser Mic: Off" aria-pressed="true">
                 <input id="audioBrowserMicToggle" type="checkbox" checked>
-                Send Browser Mic
+                <span class="toggle-checkbox-btn-text">Send Browser Mic: On</span>
               </label>
             </div>
             <div class="row">
@@ -882,7 +882,7 @@
               <output id="hybridHeightValue" class="hybrid-height-value" for="hybridHeightSlider">H0</output>
             </div>
           </div>
-          <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S1,A1,R0,P0</p>
+          <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S0.8,A0.8,R0,P0</p>
           <p class="hybrid-control-hint">
             Left drag: yaw/pitch. Right drag (or Ctrl/Cmd + left drag): lateral/forward-back.
             Middle drag (or Shift + left drag): roll/height.
