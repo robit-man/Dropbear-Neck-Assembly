@@ -887,9 +887,9 @@ def start_cloudflared_tunnel(local_port):
             if any(token in lowered for token in ("error", "failed", "unable", "panic")):
                 log(f"[CLOUDFLARED] {line}")
             if "trycloudflare.com" in line:
-                match = re.search(r"https://[a-zA-Z0-9-]+\\.trycloudflare\\.com", line)
+                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
                 if not match:
-                    match = re.search(r"https://[^\\s]+trycloudflare\\.com[^\\s]*", line)
+                    match = re.search(r"https://[^\s]+trycloudflare\.com[^\s]*", line)
                 if match:
                     with tunnel_url_lock:
                         if tunnel_url is None:
