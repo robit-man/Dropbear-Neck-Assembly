@@ -2479,7 +2479,7 @@ function setRouterQrScannerUiState(active) {
   const stopBtn = document.getElementById("routerQrScannerStopBtn");
   if (scanBtn) {
     scanBtn.disabled = !!active;
-    scanBtn.textContent = active ? "Scanning..." : "Scan Router QR";
+    scanBtn.textContent = active ? "Scanning..." : "Scan";
   }
   if (stopBtn) {
     stopBtn.disabled = !active;
