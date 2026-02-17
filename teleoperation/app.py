@@ -83,6 +83,12 @@ DEFAULT_HEALTH_FAILURE_THRESHOLD = 4
 HTTP_PROBE_TIMEOUT_SECONDS = 1.5
 PORT_DISCOVERY_SCAN_LIMIT = 64
 PORT_DISCOVERY_MAX_DELTA = 128
+AUTO_UPDATE_DEFAULT_REMOTE = "origin"
+AUTO_UPDATE_DEFAULT_BRANCH = "main"
+AUTO_UPDATE_DEFAULT_REPO_URL = "https://github.com/robit-man/Dropbear-Neck-Assembly.git"
+AUTO_UPDATE_POLL_SECONDS = 20.0
+AUTO_UPDATE_FETCH_TIMEOUT_SECONDS = 45.0
+AUTO_UPDATE_PULL_TIMEOUT_SECONDS = 120.0
 
 
 def _get_nested(data: dict, path: str, default=None):
@@ -289,6 +295,15 @@ class WatchdogManager:
         self._run_started_at = time.time()
         self._instance_lock_acquired = False
         self._instance_lock_handle = None
+        self.repo_dir = self.base_dir.parent.resolve()
+        self._restart_requested = False
+        self._restart_reason = ""
+        self._auto_update_remote = AUTO_UPDATE_DEFAULT_REMOTE
+        self._auto_update_branch = AUTO_UPDATE_DEFAULT_BRANCH
+        self._auto_update_repo_url = AUTO_UPDATE_DEFAULT_REPO_URL
+        self._auto_update_poll_seconds = AUTO_UPDATE_POLL_SECONDS
+        self._next_auto_update_check_at = 0.0
+        self._auto_update_enabled = False
 
         self._os_name = platform.system().lower()
         self._terminal_emulator = self._detect_terminal_emulator()
@@ -296,6 +311,7 @@ class WatchdogManager:
             self._log("[WARN] No terminal emulator detected; Linux service launch will fail")
 
         self._acquire_instance_lock()
+        self._configure_auto_update()
 
         desired_overrides = self._load_desired_state()
         now = time.time()
@@ -373,6 +389,218 @@ class WatchdogManager:
                     tmp_path.unlink()
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Watchdog self-update helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_git_url(url: str) -> str:
+        text = str(url or "").strip().lower()
+        if text.endswith(".git"):
+            text = text[:-4]
+        if text.startswith("git@github.com:"):
+            text = "https://github.com/" + text.split(":", 1)[1]
+        if text.startswith("ssh://git@github.com/"):
+            text = "https://github.com/" + text.split("github.com/", 1)[1]
+        return text.rstrip("/")
+
+    def _run_git(
+        self,
+        *args: str,
+        timeout_seconds: float = 20.0,
+    ) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(self.repo_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=max(1.0, float(timeout_seconds)),
+        )
+
+    def _git_output(
+        self,
+        *args: str,
+        timeout_seconds: float = 20.0,
+    ) -> Tuple[bool, str, str]:
+        try:
+            result = self._run_git(*args, timeout_seconds=timeout_seconds)
+        except Exception as exc:
+            return False, "", str(exc)
+        stdout = (result.stdout or "").strip()
+        stderr = (result.stderr or "").strip()
+        return result.returncode == 0, stdout, stderr
+
+    def _configure_auto_update(self):
+        raw_enabled = str(os.environ.get("WATCHDOG_AUTO_UPDATE", "1")).strip().lower()
+        if raw_enabled in ("0", "false", "no", "off"):
+            self._log("[UPDATE] Auto-update disabled by WATCHDOG_AUTO_UPDATE")
+            self._auto_update_enabled = False
+            return
+
+        if not shutil.which("git"):
+            self._log("[UPDATE] Auto-update disabled (git executable not found)")
+            self._auto_update_enabled = False
+            return
+
+        self._auto_update_remote = (
+            str(os.environ.get("WATCHDOG_AUTO_UPDATE_REMOTE", AUTO_UPDATE_DEFAULT_REMOTE)).strip()
+            or AUTO_UPDATE_DEFAULT_REMOTE
+        )
+        self._auto_update_branch = (
+            str(os.environ.get("WATCHDOG_AUTO_UPDATE_BRANCH", AUTO_UPDATE_DEFAULT_BRANCH)).strip()
+            or AUTO_UPDATE_DEFAULT_BRANCH
+        )
+        self._auto_update_repo_url = (
+            str(os.environ.get("WATCHDOG_AUTO_UPDATE_URL", AUTO_UPDATE_DEFAULT_REPO_URL)).strip()
+            or AUTO_UPDATE_DEFAULT_REPO_URL
+        )
+
+        raw_poll_seconds = str(
+            os.environ.get("WATCHDOG_AUTO_UPDATE_POLL_SECONDS", str(AUTO_UPDATE_POLL_SECONDS))
+        ).strip()
+        try:
+            self._auto_update_poll_seconds = max(5.0, float(raw_poll_seconds))
+        except Exception:
+            self._auto_update_poll_seconds = AUTO_UPDATE_POLL_SECONDS
+
+        git_dir = self.repo_dir / ".git"
+        if not git_dir.exists():
+            self._log(f"[UPDATE] Auto-update disabled (no git metadata in {self.repo_dir})")
+            self._auto_update_enabled = False
+            return
+
+        ok, _, err = self._git_output("rev-parse", "--is-inside-work-tree")
+        if not ok:
+            detail = err or "git checkout validation failed"
+            self._log(f"[UPDATE] Auto-update disabled ({detail})")
+            self._auto_update_enabled = False
+            return
+
+        if self._auto_update_repo_url:
+            ok, remote_url, _ = self._git_output("remote", "get-url", self._auto_update_remote)
+            if ok:
+                expected = self._normalize_git_url(self._auto_update_repo_url)
+                actual = self._normalize_git_url(remote_url)
+                if expected and actual and expected != actual:
+                    self._log(
+                        f"[WARN] Auto-update remote mismatch: expected {self._auto_update_repo_url}, got {remote_url}"
+                    )
+        else:
+            ok, remote_url, err = self._git_output("remote", "get-url", self._auto_update_remote)
+            if not ok:
+                detail = err or f"remote '{self._auto_update_remote}' not found"
+                self._log(f"[UPDATE] Auto-update disabled ({detail})")
+                self._auto_update_enabled = False
+                return
+            self._auto_update_repo_url = remote_url
+
+        self._next_auto_update_check_at = time.time() + self._auto_update_poll_seconds
+        self._auto_update_enabled = True
+        source_label = self._auto_update_repo_url or self._auto_update_remote
+        self._log(
+            f"[UPDATE] Polling git {source_label} ({self._auto_update_branch}) "
+            f"every {self._auto_update_poll_seconds:.0f}s"
+        )
+
+    def _request_watchdog_restart(self, reason: str):
+        message = str(reason or "").strip() or "Restart requested"
+        with self._lock:
+            if self._restart_requested:
+                return
+            self._restart_requested = True
+            self._restart_reason = message
+            self._log(f"[UPDATE] {message}; restarting watchdog")
+
+    def _poll_for_auto_update(self):
+        if not self._auto_update_enabled or self._restart_requested:
+            return
+
+        now = time.time()
+        if now < self._next_auto_update_check_at:
+            return
+        self._next_auto_update_check_at = now + self._auto_update_poll_seconds
+
+        fetch_source = self._auto_update_repo_url or self._auto_update_remote
+        ok, _, err = self._git_output(
+            "fetch",
+            "--quiet",
+            fetch_source,
+            self._auto_update_branch,
+            timeout_seconds=AUTO_UPDATE_FETCH_TIMEOUT_SECONDS,
+        )
+        if not ok:
+            self._log(f"[WARN] Auto-update fetch failed: {err or 'unknown error'}")
+            return
+
+        ok, local_head, err = self._git_output("rev-parse", "HEAD")
+        if not ok:
+            self._log(f"[WARN] Auto-update skipped (failed to read local head: {err or 'unknown'})")
+            return
+
+        remote_ref = f"{self._auto_update_remote}/{self._auto_update_branch}"
+        remote_target = "FETCH_HEAD" if self._auto_update_repo_url else remote_ref
+        ok, remote_head, err = self._git_output("rev-parse", remote_target)
+        if not ok:
+            self._log(
+                f"[WARN] Auto-update skipped (failed to read {remote_target}: {err or 'unknown'})"
+            )
+            return
+
+        if local_head == remote_head:
+            return
+
+        try:
+            ff_probe = self._run_git(
+                "merge-base",
+                "--is-ancestor",
+                "HEAD",
+                remote_target,
+                timeout_seconds=10.0,
+            )
+        except Exception as exc:
+            self._log(f"[WARN] Auto-update probe failed: {exc}")
+            return
+        if ff_probe.returncode != 0:
+            self._log("[WARN] Auto-update skipped (local branch diverged from remote)")
+            return
+
+        ok, status_text, err = self._git_output(
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        )
+        if not ok:
+            self._log(f"[WARN] Auto-update skipped (status check failed: {err or 'unknown'})")
+            return
+        if status_text:
+            self._log("[WARN] Auto-update skipped (local tracked changes present)")
+            return
+
+        ok, pull_out, pull_err = self._git_output(
+            "pull",
+            "--ff-only",
+            fetch_source,
+            self._auto_update_branch,
+            timeout_seconds=AUTO_UPDATE_PULL_TIMEOUT_SECONDS,
+        )
+        if not ok:
+            detail = pull_err or pull_out or "unknown error"
+            self._log(f"[ERROR] Auto-update pull failed: {detail}")
+            return
+
+        lines = [line.strip() for line in pull_out.splitlines() if line.strip()]
+        pull_summary = lines[-1] if lines else f"updated to {remote_head[:12]}"
+        self._request_watchdog_restart(f"Pulled latest code ({pull_summary})")
+
+    def should_restart(self) -> bool:
+        with self._lock:
+            return bool(self._restart_requested)
+
+    def restart_reason(self) -> str:
+        with self._lock:
+            return str(self._restart_reason or "")
 
     # ------------------------------------------------------------------
     # Logging helpers
@@ -1390,6 +1618,7 @@ class WatchdogManager:
                 for svc in self.services:
                     runtime = self.runtime_by_id[svc.service_id]
                     self._sync_single_service(svc, runtime, now)
+            self._poll_for_auto_update()
             time.sleep(MONITOR_INTERVAL_SECONDS)
 
     # ------------------------------------------------------------------
@@ -1627,7 +1856,7 @@ class WatchdogManager:
         stdscr.addnstr(height - 1, max(0, width - len(clock) - 1), clock, len(clock))
         stdscr.refresh()
 
-    def run_curses(self):
+    def run_curses(self) -> bool:
         self.start()
         interrupted = False
 
@@ -1646,6 +1875,8 @@ class WatchdogManager:
             while True:
                 with self._lock:
                     self._draw_ui(stdscr)
+                    if self._restart_requested:
+                        return
 
                 key = stdscr.getch()
                 if key == -1:
@@ -1679,8 +1910,14 @@ class WatchdogManager:
             self.request_shutdown()
             self.await_shutdown()
             self._release_instance_lock()
-            report = self._build_exit_report(interrupted=interrupted)
-            print("\n" + report, flush=True)
+            if self.should_restart():
+                reason = self.restart_reason() or "remote update pulled"
+                print(f"\n[WATCHDOG] Auto-update applied. Restarting ({reason})", flush=True)
+            else:
+                report = self._build_exit_report(interrupted=interrupted)
+                print("\n" + report, flush=True)
+
+        return self.should_restart()
 
 
 def main():
@@ -1689,7 +1926,18 @@ def main():
     except RuntimeError as exc:
         print(f"[WATCHDOG] {exc}", flush=True)
         return 1
-    manager.run_curses()
+    should_restart = manager.run_curses()
+    if should_restart:
+        reason = manager.restart_reason() or "remote update pulled"
+        python_path = sys.executable
+        script_path = str(pathlib.Path(__file__).resolve())
+        argv = [python_path, script_path] + sys.argv[1:]
+        print(f"[WATCHDOG] Relaunching after update ({reason})", flush=True)
+        try:
+            os.execv(python_path, argv)
+        except Exception as exc:
+            print(f"[WATCHDOG] Failed to relaunch watchdog: {exc}", flush=True)
+            return 1
     return 0
 
 
