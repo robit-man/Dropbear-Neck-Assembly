@@ -968,11 +968,27 @@ function setHybridTab(tab, options = {}) {
         btn.classList.toggle("active", btn.dataset.hybridTab === nextTab);
     });
     const touchPanel = document.getElementById("hybridTabTouch");
-    const morphPanel = document.getElementById("hybridTabMorph");
-    const orientationPanel = document.getElementById("hybridTabOrientation");
-    if (touchPanel) touchPanel.classList.toggle("active", nextTab === "touch");
-    if (morphPanel) morphPanel.classList.toggle("active", nextTab === "morph");
-    if (orientationPanel) orientationPanel.classList.toggle("active", nextTab === "orientation");
+    if (touchPanel) {
+        touchPanel.classList.add("active");
+        touchPanel.dataset.hybridMode = nextTab;
+    }
+    document.querySelectorAll(".hybrid-mode-overlay[data-overlay-mode]").forEach((overlay) => {
+        const isActive = overlay.dataset.overlayMode === nextTab;
+        overlay.classList.toggle("active", isActive);
+        overlay.setAttribute("aria-hidden", isActive ? "false" : "true");
+    });
+    document.querySelectorAll(".hybrid-mode-toggle").forEach((btn) => {
+        const mode = String(btn.dataset.hybridModeToggle || "").trim();
+        const isActive = mode === nextTab;
+        btn.classList.toggle("active", isActive);
+        btn.disabled = !isActive;
+        btn.setAttribute("aria-hidden", isActive ? "false" : "true");
+    });
+    document.querySelectorAll(".hybrid-tuneables-panel[data-hybrid-tuneables-mode]").forEach((panel) => {
+        const isActive = panel.dataset.hybridTuneablesMode === nextTab;
+        panel.classList.toggle("active", isActive);
+        panel.hidden = !isActive;
+    });
 
     if (nextTab === "morph" && !headstreamInitTriggered && typeof window.initHeadstreamApp === "function") {
         window.initHeadstreamApp();
@@ -982,6 +998,24 @@ function setHybridTab(tab, options = {}) {
         window.initOrientationApp();
         orientationInitTriggered = true;
     }
+
+    const modeStatusEl = document.getElementById("hybridModeStatus");
+    if (modeStatusEl) {
+        if (nextTab === "touch") {
+            modeStatusEl.textContent = "Touch control overlay active";
+            modeStatusEl.style.color = "var(--accent)";
+        } else if (nextTab === "morph") {
+            modeStatusEl.textContent = "Morphtarget overlay ready";
+            modeStatusEl.style.color = "var(--accent)";
+        } else if (nextTab === "orientation") {
+            modeStatusEl.textContent = "Orientation overlay ready";
+            modeStatusEl.style.color = "var(--accent)";
+        }
+    }
+
+    window.dispatchEvent(new CustomEvent("hybrid-preview-resize", {
+        detail: { mode: nextTab, source: "hybrid-tab" },
+    }));
 
     if (!options.skipMetrics) {
         updateMetrics();
@@ -1137,8 +1171,11 @@ function reorganizeUnifiedViews() {
     const authCameraMount = document.getElementById("authCameraMount");
     const authAudioMount = document.getElementById("authAudioMount");
     const hybridAudioMount = document.getElementById("hybridAudioMount");
-    const hybridMorphMount = document.getElementById("hybridTabMorph");
-    const hybridOrientationMount = document.getElementById("hybridTabOrientation");
+    const hybridModeActionMount = document.getElementById("hybridModeActionMount");
+    const hybridMorphSceneMount = document.getElementById("hybridMorphSceneMount");
+    const hybridOrientationSceneMount = document.getElementById("hybridOrientationSceneMount");
+    const hybridMorphTuneablesMount = document.getElementById("hybridMorphTuneablesMount");
+    const hybridOrientationTuneablesMount = document.getElementById("hybridOrientationTuneablesMount");
     const debugControlMount = document.getElementById("debugControlMount");
     const debugCameraMount = document.getElementById("debugCameraMount");
 
@@ -1170,12 +1207,53 @@ function reorganizeUnifiedViews() {
     });
 
     const headstreamView = document.querySelector('[data-view="headstream"]');
-    if (headstreamView && hybridMorphMount) {
-        Array.from(headstreamView.childNodes || []).forEach((node) => hybridMorphMount.appendChild(node));
+    if (headstreamView) {
+        const headstreamSections = collectDirectChildSections(headstreamView);
+        const morphCanvas = headstreamView.querySelector("#morphCanvasWrap");
+        const morphToggleBtn = headstreamView.querySelector("#streamToggleBtn");
+        if (morphCanvas) {
+            moveNodeToMount(morphCanvas, hybridMorphSceneMount);
+        }
+        if (morphToggleBtn) {
+            morphToggleBtn.classList.add("hybrid-mode-toggle");
+            morphToggleBtn.dataset.hybridModeToggle = "morph";
+            moveNodeToMount(morphToggleBtn, hybridModeActionMount);
+        }
+        if (headstreamSections.length > 1) {
+            moveNodeToMount(headstreamSections[1], hybridMorphTuneablesMount);
+        }
     }
+
     const orientationView = document.querySelector('[data-view="orientation"]');
-    if (orientationView && hybridOrientationMount) {
-        Array.from(orientationView.childNodes || []).forEach((node) => hybridOrientationMount.appendChild(node));
+    if (orientationView) {
+        const orientationSections = collectDirectChildSections(orientationView);
+        const orientationSceneHost = orientationView.querySelector("#orientationSceneHost");
+        const orientationToggleBtn = orientationView.querySelector("#orientationStreamToggleBtn");
+        const projectionPlaneBtn = orientationView.querySelector("#orientationProjectionPlaneBtn");
+        const projectionSphereBtn = orientationView.querySelector("#orientationProjectionSphereBtn");
+        const orientationStatus = orientationView.querySelector("#orientationStatus");
+        if (orientationSceneHost) {
+            moveNodeToMount(orientationSceneHost, hybridOrientationSceneMount);
+        }
+        if (orientationToggleBtn) {
+            orientationToggleBtn.classList.add("hybrid-mode-toggle");
+            orientationToggleBtn.dataset.hybridModeToggle = "orientation";
+            moveNodeToMount(orientationToggleBtn, hybridModeActionMount);
+        }
+        if (projectionPlaneBtn && projectionSphereBtn && hybridOrientationTuneablesMount) {
+            const projectionRow = document.createElement("div");
+            projectionRow.className = "row";
+            projectionRow.appendChild(projectionPlaneBtn);
+            projectionRow.appendChild(projectionSphereBtn);
+            hybridOrientationTuneablesMount.appendChild(projectionRow);
+        }
+        if (orientationStatus && hybridOrientationTuneablesMount) {
+            orientationStatus.classList.add("hybrid-mode-status");
+            hybridOrientationTuneablesMount.appendChild(orientationStatus);
+        }
+        if (orientationSections.length > 1) {
+            moveNodeToMount(orientationSections[1], hybridOrientationTuneablesMount);
+        }
     }
 
     if (debugControlMount) {
@@ -3946,26 +4024,68 @@ const HYBRID_SELECTED_FEED_KEY = "hybridSelectedFeed";
 const HYBRID_PREVIEW_DEFAULT_ASPECT = "16 / 9";
 const HYBRID_COMMAND_INTERVAL_MS = 55;
 const HYBRID_HOLD_INTERVAL_MS = 95;
-const HYBRID_POSE_LIMITS = Object.freeze({
-  X: { min: -500, max: 500 },
-  Y: { min: -800, max: 800 },
-  Z: { min: -800, max: 800 },
-  H: { min: 0, max: 70 },
-  S: { min: 0.6, max: 0.6 },
-  A: { min: 0.4, max: 0.4 },
-  R: { min: -300, max: 300 },
-  P: { min: -300, max: 300 },
+const HYBRID_TOUCH_DEFAULTS = Object.freeze({
+  speed: 0.6,
+  accel: 0.4,
+  xLimit: 500,
+  yLimit: 800,
+  zLimit: 800,
+  rLimit: 300,
+  pLimit: 300,
 });
+const hybridTouchTuneables = { ...HYBRID_TOUCH_DEFAULTS };
+
+function hybridPoseLimits() {
+  const rawXLimit = Number(hybridTouchTuneables.xLimit);
+  const rawYLimit = Number(hybridTouchTuneables.yLimit);
+  const rawZLimit = Number(hybridTouchTuneables.zLimit);
+  const rawRLimit = Number(hybridTouchTuneables.rLimit);
+  const rawPLimit = Number(hybridTouchTuneables.pLimit);
+  const rawSpeed = Number(hybridTouchTuneables.speed);
+  const rawAccel = Number(hybridTouchTuneables.accel);
+  const xLimit = Math.max(10, Number.isFinite(rawXLimit) ? rawXLimit : HYBRID_TOUCH_DEFAULTS.xLimit);
+  const yLimit = Math.max(10, Number.isFinite(rawYLimit) ? rawYLimit : HYBRID_TOUCH_DEFAULTS.yLimit);
+  const zLimit = Math.max(10, Number.isFinite(rawZLimit) ? rawZLimit : HYBRID_TOUCH_DEFAULTS.zLimit);
+  const rLimit = Math.max(10, Number.isFinite(rawRLimit) ? rawRLimit : HYBRID_TOUCH_DEFAULTS.rLimit);
+  const pLimit = Math.max(10, Number.isFinite(rawPLimit) ? rawPLimit : HYBRID_TOUCH_DEFAULTS.pLimit);
+  const speed = Math.max(0, Math.min(10, Number.isFinite(rawSpeed) ? rawSpeed : HYBRID_TOUCH_DEFAULTS.speed));
+  const accel = Math.max(0, Math.min(10, Number.isFinite(rawAccel) ? rawAccel : HYBRID_TOUCH_DEFAULTS.accel));
+  return {
+    X: { min: -xLimit, max: xLimit },
+    Y: { min: -yLimit, max: yLimit },
+    Z: { min: -zLimit, max: zLimit },
+    H: { min: 0, max: 70 },
+    S: { min: speed, max: speed },
+    A: { min: accel, max: accel },
+    R: { min: -rLimit, max: rLimit },
+    P: { min: -pLimit, max: pLimit },
+  };
+}
+
+function hybridPoseDefaults() {
+  return {
+    X: 0,
+    Y: 0,
+    Z: 0,
+    H: 0,
+    S: Number(hybridTouchTuneables.speed),
+    A: Number(hybridTouchTuneables.accel),
+    R: 0,
+    P: 0,
+  };
+}
+
 const hybridPose = {
   X: 0,
   Y: 0,
   Z: 0,
   H: 0,
-  S: 0.6,
-  A: 0.4,
+  S: Number(hybridTouchTuneables.speed),
+  A: Number(hybridTouchTuneables.accel),
   R: 0,
   P: 0,
 };
+let hybridTouchTuneablesInitialized = false;
 let hybridSelectedFeedId = localStorage.getItem(HYBRID_SELECTED_FEED_KEY) || "";
 let hybridPreviewSourceKey = "";
 let hybridLastCommand = "";
@@ -6665,6 +6785,12 @@ function setHybridStatus(message, error = false) {
   statusEl.style.color = error ? "#ff4444" : "var(--accent)";
 }
 
+function notifyHybridPreviewResize(source = "layout") {
+  window.dispatchEvent(new CustomEvent("hybrid-preview-resize", {
+    detail: { source, mode: activeHybridTab },
+  }));
+}
+
 function setHybridPreviewAspect(width, height) {
   const wrapEl = document.getElementById("hybridPreviewWrap");
   if (!wrapEl) {
@@ -6674,13 +6800,15 @@ function setHybridPreviewAspect(width, height) {
   const h = Number(height);
   if (Number.isFinite(w) && w > 0 && Number.isFinite(h) && h > 0) {
     wrapEl.style.setProperty("--hybrid-stream-aspect", `${w} / ${h}`);
+    notifyHybridPreviewResize("aspect-known");
     return;
   }
   wrapEl.style.setProperty("--hybrid-stream-aspect", HYBRID_PREVIEW_DEFAULT_ASPECT);
+  notifyHybridPreviewResize("aspect-default");
 }
 
 function resetHybridPoseState() {
-  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.6, A: 0.4, R: 0, P: 0 };
+  const defaults = hybridPoseDefaults();
   Object.keys(defaults).forEach((axis) => {
     hybridPose[axis] = defaults[axis];
   });
@@ -6690,7 +6818,7 @@ function resetHybridPoseState() {
 }
 
 function hybridClampValue(axis, value) {
-  const limits = HYBRID_POSE_LIMITS[axis];
+  const limits = hybridPoseLimits()[axis];
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
     return limits ? limits.min : 0;
@@ -6702,7 +6830,7 @@ function hybridClampValue(axis, value) {
 }
 
 function hybridSyncPoseFromHeadControls() {
-  const defaults = { X: 0, Y: 0, Z: 0, H: 0, S: 0.6, A: 0.4, R: 0, P: 0 };
+  const defaults = hybridPoseDefaults();
   Object.keys(defaults).forEach((axis) => {
     const el = document.getElementById(axis);
     const fallback = defaults[axis];
@@ -6710,6 +6838,122 @@ function hybridSyncPoseFromHeadControls() {
     const normalized = Number.isFinite(parsed) ? parsed : fallback;
     hybridPose[axis] = hybridClampValue(axis, normalized);
   });
+}
+
+function normalizeHybridTouchTuneable(key, rawValue) {
+  const numeric = Number(rawValue);
+  const fallback = Number(HYBRID_TOUCH_DEFAULTS[key]);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  const bounds = {
+    speed: { min: 0, max: 10, step: 0.1 },
+    accel: { min: 0, max: 10, step: 0.1 },
+    xLimit: { min: 50, max: 1200, step: 1 },
+    yLimit: { min: 50, max: 1200, step: 1 },
+    zLimit: { min: 50, max: 1200, step: 1 },
+    rLimit: { min: 50, max: 1200, step: 1 },
+    pLimit: { min: 50, max: 1200, step: 1 },
+  }[key];
+  if (!bounds) {
+    return fallback;
+  }
+  const clamped = Math.min(bounds.max, Math.max(bounds.min, numeric));
+  if (bounds.step >= 1) {
+    return Math.round(clamped);
+  }
+  return Number(clamped.toFixed(2));
+}
+
+function applyHybridTouchTuneables(options = {}) {
+  hybridPose.S = Number(hybridTouchTuneables.speed);
+  hybridPose.A = Number(hybridTouchTuneables.accel);
+  Object.keys(hybridPose).forEach((axis) => {
+    hybridPose[axis] = hybridClampValue(axis, hybridPose[axis]);
+  });
+  const forceDispatch = !!options.forceDispatch;
+  if (forceDispatch) {
+    dispatchHybridCommand({ force: true, minIntervalMs: 0 });
+    return;
+  }
+  renderHybridReadout();
+}
+
+function bindHybridTouchTuneablePair(numberId, rangeId, key) {
+  const numberEl = document.getElementById(numberId);
+  const rangeEl = document.getElementById(rangeId);
+  if (!numberEl || !rangeEl) {
+    return;
+  }
+
+  const syncFields = (value) => {
+    const bounds = {
+      speed: { step: 0.1 },
+      accel: { step: 0.1 },
+      xLimit: { step: 1 },
+      yLimit: { step: 1 },
+      zLimit: { step: 1 },
+      rLimit: { step: 1 },
+      pLimit: { step: 1 },
+    }[key] || { step: 1 };
+    const text = bounds.step >= 1 ? String(Math.round(value)) : String(Number(value).toFixed(2));
+    numberEl.value = text;
+    rangeEl.value = text;
+  };
+
+  const applyRaw = (rawValue, options = {}) => {
+    const normalized = normalizeHybridTouchTuneable(key, rawValue);
+    hybridTouchTuneables[key] = normalized;
+    syncFields(normalized);
+    const shouldDispatch = options.forceDispatch === true;
+    applyHybridTouchTuneables({ forceDispatch: shouldDispatch });
+  };
+
+  numberEl.addEventListener("input", () => applyRaw(numberEl.value, { forceDispatch: activeHybridTab === "touch" }));
+  rangeEl.addEventListener("input", () => applyRaw(rangeEl.value, { forceDispatch: activeHybridTab === "touch" }));
+  applyRaw(hybridTouchTuneables[key], { forceDispatch: false });
+}
+
+function setupHybridTouchTuneables() {
+  if (hybridTouchTuneablesInitialized) {
+    return;
+  }
+  hybridTouchTuneablesInitialized = true;
+
+  bindHybridTouchTuneablePair("touchTuneSpeed", "touchTuneSpeedRange", "speed");
+  bindHybridTouchTuneablePair("touchTuneAccel", "touchTuneAccelRange", "accel");
+  bindHybridTouchTuneablePair("touchTuneXLimit", "touchTuneXLimitRange", "xLimit");
+  bindHybridTouchTuneablePair("touchTuneYLimit", "touchTuneYLimitRange", "yLimit");
+  bindHybridTouchTuneablePair("touchTuneZLimit", "touchTuneZLimitRange", "zLimit");
+  bindHybridTouchTuneablePair("touchTuneRLimit", "touchTuneRLimitRange", "rLimit");
+  bindHybridTouchTuneablePair("touchTunePLimit", "touchTunePLimitRange", "pLimit");
+
+  const resetBtn = document.getElementById("touchTuneResetBtn");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      Object.assign(hybridTouchTuneables, HYBRID_TOUCH_DEFAULTS);
+      [
+        ["touchTuneSpeed", "touchTuneSpeedRange", "speed"],
+        ["touchTuneAccel", "touchTuneAccelRange", "accel"],
+        ["touchTuneXLimit", "touchTuneXLimitRange", "xLimit"],
+        ["touchTuneYLimit", "touchTuneYLimitRange", "yLimit"],
+        ["touchTuneZLimit", "touchTuneZLimitRange", "zLimit"],
+        ["touchTuneRLimit", "touchTuneRLimitRange", "rLimit"],
+        ["touchTunePLimit", "touchTunePLimitRange", "pLimit"],
+      ].forEach(([numberId, rangeId, key]) => {
+        const numberEl = document.getElementById(numberId);
+        const rangeEl = document.getElementById(rangeId);
+        const value = hybridTouchTuneables[key];
+        if (numberEl) {
+          numberEl.value = String(value);
+        }
+        if (rangeEl) {
+          rangeEl.value = String(value);
+        }
+      });
+      applyHybridTouchTuneables({ forceDispatch: activeHybridTab === "touch" });
+    });
+  }
 }
 
 function buildHybridCommandPayload() {
@@ -7124,6 +7368,7 @@ function setupHybridUi() {
   }
   hybridUiInitialized = true;
 
+  setupHybridTouchTuneables();
   hybridSyncPoseFromHeadControls();
   renderHybridReadout();
 

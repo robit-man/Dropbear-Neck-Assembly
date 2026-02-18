@@ -865,25 +865,31 @@
               </span>
             </button>
             <button id="hybridRefreshFeedsBtn" type="button">Refresh Feeds</button>
+            <div id="hybridModeActionMount" class="hybrid-mode-action-mount" aria-live="polite"></div>
           </div>
+          <p id="hybridModeStatus" class="hybrid-mode-status">Mode idle</p>
           <div class="hybrid-preview-layout">
             <div id="hybridPreviewWrap" class="hybrid-preview-wrap">
               <img id="hybridPreviewImage" alt="Hybrid Preview" style="display:none;">
               <div id="hybridPreviewEmpty" class="hybrid-preview-empty">Authenticate and select a camera feed.</div>
-              <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
-              <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
-              <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Right">&#9654;</button>
-              <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
-              <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="8" aria-label="Yaw Left">&#9664;</button>
+              <div id="hybridMorphSceneMount" class="hybrid-mode-overlay hybrid-scene-overlay" data-overlay-mode="morph" aria-hidden="true"></div>
+              <div id="hybridOrientationSceneMount" class="hybrid-mode-overlay hybrid-scene-overlay" data-overlay-mode="orientation" aria-hidden="true"></div>
+              <div id="hybridTouchOverlay" class="hybrid-mode-overlay hybrid-touch-overlay active" data-overlay-mode="touch" aria-hidden="false">
+                <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
+                <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
+                <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Right">&#9654;</button>
+                <button class="hybrid-arrow hybrid-arrow-down" type="button" data-axis="P" data-delta="-8" aria-label="Pitch Down">&#9660;</button>
+                <button class="hybrid-arrow hybrid-arrow-left" type="button" data-axis="X" data-delta="8" aria-label="Yaw Left">&#9664;</button>
+              </div>
             </div>
-            <div class="hybrid-height-control">
+            <div class="hybrid-height-control hybrid-touch-control">
               <label class="hybrid-height-label" for="hybridHeightSlider">Height</label>
               <input id="hybridHeightSlider" class="hybrid-height-slider" type="range" min="0" max="70" step="1" value="0" aria-label="Hybrid height adjustment">
               <output id="hybridHeightValue" class="hybrid-height-value" for="hybridHeightSlider">H0</output>
             </div>
           </div>
           <p id="hybridControlReadout" class="hybrid-control-readout">X0,Y0,Z0,H0,S0.6,A0.4,R0,P0</p>
-          <p class="hybrid-control-hint">
+          <p class="hybrid-control-hint hybrid-touch-control">
             Left drag: yaw/pitch. Right drag (or Ctrl/Cmd + left drag): lateral/forward-back.
             Middle drag (or Shift + left drag): roll/height.
             Scroll or right slider: height. Hold arrows for continuous trim.
@@ -901,10 +907,61 @@
           <p id="hybridImuMeta" class="imu-readout-meta">IMU idle</p>
         </div>
         <div id="hybridAudioMount"></div>
+        <div id="hybridTuneablesDock" class="hybrid-tuneables-dock">
+          <details id="hybridTouchTuneablesDetails" class="hybrid-tuneables-panel" data-hybrid-tuneables-mode="touch" hidden>
+            <summary>Touch Tuneables</summary>
+            <div id="hybridTouchTuneablesMount" class="hybrid-tuneables-body">
+              <p class="tuneables-note">Touch mode defaults and limits.</p>
+              <div class="row">
+                <label for="touchTuneSpeed">Speed (S):</label>
+                <input type="number" id="touchTuneSpeed" min="0" max="10" step="0.1" value="0.6" style="width:90px;">
+                <input type="range" id="touchTuneSpeedRange" min="0" max="10" step="0.1" value="0.6">
+              </div>
+              <div class="row">
+                <label for="touchTuneAccel">Acceleration (A):</label>
+                <input type="number" id="touchTuneAccel" min="0" max="10" step="0.1" value="0.4" style="width:90px;">
+                <input type="range" id="touchTuneAccelRange" min="0" max="10" step="0.1" value="0.4">
+              </div>
+              <div class="row">
+                <label for="touchTuneXLimit">Yaw Limit (X):</label>
+                <input type="number" id="touchTuneXLimit" min="50" max="1200" step="1" value="500" style="width:90px;">
+                <input type="range" id="touchTuneXLimitRange" min="50" max="1200" step="1" value="500">
+              </div>
+              <div class="row">
+                <label for="touchTuneYLimit">Lateral Limit (Y):</label>
+                <input type="number" id="touchTuneYLimit" min="50" max="1200" step="1" value="800" style="width:90px;">
+                <input type="range" id="touchTuneYLimitRange" min="50" max="1200" step="1" value="800">
+              </div>
+              <div class="row">
+                <label for="touchTuneZLimit">Front/Back Limit (Z):</label>
+                <input type="number" id="touchTuneZLimit" min="50" max="1200" step="1" value="800" style="width:90px;">
+                <input type="range" id="touchTuneZLimitRange" min="50" max="1200" step="1" value="800">
+              </div>
+              <div class="row">
+                <label for="touchTuneRLimit">Roll Limit (R):</label>
+                <input type="number" id="touchTuneRLimit" min="50" max="1200" step="1" value="300" style="width:90px;">
+                <input type="range" id="touchTuneRLimitRange" min="50" max="1200" step="1" value="300">
+              </div>
+              <div class="row">
+                <label for="touchTunePLimit">Pitch Limit (P):</label>
+                <input type="number" id="touchTunePLimit" min="50" max="1200" step="1" value="300" style="width:90px;">
+                <input type="range" id="touchTunePLimitRange" min="50" max="1200" step="1" value="300">
+              </div>
+              <div class="row">
+                <button id="touchTuneResetBtn" type="button">Reset Touch Defaults</button>
+              </div>
+            </div>
+          </details>
+          <details id="hybridMorphTuneablesDetails" class="hybrid-tuneables-panel" data-hybrid-tuneables-mode="morph" hidden>
+            <summary>Morphtarget Tuneables</summary>
+            <div id="hybridMorphTuneablesMount" class="hybrid-tuneables-body"></div>
+          </details>
+          <details id="hybridOrientationTuneablesDetails" class="hybrid-tuneables-panel" data-hybrid-tuneables-mode="orientation" hidden>
+            <summary>Orientation Tuneables</summary>
+            <div id="hybridOrientationTuneablesMount" class="hybrid-tuneables-body"></div>
+          </details>
+        </div>
       </div>
-
-      <div id="hybridTabMorph" class="hybrid-tab-panel"></div>
-      <div id="hybridTabOrientation" class="hybrid-tab-panel"></div>
     </section>
 
     <section class="view" data-view="debug">

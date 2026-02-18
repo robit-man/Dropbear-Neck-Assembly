@@ -6,8 +6,9 @@ import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
 import vision from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0';
 
 const { FaceLandmarker, FilesetResolver } = vision;
-const streamStatusEl = document.getElementById('streamStatus');
+const streamStatusEl = document.getElementById('hybridModeStatus') || document.getElementById('streamStatus');
 const commandStreamEl = document.getElementById('commandStream');
+const hybridCommandReadoutEl = document.getElementById('hybridControlReadout');
 const viewport = document.getElementById('morphCanvasWrap');
 
 const COMMAND_INTERVAL_MS = 90;
@@ -42,8 +43,27 @@ const defaultTuneables = {
 const tuneables = { ...defaultTuneables };
 
 function setStreamStatus(message, error = false) {
+  const hybridPanel = document.getElementById('hybridTabTouch');
+  const hybridMode = hybridPanel ? String(hybridPanel.dataset.hybridMode || '') : '';
+  if (streamStatusEl && streamStatusEl.id === 'hybridModeStatus' && hybridMode !== 'morph') {
+    return;
+  }
+  if (!streamStatusEl) {
+    return;
+  }
   streamStatusEl.textContent = message;
   streamStatusEl.style.color = error ? '#ff4444' : 'var(--accent)';
+}
+
+function updateCommandReadout(command) {
+  const hybridPanel = document.getElementById('hybridTabTouch');
+  const hybridMode = hybridPanel ? String(hybridPanel.dataset.hybridMode || '') : '';
+  if (hybridCommandReadoutEl && command && hybridMode === 'morph') {
+    hybridCommandReadoutEl.textContent = String(command);
+  }
+  if (commandStreamEl && command) {
+    commandStreamEl.textContent = String(command);
+  }
 }
 
 function isControlTransportReady() {
@@ -135,17 +155,23 @@ function setStreamPlaybackEnabled(enabled) {
     if (lastTrackedPose) {
       setPoseBaselineFromPose(lastTrackedPose);
       baselinePendingOnPlay = false;
-      commandStreamEl.textContent = "Centered at Play position";
+      if (commandStreamEl) {
+        commandStreamEl.textContent = "Centered at Play position";
+      }
     } else {
       setStreamStatus('Play requested - waiting for face...');
-      commandStreamEl.textContent = "Waiting for face to set Play baseline...";
+      if (commandStreamEl) {
+        commandStreamEl.textContent = "Waiting for face to set Play baseline...";
+      }
     }
     logToConsole('[STREAM] Morphtarget play');
   } else {
     baselinePendingOnPlay = false;
     poseBaseline = null;
     smoothed = null;
-    commandStreamEl.textContent = "Paused - press Play Stream";
+    if (commandStreamEl) {
+      commandStreamEl.textContent = "Paused - press Play Stream";
+    }
     setStreamStatus('Tracking paused');
     logToConsole('[STREAM] Morphtarget paused');
   }
@@ -354,6 +380,9 @@ function buildPoseCommand(transformObj, euler) {
 }
 
 function resizeViewport(renderer, camera) {
+  if (!viewport) {
+    return;
+  }
   const width = Math.max(320, viewport.clientWidth || 960);
   const height = Math.max(220, viewport.clientHeight || 420);
   renderer.setSize(width, height, false);
@@ -365,12 +394,13 @@ async function main() {
   setStreamStatus('Starting camera...');
   setupTuneablesUi();
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.setClearColor(0x000000, 0);
   viewport.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x111111);
+  scene.background = null;
 
   const camera = new THREE.PerspectiveCamera(60, 1, 1, 100);
   camera.position.z = 3.8;
@@ -382,6 +412,13 @@ async function main() {
 
   resizeViewport(renderer, camera);
   window.addEventListener('resize', () => resizeViewport(renderer, camera));
+  window.addEventListener('hybrid-preview-resize', (event) => {
+    resizeViewport(renderer, camera);
+    const mode = event && event.detail ? String(event.detail.mode || '') : '';
+    if (mode && mode !== 'morph' && streamPlaybackEnabled) {
+      setStreamPlaybackEnabled(false);
+    }
+  });
 
   const grpTransform = new THREE.Group();
   grpTransform.name = 'grp_transform';
@@ -488,13 +525,15 @@ async function main() {
         if (streamPlaybackEnabled && baselinePendingOnPlay) {
           setPoseBaselineFromPose(lastTrackedPose);
           baselinePendingOnPlay = false;
-          commandStreamEl.textContent = "Centered at Play position";
+          if (commandStreamEl) {
+            commandStreamEl.textContent = "Centered at Play position";
+          }
         }
 
         if (streamPlaybackEnabled) {
           const commandStr = buildPoseCommand(transformObj, euler);
           if (commandStr) {
-            commandStreamEl.textContent = commandStr;
+            updateCommandReadout(commandStr);
             setStreamStatus('Tracking active');
 
             if (commandStr !== lastCommandSent && now - lastCommandSentAt >= tuneables.commandIntervalMs) {

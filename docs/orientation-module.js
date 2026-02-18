@@ -81,6 +81,7 @@ const ui = {
   statusEl: null,
   sceneHost: null,
 };
+const hybridCommandReadoutEl = document.getElementById("hybridControlReadout");
 
 const NORTH_POLE = new THREE.Vector3(0, 1, 0);
 const FALLBACK_REF = new THREE.Vector3(0, 0, -1);
@@ -122,11 +123,31 @@ function toFinite(value, fallback = 0) {
 }
 
 function setOrientationStatus(message, error = false) {
-  if (!ui.statusEl) {
+  if (ui.statusEl) {
+    ui.statusEl.textContent = message;
+    ui.statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+  }
+  const hybridPanel = document.getElementById("hybridTabTouch");
+  const hybridMode = hybridPanel ? String(hybridPanel.dataset.hybridMode || "") : "";
+  if (hybridMode !== "orientation") {
     return;
   }
-  ui.statusEl.textContent = message;
-  ui.statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+  const hybridStatusEl = document.getElementById("hybridModeStatus");
+  if (hybridStatusEl) {
+    hybridStatusEl.textContent = String(message || "");
+    hybridStatusEl.style.color = error ? "#ff4444" : "var(--accent)";
+  }
+}
+
+function updateHybridCommandReadout(command) {
+  const hybridPanel = document.getElementById("hybridTabTouch");
+  const hybridMode = hybridPanel ? String(hybridPanel.dataset.hybridMode || "") : "";
+  if (hybridMode !== "orientation") {
+    return;
+  }
+  if (hybridCommandReadoutEl && command) {
+    hybridCommandReadoutEl.textContent = String(command);
+  }
 }
 
 function updateStreamToggleUi() {
@@ -469,6 +490,7 @@ function processOrientationFrame() {
 
   const command = buildCommand(snapshot);
   if (!command) return;
+  updateHybridCommandReadout(command);
 
   const now = Date.now();
   if (command !== state.lastCommand && now - state.lastCommandSentAt >= tuneables.commandIntervalMs) {
@@ -764,14 +786,16 @@ function initScene() {
   }
 
   state.scene = new THREE.Scene();
-  state.scene.fog = new THREE.Fog(0x000000, 12, 35);
+  state.scene.fog = null;
+  state.scene.background = null;
 
   state.mainCamera = new THREE.PerspectiveCamera(65, 16 / 9, 0.05, 100);
   state.mainCamera.position.set(0, 15, 15);
   state.mainCamera.lookAt(0, 1.2, 0);
 
-  state.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  state.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   state.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  state.renderer.setClearColor(0x000000, 0);
   ui.sceneHost.innerHTML = "";
   ui.sceneHost.appendChild(state.renderer.domElement);
 
@@ -902,6 +926,13 @@ function initOrientationApp() {
   initScene();
 
   window.addEventListener("resize", resizeScene);
+  window.addEventListener("hybrid-preview-resize", (event) => {
+    resizeScene();
+    const mode = event && event.detail ? String(event.detail.mode || "") : "";
+    if (mode && mode !== "orientation" && state.playbackEnabled) {
+      setPlaybackEnabled(false);
+    }
+  });
   setOrientationStatus("Requesting orientation and location permissions...");
 
   startLocationTracking();

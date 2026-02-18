@@ -1031,18 +1031,23 @@ h3 {
 
 /* Headstream extras */
 #morphCanvasWrap {
+    position: absolute;
+    inset: 0;
     width: 100%;
-    height: 420px;
-    border: 2px solid var(--border-light);
-    border-radius: 0.5rem;
+    height: 100%;
+    min-height: 0;
+    border: 0;
+    border-radius: 0;
     overflow: hidden;
-    background: #101010;
+    background: transparent;
+    pointer-events: none;
 }
 
 #morphCanvasWrap canvas {
     width: 100%;
     height: 100%;
     display: block;
+    background: transparent !important;
 }
 
 .stream-grid {
@@ -1094,13 +1099,15 @@ h3 {
     height: 100%;
     min-height: 0;
     border: 0;
-    background: #000;
+    background: transparent;
+    pointer-events: none;
 }
 
 #orientationSceneHost canvas {
     display: block;
     width: 100% !important;
     height: 100% !important;
+    background: transparent !important;
 }
 
 .stream-preview-wrap {
@@ -1292,6 +1299,52 @@ h3 {
     justify-content: center;
 }
 
+.hybrid-mode-action-mount {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 2.1rem;
+}
+
+.hybrid-mode-toggle {
+    display: none;
+}
+
+.hybrid-mode-toggle.active {
+    display: inline-flex;
+}
+
+.hybrid-mode-status {
+    margin: 0.4rem 0 0 0;
+    min-height: 1.1rem;
+    font-size: 0.82rem;
+    opacity: 0.85;
+}
+
+.hybrid-mode-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+}
+
+.hybrid-mode-overlay.active {
+    display: block;
+}
+
+.hybrid-touch-overlay {
+    z-index: 4;
+}
+
+.hybrid-scene-overlay {
+    z-index: 2;
+    background: transparent;
+}
+
+#hybridTabTouch[data-hybrid-mode]:not([data-hybrid-mode="touch"]) .hybrid-touch-control {
+    display: none !important;
+}
+
 .hybrid-preview-wrap img {
     width: 100%;
     height: 100%;
@@ -1349,6 +1402,61 @@ h3 {
     color: rgba(255, 255, 255, 0.95);
     opacity: 0.42;
     backdrop-filter: blur(2px);
+}
+
+.hybrid-tuneables-dock {
+    margin-top: 0.75rem;
+    display: grid;
+    gap: 0.6rem;
+}
+
+.hybrid-tuneables-panel {
+    display: none;
+    border: 2px solid var(--border-dark);
+    border-radius: 0.55rem;
+    background: var(--bg-tertiary);
+    overflow: hidden;
+}
+
+.hybrid-tuneables-panel.active {
+    display: block;
+}
+
+.hybrid-tuneables-panel > summary {
+    cursor: pointer;
+    padding: 0.55rem 0.7rem;
+    font-weight: 700;
+    color: var(--accent);
+    list-style: none;
+    background: rgba(255, 174, 0, 0.07);
+    border-bottom: 1px solid transparent;
+}
+
+.hybrid-tuneables-panel > summary::-webkit-details-marker {
+    display: none;
+}
+
+.hybrid-tuneables-panel[open] > summary {
+    border-bottom-color: var(--border-dark);
+}
+
+.hybrid-tuneables-body {
+    padding: 0.6rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+}
+
+.hybrid-tuneables-body .control-section {
+    margin: 0;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    border-radius: 0;
+}
+
+.hybrid-tuneables-body .control-section h3 {
+    margin-top: 0;
 }
 
 .hybrid-arrow:hover,
@@ -1594,7 +1702,7 @@ h3 {
     }
 
     #morphCanvasWrap {
-        height: 300px;
+        height: 100%;
     }
 
     .stream-grid {
