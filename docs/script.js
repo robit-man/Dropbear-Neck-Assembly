@@ -278,6 +278,26 @@ function updateVideoMetrics() {
     return;
   }
 
+  if (cameraPreview.activeMode === STREAM_MODE_NKN) {
+    const activeId = String(cameraPreview.activeCameraId || cameraPreview.targetCameraId || "").trim();
+    if (cameraPreview.restartTimer) {
+      metrics.video.state = activeId ? `Reconnecting ${activeId}` : "Reconnecting";
+      metrics.video.stats = "NKN relay reconnecting";
+      metrics.video.quality = "warning";
+      return;
+    }
+    if (!routerTargetNknAddress) {
+      metrics.video.state = "NKN target missing";
+      metrics.video.stats = "Set Router NKN address";
+      metrics.video.quality = "error";
+      return;
+    }
+    metrics.video.state = activeId ? `Live ${activeId}` : "Live (NKN)";
+    metrics.video.stats = `${ROUTER_NKN_FRAME_MAX_KBPS} kbps cap | pull ${ROUTER_NKN_FRAME_POLL_INTERVAL_MS}ms`;
+    metrics.video.quality = "good";
+    return;
+  }
+
   if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
     metrics.video.state = "Auth required";
     metrics.video.stats = "-- fps | -- kbps | -- clients";
@@ -308,7 +328,9 @@ function updateVideoMetrics() {
     const clients = Number(feed.clients) || 0;
     metrics.video.stats = `${fps.toFixed(1)} fps | ${Math.round(kbps)} kbps | ${clients} clients`;
 
-    const requiresPersistentClient = cameraPreview.activeMode !== STREAM_MODE_JPEG;
+    const requiresPersistentClient =
+      cameraPreview.activeMode !== STREAM_MODE_JPEG &&
+      cameraPreview.activeMode !== STREAM_MODE_NKN;
     if (!feed.online) {
         metrics.video.state = `Offline ${feed.id}`;
         metrics.video.quality = "error";
@@ -2553,6 +2575,11 @@ const ROUTER_NKN_AUTO_RESOLVE_INTERVAL_MS = 45000;
 const ROUTER_NKN_SEND_RETRY_MAX_ATTEMPTS = 4;
 const ROUTER_NKN_SEND_RETRY_DELAY_MS = 450;
 const ROUTER_QR_SCAN_INTERVAL_MS = 140;
+const ROUTER_NKN_FRAME_TIMEOUT_MS = 5200;
+const ROUTER_NKN_FRAME_POLL_INTERVAL_MS = 280;
+const ROUTER_NKN_FRAME_MAX_KBPS = 900;
+const ROUTER_NKN_FRAME_MAX_WIDTH = 640;
+const ROUTER_NKN_FRAME_MAX_HEIGHT = 360;
 
 let nknUiInitialized = false;
 let browserNknClient = null;
@@ -2563,6 +2590,7 @@ let nknClientInitPromise = null;
 let nknResolveInFlight = false;
 let routerAutoResolveTimer = null;
 const pendingNknResolveRequests = new Map();
+const pendingNknFrameRequests = new Map();
 let routerQrScannerActive = false;
 let routerQrScannerTimer = null;
 let routerQrScannerStream = null;
@@ -3279,6 +3307,12 @@ function extractResolvedFromPayload(data) {
       tunnel.health_url,
       local.health_url
     );
+    cameraService.frame_packet_template = pickFirstNonEmptyString(
+      cameraService.frame_packet_template,
+      service.frame_packet_template,
+      tunnel.frame_packet_template,
+      local.frame_packet_template
+    );
     cameraService.local_base_url = pickFirstNonEmptyString(cameraService.local_base_url, service.local_base_url, local.base_url);
     if (!cameraService.local && Object.keys(local).length > 0) {
       cameraService.local = local;
@@ -3359,6 +3393,7 @@ function extractResolvedFromPayload(data) {
       base_url: pickFirstNonEmptyString(resolvedCamera.base_url, cameraService.base_url),
       list_url: pickFirstNonEmptyString(resolvedCamera.list_url, cameraService.list_url),
       health_url: pickFirstNonEmptyString(resolvedCamera.health_url, cameraService.health_url),
+      frame_packet_template: pickFirstNonEmptyString(resolvedCamera.frame_packet_template, cameraService.frame_packet_template),
       local_base_url: pickFirstNonEmptyString(resolvedCamera.local_base_url, cameraService.local_base_url),
       local: Object.keys(asObject(resolvedCamera.local)).length > 0 ? asObject(resolvedCamera.local) : asObject(cameraService.local),
       tunnel: Object.keys(asObject(resolvedCamera.tunnel)).length > 0 ? asObject(resolvedCamera.tunnel) : asObject(cameraService.tunnel),
@@ -3387,6 +3422,38 @@ function buildResolveRequestPayload(requestId) {
   };
 }
 
+function buildCameraFrameRequestPayload(requestId, cameraId, options = {}) {
+  const payload = {
+    event: "camera_frame_request",
+    request_id: requestId,
+    timestamp_ms: Date.now(),
+    from: browserNknClientAddress || browserNknPubHex || "",
+    camera_id: String(cameraId || "").trim(),
+    options: {
+      max_width: Number(options.max_width) || ROUTER_NKN_FRAME_MAX_WIDTH,
+      max_height: Number(options.max_height) || ROUTER_NKN_FRAME_MAX_HEIGHT,
+      max_kbps: Number(options.max_kbps) || ROUTER_NKN_FRAME_MAX_KBPS,
+      interval_ms: Number(options.interval_ms) || ROUTER_NKN_FRAME_POLL_INTERVAL_MS,
+      quality: Number(options.quality) || 56,
+      min_quality: Number(options.min_quality) || 22,
+      grayscale: !!options.grayscale,
+    },
+  };
+  const auth = {};
+  const sessionKey = String(cameraRouterSessionKey || "").trim();
+  const password = String(cameraRouterPassword || "").trim();
+  if (sessionKey) {
+    auth.session_key = sessionKey;
+  }
+  if (password) {
+    auth.password = password;
+  }
+  if (Object.keys(auth).length > 0) {
+    payload.auth = auth;
+  }
+  return payload;
+}
+
 function clearPendingNknResolveRequests(reason) {
   for (const [requestId, pending] of pendingNknResolveRequests.entries()) {
     clearTimeout(pending.timeoutHandle);
@@ -3395,6 +3462,16 @@ function clearPendingNknResolveRequests(reason) {
     }
   }
   pendingNknResolveRequests.clear();
+}
+
+function clearPendingNknFrameRequests(reason) {
+  for (const [requestId, pending] of pendingNknFrameRequests.entries()) {
+    clearTimeout(pending.timeoutHandle);
+    if (typeof pending.reject === "function") {
+      pending.reject(new Error(reason || `Frame request ${requestId} cancelled`));
+    }
+  }
+  pendingNknFrameRequests.clear();
 }
 
 function closeBrowserNknClient() {
@@ -3408,6 +3485,7 @@ function closeBrowserNknClient() {
     } catch (err) {}
   }
   clearPendingNknResolveRequests("Browser NKN client restarted");
+  clearPendingNknFrameRequests("Browser NKN client restarted");
 }
 
 function handleNknResolveMessage(source, data) {
@@ -3434,6 +3512,33 @@ function handleNknResolveMessage(source, data) {
   }
 }
 
+function handleNknCameraFrameMessage(source, data) {
+  const requestId = String((data || {}).request_id || "").trim();
+  if (!requestId) {
+    return;
+  }
+  const pending = pendingNknFrameRequests.get(requestId);
+  if (!pending) {
+    return;
+  }
+  clearTimeout(pending.timeoutHandle);
+  pendingNknFrameRequests.delete(requestId);
+
+  const status = String((data || {}).status || "").trim().toLowerCase();
+  const framePacket = asObject(data.frame_packet);
+  const frame = String(framePacket.frame || "").trim();
+  if (status === "success" && frame) {
+    pending.resolve({
+      source: String(source || ""),
+      payload: data,
+      framePacket,
+    });
+    return;
+  }
+  const message = String((data && data.message) || "Camera frame relay failed");
+  pending.reject(new Error(message));
+}
+
 function handleBrowserNknMessage(a, b) {
   const incoming = parseIncomingNknMessage(a, b);
   if (!incoming.payload) {
@@ -3453,6 +3558,10 @@ function handleBrowserNknMessage(a, b) {
   const eventName = String(data.event || data.type || "").trim().toLowerCase();
   if (eventName === "resolve_tunnels_result" || eventName === "router_info_result") {
     handleNknResolveMessage(incoming.source, data);
+    return;
+  }
+  if (eventName === "camera_frame_result") {
+    handleNknCameraFrameMessage(incoming.source, data);
   }
 }
 
@@ -3959,6 +4068,37 @@ async function requestResolvedEndpointsViaNkn(targetAddress, timeoutMs = ROUTER_
   });
 }
 
+async function requestCameraFrameViaNkn(cameraId, options = {}, timeoutMs = ROUTER_NKN_FRAME_TIMEOUT_MS) {
+  const targetAddress = String(routerTargetNknAddress || "").trim();
+  if (!targetAddress) {
+    throw new Error("Router NKN address is not configured");
+  }
+  await ensureBrowserNknClient();
+  const ready = await waitForBrowserNknReady(timeoutMs + 2000);
+  if (!ready) {
+    throw new Error("Browser NKN client is not ready");
+  }
+
+  const requestId = `frm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const payload = buildCameraFrameRequestPayload(requestId, cameraId, options);
+
+  return new Promise(async (resolve, reject) => {
+    const timeoutHandle = setTimeout(() => {
+      pendingNknFrameRequests.delete(requestId);
+      reject(new Error("Timed out waiting for NKN camera frame"));
+    }, Math.max(1000, Number(timeoutMs) || ROUTER_NKN_FRAME_TIMEOUT_MS));
+
+    pendingNknFrameRequests.set(requestId, { resolve, reject, timeoutHandle });
+    try {
+      await sendResolvePayloadWithRetry(targetAddress, payload, timeoutMs);
+    } catch (err) {
+      clearTimeout(timeoutHandle);
+      pendingNknFrameRequests.delete(requestId);
+      reject(err);
+    }
+  });
+}
+
 function startRouterAutoResolveTimer() {
   if (routerAutoResolveTimer) {
     clearInterval(routerAutoResolveTimer);
@@ -4168,6 +4308,7 @@ try {
 } catch (err) {}
 const STREAM_MODE_MJPEG = "mjpeg";
 const STREAM_MODE_JPEG = "jpeg";
+const STREAM_MODE_NKN = "nkn";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
 const CAMERA_FEED_POLL_INTERVAL_MS = 1500;
 const CAMERA_IMU_POLL_INTERVAL_MS = 200;
@@ -4891,6 +5032,9 @@ function getCurrentPreviewShareUrl() {
     return "";
   }
 
+  if (cameraPreview.activeMode === STREAM_MODE_NKN) {
+    return "";
+  }
   if (cameraPreview.activeMode === STREAM_MODE_JPEG) {
     return cameraRouterUrl(`/jpeg/${encodeURIComponent(cameraId)}`, true);
   }
@@ -4898,6 +5042,10 @@ function getCurrentPreviewShareUrl() {
 }
 
 async function shareCurrentPreviewLink() {
+  if (cameraPreview.activeMode === STREAM_MODE_NKN) {
+    setStreamStatus("NKN relay preview does not expose a direct share URL", true);
+    return;
+  }
   if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
     setStreamStatus("Authenticate with camera router before sharing stream links", true);
     return;
@@ -5125,7 +5273,19 @@ function startCameraFeedPolling() {
 }
 
 async function monitorCameraPreviewHealth() {
-  if (!cameraPreview.desired || !cameraRouterBaseUrl || !cameraRouterSessionKey) {
+  if (!cameraPreview.desired) {
+    return;
+  }
+  if (cameraPreview.activeMode === STREAM_MODE_NKN) {
+    if (!routerTargetNknAddress) {
+      cameraPreview.healthFailStreak += 1;
+      if (cameraPreview.healthFailStreak >= 2) {
+        scheduleCameraPreviewRestart("router nkn address missing");
+      }
+    }
+    return;
+  }
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
     return;
   }
   if (cameraPreview.monitorInFlight) {
@@ -5160,7 +5320,9 @@ async function monitorCameraPreviewHealth() {
 
     const clients = Number(selected.clients) || 0;
     const fps = Number(selected.fps) || 0;
-    const requiresPersistentClient = cameraPreview.activeMode !== STREAM_MODE_JPEG;
+    const requiresPersistentClient =
+      cameraPreview.activeMode !== STREAM_MODE_JPEG &&
+      cameraPreview.activeMode !== STREAM_MODE_NKN;
     if ((requiresPersistentClient && clients <= 0) || fps <= 0.2) {
       cameraPreview.zeroClientStreak += 1;
       if (cameraPreview.zeroClientStreak >= 3) {
@@ -5272,7 +5434,7 @@ function activatePreviewMode(mode) {
   const mjpegImg = document.getElementById("cameraPreviewImage");
   const videoEl = document.getElementById("cameraPreviewVideo");
   if (mjpegImg) {
-    mjpegImg.style.display = mode === "mjpeg" || mode === "jpeg" ? "block" : "none";
+    mjpegImg.style.display = mode === "mjpeg" || mode === "jpeg" || mode === "nkn" ? "block" : "none";
   }
   if (videoEl) {
     videoEl.style.display = mode === "webrtc" || mode === "mpegts" ? "block" : "none";
@@ -5372,7 +5534,10 @@ async function cycleCameraAccessRecovery(options = {}) {
 
     let previewRestarted = false;
     if (wasPreviewDesired && desiredCameraId) {
-      if (modeSelect && (desiredMode === STREAM_MODE_MJPEG || desiredMode === STREAM_MODE_JPEG)) {
+      if (
+        modeSelect &&
+        (desiredMode === STREAM_MODE_MJPEG || desiredMode === STREAM_MODE_JPEG || desiredMode === STREAM_MODE_NKN)
+      ) {
         modeSelect.value = desiredMode;
       }
       await startCameraPreview({
@@ -5932,6 +6097,147 @@ async function refreshCameraFeeds(options = {}) {
   }
 }
 
+function ensureCameraFeedOption(cameraId) {
+  const id = String(cameraId || "").trim();
+  if (!id) {
+    return;
+  }
+  const feedSelect = document.getElementById("cameraFeedSelect");
+  if (feedSelect) {
+    let option = Array.from(feedSelect.options).find((item) => String(item.value || "") === id);
+    if (!option) {
+      option = document.createElement("option");
+      option.value = id;
+      option.textContent = `${id} (NKN)`;
+      feedSelect.appendChild(option);
+    }
+    feedSelect.value = id;
+  }
+  if (!Array.isArray(cameraRouterFeeds)) {
+    cameraRouterFeeds = [];
+  }
+  const existing = cameraRouterFeeds.find((feed) => String(feed && feed.id || "") === id);
+  if (!existing) {
+    cameraRouterFeeds.push({
+      id,
+      label: `${id} (NKN)`,
+      online: true,
+      fps: 0,
+      kbps: 0,
+      clients: 0,
+      modes: {},
+      protocols: cameraRouterProtocols,
+    });
+  }
+}
+
+async function startNknPreview(cameraId) {
+  activatePreviewMode("nkn");
+  const imageEl = document.getElementById("cameraPreviewImage");
+  if (!imageEl) {
+    return;
+  }
+  if (!routerTargetNknAddress) {
+    throw new Error("Set Router NKN address before starting NKN preview");
+  }
+
+  let frameInFlight = false;
+  const pollIntervalMs = ROUTER_NKN_FRAME_POLL_INTERVAL_MS;
+  const requestTimeoutMs = Math.max(
+    ROUTER_NKN_FRAME_TIMEOUT_MS,
+    Math.round(pollIntervalMs * 3.5)
+  );
+
+  cameraPreview.activeCameraId = String(cameraId || "").trim();
+  cameraPreview.targetCameraId = String(cameraId || "").trim();
+  cameraPreview.activeMode = STREAM_MODE_NKN;
+  cameraPreview.jpegFallbackAttempted = false;
+
+  const pullFrame = async () => {
+    if (!cameraPreview.desired || cameraPreview.activeMode !== STREAM_MODE_NKN) {
+      return;
+    }
+    if (frameInFlight) {
+      return;
+    }
+    frameInFlight = true;
+    try {
+      const requestedCameraId = String(
+        cameraPreview.targetCameraId ||
+        cameraPreview.activeCameraId ||
+        cameraId ||
+        ""
+      ).trim();
+      const response = await requestCameraFrameViaNkn(
+        requestedCameraId,
+        {
+          max_width: ROUTER_NKN_FRAME_MAX_WIDTH,
+          max_height: ROUTER_NKN_FRAME_MAX_HEIGHT,
+          max_kbps: ROUTER_NKN_FRAME_MAX_KBPS,
+          interval_ms: pollIntervalMs,
+          quality: 56,
+          min_quality: 22,
+          grayscale: false,
+        },
+        requestTimeoutMs
+      );
+      const packet = asObject(
+        (response && response.framePacket) ||
+        (response && response.payload && response.payload.frame_packet) ||
+        {}
+      );
+      const frameB64 = String(packet.frame || "").trim();
+      if (!frameB64) {
+        throw new Error("Missing frame data in NKN reply");
+      }
+      const resolvedCameraId = String(packet.camera_id || requestedCameraId || "").trim();
+      if (resolvedCameraId) {
+        cameraPreview.activeCameraId = resolvedCameraId;
+        cameraPreview.targetCameraId = resolvedCameraId;
+        localStorage.setItem("cameraRouterSelectedFeed", resolvedCameraId);
+        ensureCameraFeedOption(resolvedCameraId);
+      }
+
+      imageEl.src = `data:image/jpeg;base64,${frameB64}`;
+      cameraPreview.healthFailStreak = 0;
+      cameraPreview.zeroClientStreak = 0;
+      updateMetrics();
+    } catch (err) {
+      const message = err && err.message ? err.message : String(err || "NKN frame error");
+      cameraPreview.healthFailStreak += 1;
+      if (cameraPreview.healthFailStreak <= 2) {
+        setStreamStatus(`NKN frame error: ${message}`, true);
+      }
+      if (cameraPreview.desired && cameraPreview.activeMode === STREAM_MODE_NKN && cameraPreview.healthFailStreak >= 3) {
+        scheduleCameraPreviewRestart("nkn frame timeout");
+      }
+    } finally {
+      frameInFlight = false;
+    }
+  };
+
+  imageEl.onload = () => {
+    cameraPreview.healthFailStreak = 0;
+    cameraPreview.zeroClientStreak = 0;
+    updateMetrics();
+  };
+  imageEl.onerror = () => {
+    cameraPreview.healthFailStreak += 1;
+    if (cameraPreview.desired && cameraPreview.activeMode === STREAM_MODE_NKN && cameraPreview.healthFailStreak >= 3) {
+      scheduleCameraPreviewRestart("nkn frame decode failure");
+    }
+  };
+  imageEl.onabort = imageEl.onerror;
+
+  await pullFrame();
+  cameraPreview.jpegTimer = setInterval(() => {
+    pullFrame().catch(() => {});
+  }, pollIntervalMs);
+  syncPinnedPreviewSource({ forceRefresh: true });
+  setPinButtonState();
+  updateMetrics();
+}
+
 async function startJpegPreview(cameraId) {
   activatePreviewMode("jpeg");
   const imageEl = document.getElementById("cameraPreviewImage");
@@ -6103,7 +6409,21 @@ async function startCameraPreview(options = {}) {
     return;
   }
 
-  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+  let mode = modeSelect.value || STREAM_MODE_MJPEG;
+  const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG, STREAM_MODE_NKN]);
+  if (!allowedModes.has(mode)) {
+    mode = STREAM_MODE_MJPEG;
+    modeSelect.value = mode;
+  }
+  if (mode === STREAM_MODE_JPEG && isTryCloudflareBase(cameraRouterBaseUrl)) {
+    mode = STREAM_MODE_MJPEG;
+    modeSelect.value = mode;
+    localStorage.setItem("cameraRouterSelectedMode", mode);
+  }
+  if (mode !== STREAM_MODE_JPEG) {
+    cameraPreview.jpegFallbackAttempted = false;
+  }
+  if (mode !== STREAM_MODE_NKN && (!cameraRouterBaseUrl || !cameraRouterSessionKey)) {
     if (autoRestart) {
       setStreamStatus("Camera router authentication required before preview restart", true);
       scheduleCameraPreviewRestart("camera auth required");
@@ -6132,24 +6452,10 @@ async function startCameraPreview(options = {}) {
     cameraPreview.activeCameraId ||
     localStorage.getItem("cameraRouterSelectedFeed") ||
     "";
-  if (requestedCameraId && feedSelect.value !== requestedCameraId) {
+  if (requestedCameraId && feedSelect.value !== requestedCameraId && requestedCameraId) {
     feedSelect.value = requestedCameraId;
   }
-  let mode = modeSelect.value || STREAM_MODE_MJPEG;
-  const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG]);
-  if (!allowedModes.has(mode)) {
-    mode = STREAM_MODE_MJPEG;
-    modeSelect.value = mode;
-  }
-  if (mode === STREAM_MODE_JPEG && isTryCloudflareBase(cameraRouterBaseUrl)) {
-    mode = STREAM_MODE_MJPEG;
-    modeSelect.value = mode;
-    localStorage.setItem("cameraRouterSelectedMode", mode);
-  }
-  if (mode !== STREAM_MODE_JPEG) {
-    cameraPreview.jpegFallbackAttempted = false;
-  }
-  if (!cameraId) {
+  if (!cameraId && mode !== STREAM_MODE_NKN) {
     setStreamStatus("Select a feed first", true);
     if (autoRestart) {
       scheduleCameraPreviewRestart("waiting for feed selection");
@@ -6162,7 +6468,9 @@ async function startCameraPreview(options = {}) {
     return;
   }
 
-  localStorage.setItem("cameraRouterSelectedFeed", cameraId);
+  if (cameraId) {
+    localStorage.setItem("cameraRouterSelectedFeed", cameraId);
+  }
   localStorage.setItem("cameraRouterSelectedMode", mode);
   cameraPreview.targetCameraId = cameraId;
 
@@ -6172,7 +6480,10 @@ async function startCameraPreview(options = {}) {
   setStreamStatus(`${autoRestart ? "Restarting" : "Starting"} ${mode} preview for ${cameraId}...`);
 
   try {
-    if (mode === STREAM_MODE_JPEG) {
+    if (mode === STREAM_MODE_NKN) {
+      await startNknPreview(cameraId);
+      cameraPreview.activeMode = STREAM_MODE_NKN;
+    } else if (mode === STREAM_MODE_JPEG) {
       await startJpegPreview(cameraId);
       cameraPreview.activeMode = STREAM_MODE_JPEG;
     } else {
@@ -6238,7 +6549,7 @@ function setupStreamConfigUi() {
   }
   if (modeSelect) {
     const savedMode = localStorage.getItem("cameraRouterSelectedMode") || STREAM_MODE_MJPEG;
-    const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG]);
+    const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG, STREAM_MODE_NKN]);
     modeSelect.value = allowedModes.has(savedMode) ? savedMode : STREAM_MODE_MJPEG;
     localStorage.setItem("cameraRouterSelectedMode", modeSelect.value);
   }
@@ -6326,7 +6637,7 @@ function setupStreamConfigUi() {
   }
   if (modeSelect) {
     modeSelect.addEventListener("change", () => {
-      const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG]);
+      const allowedModes = new Set([STREAM_MODE_MJPEG, STREAM_MODE_JPEG, STREAM_MODE_NKN]);
       if (!allowedModes.has(modeSelect.value)) {
         modeSelect.value = STREAM_MODE_MJPEG;
       }
@@ -6346,7 +6657,11 @@ function setupStreamConfigUi() {
     refreshCameraImu({ silent: true }).catch(() => {});
   } else {
     stopCameraImuStream();
-    setStreamStatus("Configure camera router URL + password, then authenticate");
+    if (modeSelect && modeSelect.value === STREAM_MODE_NKN) {
+      setStreamStatus("NKN relay mode ready. Set Router NKN address in Settings.");
+    } else {
+      setStreamStatus("Configure camera router URL + password, then authenticate");
+    }
     renderHybridFeedOptions();
     updateCameraImuReadouts(null, {
       message: "Authenticate camera router to read /imu",

@@ -23,7 +23,7 @@ import threading
 import time
 from collections import deque
 from threading import Lock
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +136,14 @@ DEFAULT_UI_REFRESH_INTERVAL_MS = 700
 DASHBOARD_HISTORY_MAX_POINTS = 720
 DASHBOARD_LOG_MAX_ENTRIES = 800
 DASHBOARD_SAMPLE_INTERVAL_SECONDS = 1.0
+CAMERA_FRAME_REQUEST_TIMEOUT_SECONDS = 6.0
+CAMERA_FRAME_AUTH_CACHE_SECONDS = 240
+CAMERA_FRAME_DEFAULT_MAX_WIDTH = 640
+CAMERA_FRAME_DEFAULT_MAX_HEIGHT = 360
+CAMERA_FRAME_DEFAULT_MAX_KBPS = 900
+CAMERA_FRAME_DEFAULT_INTERVAL_MS = 280
+CAMERA_FRAME_DEFAULT_QUALITY = 56
+CAMERA_FRAME_DEFAULT_MIN_QUALITY = 22
 
 _MISSING = object()
 request_counter = {"value": 0}
@@ -199,6 +207,13 @@ telemetry_state = {
 }
 activity_logs_lock = Lock()
 activity_logs = deque(maxlen=DASHBOARD_LOG_MAX_ENTRIES)
+camera_relay_lock = Lock()
+camera_relay_state = {
+    "base_url": "",
+    "session_key": "",
+    "expires_at": 0.0,
+    "last_error": "",
+}
 
 
 def _append_activity_log(message, category="system", peer="", direction="", event="", extra=None):
@@ -1309,6 +1324,306 @@ def _fetch_json(url, timeout=SERVICE_FETCH_TIMEOUT_SECONDS):
     return response.status_code, data
 
 
+def _camera_frame_options(raw_options):
+    options = raw_options if isinstance(raw_options, dict) else {}
+    return {
+        "max_width": _as_int(
+            options.get("max_width"),
+            CAMERA_FRAME_DEFAULT_MAX_WIDTH,
+            minimum=96,
+            maximum=1920,
+        ),
+        "max_height": _as_int(
+            options.get("max_height"),
+            CAMERA_FRAME_DEFAULT_MAX_HEIGHT,
+            minimum=72,
+            maximum=1080,
+        ),
+        "max_kbps": _as_int(
+            options.get("max_kbps"),
+            CAMERA_FRAME_DEFAULT_MAX_KBPS,
+            minimum=50,
+            maximum=4000,
+        ),
+        "interval_ms": _as_int(
+            options.get("interval_ms"),
+            CAMERA_FRAME_DEFAULT_INTERVAL_MS,
+            minimum=40,
+            maximum=2000,
+        ),
+        "quality": _as_int(
+            options.get("quality"),
+            CAMERA_FRAME_DEFAULT_QUALITY,
+            minimum=10,
+            maximum=95,
+        ),
+        "min_quality": _as_int(
+            options.get("min_quality"),
+            CAMERA_FRAME_DEFAULT_MIN_QUALITY,
+            minimum=8,
+            maximum=95,
+        ),
+        "grayscale": bool(_as_bool(options.get("grayscale"), default=False)),
+    }
+
+
+def _camera_relay_info_from_snapshot(snapshot):
+    services = snapshot.get("services", {}) if isinstance(snapshot, dict) else {}
+    resolved = snapshot.get("resolved", {}) if isinstance(snapshot, dict) else {}
+    camera_record = services.get("camera", {}) if isinstance(services, dict) else {}
+    camera_data = camera_record.get("data", {}) if isinstance(camera_record, dict) else {}
+    if not isinstance(camera_data, dict):
+        camera_data = {}
+    camera_local = camera_data.get("local", {}) if isinstance(camera_data.get("local"), dict) else {}
+    camera_security = camera_data.get("security", {}) if isinstance(camera_data.get("security"), dict) else {}
+    resolved_camera = resolved.get("camera", {}) if isinstance(resolved, dict) else {}
+
+    camera_base = str(
+        camera_local.get("base_url")
+        or camera_data.get("local_base_url")
+        or (resolved_camera.get("local_base_url") if isinstance(resolved_camera, dict) else "")
+        or ""
+    ).strip()
+    if not camera_base and isinstance(resolved_camera, dict):
+        camera_base = str(resolved_camera.get("base_url") or "").strip()
+    if not camera_base:
+        query_url = str(service_endpoints.get("camera_router_info_url") or "").strip()
+        if query_url:
+            try:
+                parsed = urlparse(query_url)
+                if parsed.scheme and parsed.netloc:
+                    camera_base = f"{parsed.scheme}://{parsed.netloc}"
+            except Exception:
+                camera_base = ""
+
+    require_auth = bool(camera_security.get("require_auth", True))
+    session_timeout = _as_int(
+        camera_security.get("session_timeout"),
+        300,
+        minimum=30,
+        maximum=7200,
+    )
+    return {
+        "base_url": camera_base,
+        "require_auth": require_auth,
+        "session_timeout": session_timeout,
+    }
+
+
+def _camera_cached_session(camera_base):
+    now = time.time()
+    with camera_relay_lock:
+        if (
+            str(camera_relay_state.get("base_url") or "") == str(camera_base or "")
+            and camera_relay_state.get("session_key")
+            and float(camera_relay_state.get("expires_at", 0.0) or 0.0) > now
+        ):
+            return str(camera_relay_state.get("session_key") or "")
+    return ""
+
+
+def _camera_store_session(camera_base, session_key, ttl_seconds):
+    ttl = max(30.0, float(ttl_seconds or CAMERA_FRAME_AUTH_CACHE_SECONDS))
+    with camera_relay_lock:
+        camera_relay_state["base_url"] = str(camera_base or "")
+        camera_relay_state["session_key"] = str(session_key or "")
+        camera_relay_state["expires_at"] = time.time() + ttl
+        camera_relay_state["last_error"] = ""
+
+
+def _camera_clear_session(camera_base=""):
+    with camera_relay_lock:
+        if camera_base and str(camera_relay_state.get("base_url") or "") != str(camera_base):
+            return
+        camera_relay_state["session_key"] = ""
+        camera_relay_state["expires_at"] = 0.0
+
+
+def _camera_authenticate(camera_base, password, timeout_seconds):
+    base = str(camera_base or "").rstrip("/")
+    secret = str(password or "").strip()
+    if not base:
+        return "", 0, "camera base URL unavailable"
+    if not secret:
+        return "", 0, "camera password missing"
+    try:
+        response = requests.post(
+            f"{base}/auth",
+            json={"password": secret},
+            timeout=max(2.0, float(timeout_seconds)),
+        )
+    except Exception as exc:
+        return "", 0, f"camera auth request failed: {exc}"
+    if response.status_code != 200:
+        return "", 0, f"camera auth failed with HTTP {response.status_code}"
+    try:
+        data = response.json() if response.content else {}
+    except Exception as exc:
+        return "", 0, f"camera auth response parse failed: {exc}"
+    if str(data.get("status") or "").strip().lower() != "success":
+        return "", 0, str(data.get("message") or "camera auth failed")
+    session_key = str(data.get("session_key") or "").strip()
+    if not session_key:
+        return "", 0, "camera auth missing session key"
+    timeout_value = _as_int(
+        data.get("timeout"),
+        CAMERA_FRAME_AUTH_CACHE_SECONDS,
+        minimum=30,
+        maximum=7200,
+    )
+    return session_key, timeout_value, ""
+
+
+def _camera_pick_feed_id(camera_base, headers, timeout_seconds):
+    base = str(camera_base or "").rstrip("/")
+    if not base:
+        return "", "camera base URL unavailable"
+    try:
+        response = requests.get(
+            f"{base}/list",
+            headers=headers,
+            timeout=max(2.0, float(timeout_seconds)),
+        )
+    except Exception as exc:
+        return "", f"camera list request failed: {exc}"
+    if response.status_code == 401:
+        return "", "camera auth required"
+    if response.status_code != 200:
+        return "", f"camera list failed with HTTP {response.status_code}"
+    try:
+        data = response.json() if response.content else {}
+    except Exception as exc:
+        return "", f"camera list parse failed: {exc}"
+    if str(data.get("status") or "").strip().lower() != "success":
+        return "", str(data.get("message") or "camera list error")
+    cameras = data.get("cameras")
+    if not isinstance(cameras, list) or not cameras:
+        return "", "camera list is empty"
+    for entry in cameras:
+        if not isinstance(entry, dict):
+            continue
+        if bool(entry.get("online")):
+            camera_id = str(entry.get("id") or "").strip()
+            if camera_id:
+                return camera_id, ""
+    for entry in cameras:
+        if not isinstance(entry, dict):
+            continue
+        camera_id = str(entry.get("id") or "").strip()
+        if camera_id:
+            return camera_id, ""
+    return "", "camera list contains no usable IDs"
+
+
+def _camera_fetch_frame_packet(camera_id, options, auth):
+    snapshot = get_service_snapshot(force_refresh=False)
+    if not snapshot.get("timestamp_ms"):
+        snapshot = collect_service_snapshot()
+    camera_info = _camera_relay_info_from_snapshot(snapshot)
+    base_url = str(camera_info.get("base_url") or "").strip().rstrip("/")
+    if not base_url:
+        return False, {}, "camera base URL unavailable in snapshot"
+
+    require_auth = bool(camera_info.get("require_auth"))
+    session_timeout = _as_int(camera_info.get("session_timeout"), 300, minimum=30, maximum=7200)
+    timeout_seconds = max(2.0, float(CAMERA_FRAME_REQUEST_TIMEOUT_SECONDS))
+    frame_options = _camera_frame_options(options)
+
+    auth_payload = auth if isinstance(auth, dict) else {}
+    provided_session = str(auth_payload.get("session_key") or "").strip()
+    provided_password = str(auth_payload.get("password") or "").strip()
+    cached_session = _camera_cached_session(base_url)
+    session_key = provided_session or cached_session
+
+    if require_auth and not session_key:
+        if not provided_password:
+            return False, {}, "camera auth required: provide auth.password or auth.session_key"
+        session_key, ttl, err = _camera_authenticate(base_url, provided_password, timeout_seconds)
+        if not session_key:
+            return False, {}, err
+        _camera_store_session(base_url, session_key, min(session_timeout, ttl))
+
+    headers = {}
+    if require_auth and session_key:
+        headers["X-Session-Key"] = session_key
+
+    requested_camera_id = str(camera_id or "").strip()
+    if not requested_camera_id:
+        picked_id, pick_err = _camera_pick_feed_id(base_url, headers=headers, timeout_seconds=timeout_seconds)
+        if not picked_id and require_auth and pick_err == "camera auth required" and provided_password:
+            session_key, ttl, err = _camera_authenticate(base_url, provided_password, timeout_seconds)
+            if not session_key:
+                return False, {}, err
+            _camera_store_session(base_url, session_key, min(session_timeout, ttl))
+            headers["X-Session-Key"] = session_key
+            picked_id, pick_err = _camera_pick_feed_id(base_url, headers=headers, timeout_seconds=timeout_seconds)
+        if not picked_id:
+            return False, {}, pick_err or "unable to choose camera feed"
+        requested_camera_id = picked_id
+
+    frame_url = f"{base_url}/frame_packet/{quote(requested_camera_id, safe='')}"
+    params = {
+        "max_width": frame_options["max_width"],
+        "max_height": frame_options["max_height"],
+        "max_kbps": frame_options["max_kbps"],
+        "interval_ms": frame_options["interval_ms"],
+        "quality": frame_options["quality"],
+        "min_quality": frame_options["min_quality"],
+        "grayscale": "1" if frame_options["grayscale"] else "0",
+    }
+
+    def do_request(active_headers):
+        return requests.get(
+            frame_url,
+            params=params,
+            headers=active_headers,
+            timeout=timeout_seconds,
+        )
+
+    try:
+        response = do_request(headers)
+    except Exception as exc:
+        return False, {}, f"camera frame request failed: {exc}"
+
+    if response.status_code == 401 and require_auth:
+        _camera_clear_session(base_url)
+        if provided_password:
+            session_key, ttl, err = _camera_authenticate(base_url, provided_password, timeout_seconds)
+            if not session_key:
+                return False, {}, err
+            _camera_store_session(base_url, session_key, min(session_timeout, ttl))
+            headers["X-Session-Key"] = session_key
+            try:
+                response = do_request(headers)
+            except Exception as exc:
+                return False, {}, f"camera frame retry failed: {exc}"
+        else:
+            return False, {}, "camera auth required: session expired"
+
+    if response.status_code != 200:
+        return False, {}, f"camera frame request failed with HTTP {response.status_code}"
+
+    try:
+        data = response.json() if response.content else {}
+    except Exception as exc:
+        return False, {}, f"camera frame parse failed: {exc}"
+
+    if str(data.get("status") or "").strip().lower() != "success":
+        return False, {}, str(data.get("message") or "camera frame request error")
+
+    packet = data.get("frame_packet")
+    if not isinstance(packet, dict):
+        return False, {}, "camera frame payload missing"
+    frame_b64 = str(packet.get("frame") or "").strip()
+    if not frame_b64:
+        return False, {}, "camera frame payload empty"
+
+    packet["camera_id"] = str(packet.get("camera_id") or requested_camera_id)
+    if require_auth and session_key:
+        _camera_store_session(base_url, session_key, min(session_timeout, CAMERA_FRAME_AUTH_CACHE_SECONDS))
+    return True, packet, ""
+
+
 def _service_record(name, query_url):
     return {
         "service": name,
@@ -1392,12 +1707,14 @@ def _coerce_router_info_shape(name, query_url, data):
                 "auth_url": f"{base_local}/auth",
                 "list_url": f"{base_local}/list",
                 "health_url": f"{base_local}/health",
+                "frame_packet_template": f"{base_local}/frame_packet/<camera_id>",
             },
             "tunnel": {
                 "state": "active" if tunnel_url else "inactive",
                 "tunnel_url": tunnel_url,
                 "list_url": f"{tunnel_url}/list" if tunnel_url else "",
                 "health_url": f"{tunnel_url}/health" if tunnel_url else "",
+                "frame_packet_template": f"{tunnel_url}/frame_packet/<camera_id>" if tunnel_url else "",
             },
         }
     if "tunnel_url" in data:
@@ -1449,12 +1766,14 @@ def _coerce_router_info_shape(name, query_url, data):
                 "auth_url": f"{base_local}/auth",
                 "list_url": f"{base_local}/list",
                 "health_url": f"{base_local}/health",
+                "frame_packet_template": f"{base_local}/frame_packet/<camera_id>",
             },
             "tunnel": {
                 "state": "active" if tunnel_url else "inactive",
                 "tunnel_url": tunnel_url,
                 "list_url": f"{tunnel_url}/list" if tunnel_url else "",
                 "health_url": f"{tunnel_url}/health" if tunnel_url else "",
+                "frame_packet_template": f"{tunnel_url}/frame_packet/<camera_id>" if tunnel_url else "",
             },
         }
     return None
@@ -1704,6 +2023,14 @@ def build_resolved_endpoints(services):
         camera_fallback_nkn.get("health_url"),
         f"{camera_base}/health" if camera_base else "",
     )
+    camera_frame_packet_template = _first_nonempty(
+        camera_tunnel.get("frame_packet_template"),
+        camera_fallback_upnp.get("frame_packet_template"),
+        camera_fallback_nats.get("frame_packet_template"),
+        camera_fallback_nkn.get("frame_packet_template"),
+        camera_local.get("frame_packet_template"),
+        f"{camera_base}/frame_packet/<camera_id>" if camera_base else "",
+    )
     camera_transport = str(
         _first_nonempty(
             camera_fallback.get("selected_transport"),
@@ -1829,6 +2156,7 @@ def build_resolved_endpoints(services):
             "base_url": camera_base,
             "list_url": str(camera_list).strip(),
             "health_url": str(camera_health).strip(),
+            "frame_packet_template": str(camera_frame_packet_template).strip(),
             "local_base_url": str(camera_local.get("base_url") or "").strip(),
             "fallback": camera_fallback,
         },
@@ -1957,6 +2285,45 @@ def _handle_nkn_message(source, payload_text):
                 event="resolve_tunnels_result",
                 extra={"request_id": request_id},
             )
+        return
+
+    if event_name in ("camera_frame_request", "video_frame_request"):
+        requested_camera_id = str(payload.get("camera_id") or "").strip()
+        frame_options = payload.get("options") if isinstance(payload.get("options"), dict) else {}
+        auth_payload = payload.get("auth") if isinstance(payload.get("auth"), dict) else {}
+        ok, frame_packet, err = _camera_fetch_frame_packet(
+            requested_camera_id,
+            frame_options,
+            auth_payload,
+        )
+        reply = {
+            "event": "camera_frame_result",
+            "request_id": request_id,
+            "timestamp_ms": int(time.time() * 1000),
+            "status": "success" if ok else "error",
+        }
+        if ok:
+            reply["frame_packet"] = frame_packet
+            reply["camera_id"] = str(frame_packet.get("camera_id") or requested_camera_id)
+            _append_activity_log(
+                f"Camera frame relayed to {source} ({reply['camera_id']})",
+                category="nkn",
+                direction="out",
+                peer=source,
+                event="camera_frame_result",
+                extra={"request_id": request_id, "camera_id": reply["camera_id"]},
+            )
+        else:
+            reply["message"] = str(err or "camera frame relay failed")
+            _append_activity_log(
+                f"Camera frame request from {source} failed: {reply['message']}",
+                category="nkn",
+                direction="in",
+                peer=source,
+                event="camera_frame_request",
+                extra={"request_id": request_id, "camera_id": requested_camera_id},
+            )
+        send_nkn_dm(source, reply, tries=1)
         return
 
     if event_name == "ping":

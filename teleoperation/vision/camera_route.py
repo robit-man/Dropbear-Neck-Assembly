@@ -14,6 +14,7 @@ Capabilities:
 """
 
 import datetime
+import base64
 import glob
 import json
 import os
@@ -229,6 +230,13 @@ DEFAULT_STREAM_DEFAULT_ROTATION_DEGREES = 90 if DEFAULT_ROTATE_CLOCKWISE else 0
 DEFAULT_WEBRTC_TARGET_FPS = 24
 DEFAULT_MPEGTS_TARGET_FPS = 24
 DEFAULT_MPEGTS_JPEG_QUALITY = 60
+DEFAULT_FRAME_PACKET_MAX_WIDTH = 640
+DEFAULT_FRAME_PACKET_MAX_HEIGHT = 360
+DEFAULT_FRAME_PACKET_JPEG_QUALITY = 56
+DEFAULT_FRAME_PACKET_MIN_JPEG_QUALITY = 22
+DEFAULT_FRAME_PACKET_MAX_KBPS = 900
+DEFAULT_FRAME_PACKET_INTERVAL_MS = 280
+FRAME_PACKET_HARD_MAX_BYTES = 140000
 DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
 DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS = 45.0
 MAX_TUNNEL_RESTART_DELAY_SECONDS = 300.0
@@ -315,6 +323,7 @@ upnp_fallback_state = {
     "public_base_url": "",
     "list_url": "",
     "health_url": "",
+    "frame_packet_template": "",
     "error": "",
     "last_attempt_ms": 0,
 }
@@ -442,6 +451,7 @@ def _refresh_upnp_fallback(listen_port, force=False):
         "public_base_url": "",
         "list_url": "",
         "health_url": "",
+        "frame_packet_template": "",
         "error": "",
         "last_attempt_ms": now_ms,
     }
@@ -521,6 +531,7 @@ def _refresh_upnp_fallback(listen_port, force=False):
                 "public_base_url": public_base,
                 "list_url": f"{public_base}/list",
                 "health_url": f"{public_base}/health",
+                "frame_packet_template": f"{public_base}/frame_packet/<camera_id>",
                 "error": "",
             }
         )
@@ -2184,6 +2195,7 @@ def camera_mode_urls(camera_id):
     return {
         "jpeg": f"/jpeg/{camera_id}",
         "mjpeg": f"/mjpeg/{camera_id}",
+        "frame_packet": f"/frame_packet/{camera_id}",
         "mpegts": f"/mpegts/{camera_id}",
         "webrtc_offer": f"/webrtc/offer/{camera_id}",
         "webrtc_player": f"/webrtc/player/{camera_id}",
@@ -4184,6 +4196,7 @@ def list_cameras():
                 "imu_stream": "/imu/stream",
                 "snapshot": "/camera/<camera_id>",
                 "jpeg": "/jpeg/<camera_id>",
+                "frame_packet": "/frame_packet/<camera_id>",
                 "stream": "/video/<camera_id>",
                 "mjpeg": "/mjpeg/<camera_id>",
                 "mpegts": "/mpegts/<camera_id>",
@@ -4578,10 +4591,139 @@ def snapshot(camera_id):
     return Response(jpeg, mimetype="image/jpeg")
 
 
+def _frame_packet_target_bytes(max_kbps, interval_ms):
+    kbps = max(50, int(max_kbps))
+    interval = max(40, int(interval_ms))
+    target = int((kbps * 1000.0 / 8.0) * (interval / 1000.0))
+    return max(2048, min(FRAME_PACKET_HARD_MAX_BYTES, target))
+
+
+def _frame_packet_encode_jpeg(frame, quality):
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        frame,
+        [int(cv2.IMWRITE_JPEG_QUALITY), int(max(1, min(95, int(quality))))],
+    )
+    if not ok:
+        return None
+    return encoded.tobytes()
+
+
+def _build_frame_packet_payload(feed, camera_id, options):
+    frame = feed.latest_frame_copy()
+    if frame is None:
+        return None, "No frame available"
+
+    max_width = _as_int(options.get("max_width"), DEFAULT_FRAME_PACKET_MAX_WIDTH, minimum=96, maximum=1920)
+    max_height = _as_int(options.get("max_height"), DEFAULT_FRAME_PACKET_MAX_HEIGHT, minimum=72, maximum=1080)
+    max_kbps = _as_int(options.get("max_kbps"), DEFAULT_FRAME_PACKET_MAX_KBPS, minimum=50, maximum=4000)
+    interval_ms = _as_int(options.get("interval_ms"), DEFAULT_FRAME_PACKET_INTERVAL_MS, minimum=40, maximum=2000)
+    quality = _as_int(options.get("quality"), DEFAULT_FRAME_PACKET_JPEG_QUALITY, minimum=10, maximum=95)
+    min_quality = _as_int(
+        options.get("min_quality"),
+        DEFAULT_FRAME_PACKET_MIN_JPEG_QUALITY,
+        minimum=8,
+        maximum=quality,
+    )
+    grayscale = bool(_as_bool(options.get("grayscale"), default=False))
+
+    prepared = frame
+    if grayscale:
+        if len(prepared.shape) == 3:
+            prepared = cv2.cvtColor(prepared, cv2.COLOR_BGR2GRAY)
+    elif len(prepared.shape) == 2:
+        prepared = cv2.cvtColor(prepared, cv2.COLOR_GRAY2BGR)
+
+    src_h, src_w = prepared.shape[:2]
+    scale_w = max_width / float(max(1, src_w))
+    scale_h = max_height / float(max(1, src_h))
+    scale = min(scale_w, scale_h, 1.0)
+    if scale < 1.0:
+        target_w = max(1, int(round(src_w * scale)))
+        target_h = max(1, int(round(src_h * scale)))
+        prepared = cv2.resize(prepared, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
+    target_bytes = _frame_packet_target_bytes(max_kbps, interval_ms)
+
+    encoded = None
+    used_quality = int(quality)
+    for quality_try in range(int(quality), int(min_quality) - 1, -6):
+        candidate = _frame_packet_encode_jpeg(prepared, quality_try)
+        if candidate is None:
+            continue
+        encoded = candidate
+        used_quality = quality_try
+        if len(candidate) <= target_bytes:
+            break
+
+    if encoded is None:
+        return None, "JPEG encode failed"
+
+    if len(encoded) > target_bytes:
+        resized = prepared
+        for _ in range(6):
+            prev_h, prev_w = resized.shape[:2]
+            next_w = max(64, int(round(prev_w * 0.85)))
+            next_h = max(48, int(round(prev_h * 0.85)))
+            if next_w == prev_w and next_h == prev_h:
+                break
+            resized = cv2.resize(resized, (next_w, next_h), interpolation=cv2.INTER_AREA)
+            candidate = _frame_packet_encode_jpeg(resized, min_quality)
+            if candidate is None:
+                continue
+            encoded = candidate
+            used_quality = min_quality
+            if len(candidate) <= target_bytes:
+                prepared = resized
+                break
+            prepared = resized
+
+    h, w = prepared.shape[:2]
+    frame_b64 = base64.b64encode(encoded).decode("ascii")
+    return {
+        "camera_id": str(camera_id),
+        "frame": frame_b64,
+        "encoding": "image/jpeg;base64",
+        "timestamp_ms": int(time.time() * 1000),
+        "width": int(w),
+        "height": int(h),
+        "quality": int(used_quality),
+        "bytes": int(len(encoded)),
+        "target_bytes": int(target_bytes),
+        "max_kbps": int(max_kbps),
+        "interval_ms": int(interval_ms),
+        "grayscale": bool(grayscale),
+    }, ""
+
+
 @app.route("/jpeg/<camera_id>")
 @require_session
 def jpeg_snapshot(camera_id):
     return snapshot(camera_id)
+
+
+@app.route("/frame_packet/<camera_id>", methods=["GET"])
+@require_session
+def frame_packet(camera_id):
+    feed = get_feed(camera_id)
+    if not feed:
+        return jsonify({"status": "error", "message": "Camera not found", "camera_id": camera_id}), 404
+    if not get_feed_enabled(feed):
+        return jsonify({"status": "error", "message": "Camera disabled", "camera_id": camera_id}), 403
+
+    options = {
+        "max_width": request.args.get("max_width"),
+        "max_height": request.args.get("max_height"),
+        "max_kbps": request.args.get("max_kbps"),
+        "interval_ms": request.args.get("interval_ms"),
+        "quality": request.args.get("quality"),
+        "min_quality": request.args.get("min_quality"),
+        "grayscale": request.args.get("grayscale"),
+    }
+    payload, error = _build_frame_packet_payload(feed, camera_id, options)
+    if payload is None:
+        return jsonify({"status": "error", "message": error or "Frame unavailable", "camera_id": camera_id}), 503
+    return jsonify({"status": "success", "frame_packet": payload})
 
 
 def mjpeg_stream(feed):
@@ -4856,12 +4998,16 @@ def router_info():
                 "auth_url": f"{local_base}/auth",
                 "list_url": f"{local_base}/list",
                 "health_url": f"{local_base}/health",
+                "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
             },
             "tunnel": {
                 "state": tunnel_state,
                 "tunnel_url": current_tunnel,
                 "list_url": f"{current_tunnel}/list" if current_tunnel else "",
                 "health_url": f"{current_tunnel}/health" if current_tunnel else "",
+                "frame_packet_template": (
+                    f"{current_tunnel}/frame_packet/<camera_id>" if current_tunnel else ""
+                ),
                 "stale_tunnel_url": stale_tunnel,
                 "error": current_error,
             },
