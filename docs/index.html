@@ -982,7 +982,19 @@
       </details>
       <details class="streams-panel">
         <summary>Camera Stream Test</summary>
-        <div id="debugCameraMount" class="streams-panel-body"></div>
+        <div class="streams-panel-body">
+          <div id="debugCameraMount"></div>
+          <div class="control-section">
+            <div class="row">
+              <button id="debugCameraCycleBtn" type="button">Cycle Camera Access</button>
+              <label style="display:inline-flex;align-items:center;gap:0.35rem;">
+                <input id="debugCameraForceRecovery" type="checkbox" checked>
+                Force stale-holder cleanup
+              </label>
+            </div>
+            <p id="debugCameraCycleStatus" class="imu-readout-meta">Camera recovery idle.</p>
+          </div>
+        </div>
       </details>
       <details class="streams-panel">
         <summary>Audio Stream Test</summary>

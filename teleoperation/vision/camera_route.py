@@ -279,6 +279,7 @@ service_running = threading.Event()
 capture_threads_lock = Lock()
 active_capture_handles = {}
 active_capture_handles_lock = Lock()
+camera_worker_cycle_lock = Lock()
 camera_rotation_rules = {}
 camera_rotation_rules_lock = Lock()
 camera_enable_rules = {}
@@ -364,6 +365,100 @@ def _release_all_active_capture_handles():
             handle.release()
         except Exception:
             pass
+
+
+def _active_capture_handle_counts():
+    with active_capture_handles_lock:
+        return {
+            str(feed_id): int(len(handles or []))
+            for feed_id, handles in active_capture_handles.items()
+            if handles
+        }
+
+
+def _camera_recovery_device_paths():
+    paths = set()
+
+    with camera_feeds_lock:
+        feeds = list(camera_feeds.values())
+    for feed in feeds:
+        device_path = str(getattr(feed, "device_path", "") or "").strip()
+        if device_path:
+            paths.add(device_path)
+
+    if os.name != "nt":
+        device_glob = str(source_options.get("camera_device_glob", DEFAULT_CAMERA_DEVICE_GLOB) or "").strip()
+        if device_glob:
+            for device_path in glob.glob(device_glob):
+                if os.path.exists(device_path):
+                    paths.add(device_path)
+
+    return sorted(paths)
+
+
+def cycle_camera_access(reason="", force_recover=False, settle_seconds=0.35):
+    reason_text = str(reason or "").strip() or "manual cycle request"
+    settle_delay = max(0.0, min(3.0, float(settle_seconds or 0.0)))
+
+    with camera_worker_cycle_lock:
+        started_at = time.time()
+        before_statuses = all_feed_statuses()
+        before_total = len(before_statuses)
+        before_online = sum(1 for item in before_statuses if item.get("online"))
+        before_handles = _active_capture_handle_counts()
+        recovery_paths = _camera_recovery_device_paths()
+        recovered_devices = []
+
+        log(
+            f"[INFO] Camera recovery requested ({reason_text}); "
+            f"feeds {before_online}/{before_total} online, active handles={before_handles}"
+        )
+
+        stop_camera_workers()
+
+        if force_recover:
+            for device_path in recovery_paths:
+                try:
+                    if _recover_stale_camera_holders(device_path, force_all=True):
+                        recovered_devices.append(device_path)
+                except Exception as exc:
+                    log(f"[WARN] Camera stale-holder recovery failed for {device_path}: {exc}")
+
+        _release_all_active_capture_handles()
+        with camera_feeds_lock:
+            camera_feeds.clear()
+        with imu_lock:
+            imu_state.clear()
+
+        initialize_camera_workers()
+        if settle_delay > 0:
+            time.sleep(settle_delay)
+
+        after_statuses = all_feed_statuses()
+        after_total = len(after_statuses)
+        after_online = sum(1 for item in after_statuses if item.get("online"))
+        after_handles = _active_capture_handle_counts()
+        elapsed_ms = int(round((time.time() - started_at) * 1000.0))
+
+        log(
+            f"[INFO] Camera recovery complete ({reason_text}); "
+            f"feeds {after_online}/{after_total} online, active handles={after_handles}, "
+            f"elapsed={elapsed_ms}ms"
+        )
+
+        return {
+            "reason": reason_text,
+            "elapsed_ms": elapsed_ms,
+            "before_total": int(before_total),
+            "before_online": int(before_online),
+            "after_total": int(after_total),
+            "after_online": int(after_online),
+            "before_handles": before_handles,
+            "after_handles": after_handles,
+            "force_recover": bool(force_recover),
+            "recovery_devices_checked": recovery_paths,
+            "recovered_devices": recovered_devices,
+        }
 
 
 def _rotation_rule_keys_for_feed(feed):
@@ -3884,8 +3979,45 @@ def list_cameras():
                 "webrtc_player": "/webrtc/player/<camera_id>",
                 "stream_options": "/stream_options/<camera_id>",
                 "camera_state": "/camera_state/<camera_id>",
+                "camera_recover": "/camera/recover",
                 "router_info": "/router_info",
             },
+        }
+    )
+
+
+@app.route("/camera/recover", methods=["POST"])
+@app.route("/camera/cycle", methods=["POST"])
+@require_session
+def camera_recover():
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+
+    force_recover = bool(
+        _as_bool(
+            payload.get("force_recover", payload.get("force", payload.get("force_release", True))),
+            default=True,
+        )
+    )
+    settle_ms = _as_int(payload.get("settle_ms"), 350, minimum=0, maximum=3000)
+    reason = str(payload.get("reason") or payload.get("source") or "api").strip() or "api"
+
+    result = cycle_camera_access(
+        reason=reason,
+        force_recover=force_recover,
+        settle_seconds=float(settle_ms) / 1000.0,
+    )
+
+    message = (
+        f"Camera access cycled: {result['after_online']}/{result['after_total']} feeds online "
+        f"({result['elapsed_ms']}ms)"
+    )
+    return jsonify(
+        {
+            "status": "success",
+            "message": message,
+            **result,
         }
     )
 

@@ -1079,6 +1079,7 @@ function applyRoute(route) {
     if (displayRoute === "auth") {
         setupStreamConfigUi();
         initializeDebugAudioActions();
+        initializeDebugCameraActions();
     }
     if (displayRoute === "hybrid") {
         setupStreamConfigUi();
@@ -1096,6 +1097,7 @@ function applyRoute(route) {
         setupStreamConfigUi();
         initializeDebugTabs();
         initializeDebugAudioActions();
+        initializeDebugCameraActions();
     }
 
     if (
@@ -1279,8 +1281,18 @@ function reorganizeUnifiedViews() {
 }
 
 let debugAudioActionsInitialized = false;
+let debugCameraActionsInitialized = false;
 function setDebugAudioStatus(message, error = false) {
     const statusEl = document.getElementById("debugAudioStatus");
+    if (!statusEl) {
+        return;
+    }
+    statusEl.textContent = String(message || "");
+    statusEl.style.color = error ? "#ff4444" : "var(--accent)";
+}
+
+function setDebugCameraRecoveryStatus(message, error = false) {
+    const statusEl = document.getElementById("debugCameraCycleStatus");
     if (!statusEl) {
         return;
     }
@@ -1356,6 +1368,25 @@ function initializeDebugAudioActions() {
             refreshAudioDevices({ silent: false })
                 .then((ok) => setDebugAudioStatus(ok ? "Audio devices refreshed" : "Audio device refresh failed", !ok))
                 .catch((err) => setDebugAudioStatus(`Refresh failed: ${err}`, true));
+        });
+    }
+}
+
+function initializeDebugCameraActions() {
+    if (debugCameraActionsInitialized) {
+        return;
+    }
+    debugCameraActionsInitialized = true;
+
+    const cycleBtn = document.getElementById("debugCameraCycleBtn");
+    const forceToggle = document.getElementById("debugCameraForceRecovery");
+    if (cycleBtn) {
+        cycleBtn.addEventListener("click", () => {
+            const forceRecover = !(forceToggle && forceToggle.checked === false);
+            cycleCameraAccessRecovery({
+                forceRecover,
+                trigger: "debug-button",
+            }).catch(() => {});
         });
     }
 }
@@ -4007,6 +4038,7 @@ let cameraRouterProtocols = {
 };
 let cameraRouterRoutes = {
   imu: "/imu",
+  camera_recover: "/camera/recover",
 };
 const cameraPreview = {
   jpegTimer: null,
@@ -4115,6 +4147,7 @@ let cameraImuStreamActive = false;
 let cameraImuStreamRetryTimer = null;
 let cameraFeedPollTimer = null;
 let cameraFeedRefreshInFlight = false;
+let cameraRecoveryInFlight = false;
 let cameraSessionRotateInFlight = false;
 let cameraSelectInteractionUntilMs = 0;
 const cameraProfileDraftByFeed = Object.create(null);
@@ -4227,6 +4260,20 @@ function cameraRouterImuStreamPath() {
   const raw = String((cameraRouterRoutes && cameraRouterRoutes.imu_stream) || "/imu/stream").trim();
   if (!raw) {
     return "/imu/stream";
+  }
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function cameraRouterRecoverPath() {
+  const raw = String(
+    (cameraRouterRoutes && (
+      cameraRouterRoutes.camera_recover ||
+      cameraRouterRoutes.camera_cycle ||
+      cameraRouterRoutes.recover
+    )) || "/camera/recover"
+  ).trim();
+  if (!raw) {
+    return "/camera/recover";
   }
   return raw.startsWith("/") ? raw : `/${raw}`;
 }
@@ -5085,6 +5132,125 @@ async function cameraRouterFetch(path, options = {}, includeSession = true) {
     );
   }
   return response;
+}
+
+async function cycleCameraAccessRecovery(options = {}) {
+  if (cameraRecoveryInFlight) {
+    setDebugCameraRecoveryStatus("Camera recovery already running");
+    return false;
+  }
+
+  if (!cameraRouterBaseUrl || !cameraRouterSessionKey) {
+    setDebugCameraRecoveryStatus("Authenticate camera router before cycling camera access", true);
+    setStreamStatus("Authenticate camera router before cycling camera access", true);
+    return false;
+  }
+
+  const forceRecover = !(options && options.forceRecover === false);
+  const trigger = String((options && options.trigger) || "manual").trim() || "manual";
+  const cycleBtn = document.getElementById("debugCameraCycleBtn");
+  const modeSelect = document.getElementById("cameraModeSelect");
+  const desiredCameraId =
+    cameraPreview.targetCameraId ||
+    cameraPreview.activeCameraId ||
+    localStorage.getItem("cameraRouterSelectedFeed") ||
+    "";
+  const desiredMode = String((modeSelect && modeSelect.value) || localStorage.getItem("cameraRouterSelectedMode") || STREAM_MODE_MJPEG);
+  const wasPreviewDesired = !!cameraPreview.desired;
+
+  cameraRecoveryInFlight = true;
+  if (cycleBtn) {
+    cycleBtn.disabled = true;
+  }
+
+  setDebugCameraRecoveryStatus("Cycling camera access...");
+  setStreamStatus("Cycling camera access (release + reacquire)...");
+
+  stopCameraPreview({ keepDesired: false });
+  stopCameraImuStream();
+
+  try {
+    const response = await cameraRouterFetch(
+      cameraRouterRecoverPath(),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          force_recover: forceRecover,
+          reason: `frontend-${trigger}`,
+          settle_ms: 350,
+        }),
+      },
+      true
+    );
+
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (err) {
+      data = {};
+    }
+
+    if (!response.ok || data.status !== "success") {
+      if (response.status === 401) {
+        cameraRouterSessionKey = "";
+        localStorage.removeItem("cameraRouterSessionKey");
+        setDebugCameraRecoveryStatus("Session expired; re-authenticate camera router", true);
+        setStreamStatus("Session expired; re-authenticate camera router", true);
+        return false;
+      }
+      throw new Error(data.message || `HTTP ${response.status}`);
+    }
+
+    await refreshCameraFeeds({ silent: true, suppressErrors: true });
+    startCameraImuStream();
+    refreshCameraImu({ silent: true, force: true }).catch(() => {});
+
+    let previewRestarted = false;
+    if (wasPreviewDesired && desiredCameraId) {
+      if (modeSelect && (desiredMode === STREAM_MODE_MJPEG || desiredMode === STREAM_MODE_JPEG)) {
+        modeSelect.value = desiredMode;
+      }
+      await startCameraPreview({
+        autoRestart: true,
+        cameraId: desiredCameraId,
+        reason: "camera recovery cycle",
+      });
+      previewRestarted = true;
+    }
+
+    const afterOnline = Number(data.after_online);
+    const afterTotal = Number(data.after_total);
+    const elapsedMs = Number(data.elapsed_ms);
+    const summaryBits = [];
+    if (Number.isFinite(afterOnline) && Number.isFinite(afterTotal)) {
+      summaryBits.push(`${afterOnline}/${afterTotal} feeds online`);
+    } else {
+      summaryBits.push("camera cycle complete");
+    }
+    if (Number.isFinite(elapsedMs) && elapsedMs >= 0) {
+      summaryBits.push(`${Math.round(elapsedMs)}ms`);
+    }
+    if (previewRestarted) {
+      summaryBits.push("preview restarted");
+    }
+    const summary = `Camera recovery complete: ${summaryBits.join(" | ")}`;
+    setDebugCameraRecoveryStatus(summary);
+    setStreamStatus(summary);
+    return true;
+  } catch (err) {
+    startCameraImuStream();
+    refreshCameraImu({ silent: true, force: true }).catch(() => {});
+    setDebugCameraRecoveryStatus(`Camera recovery failed: ${err}`, true);
+    setStreamStatus(`Camera recovery failed: ${err}`, true);
+    return false;
+  } finally {
+    cameraRecoveryInFlight = false;
+    if (cycleBtn) {
+      cycleBtn.disabled = false;
+    }
+    updateMetrics();
+  }
 }
 
 async function authenticateCameraRouterWithPassword(password, options = {}) {
@@ -7784,6 +7950,7 @@ window.addEventListener('load', async () => {
   setupStreamConfigUi();
   setupHybridUi();
   initializeDebugAudioActions();
+  initializeDebugCameraActions();
   updateMetrics();
 
   if (queryConnection.adapterConfigured && queryConnection.passwordProvided) {
@@ -7844,6 +8011,7 @@ window.decQuatField = decQuatField;
 window.setRoute = setRoute;
 window.authenticateCameraRouter = authenticateCameraRouter;
 window.refreshCameraFeeds = refreshCameraFeeds;
+window.cycleCameraAccessRecovery = cycleCameraAccessRecovery;
 window.startCameraPreview = startCameraPreview;
 window.stopCameraPreview = stopCameraPreview;
 window.isControlTransportReady = isControlTransportReady;
