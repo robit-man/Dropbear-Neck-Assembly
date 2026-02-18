@@ -109,7 +109,7 @@ CONFIG_PATH = "config.json"
 NODE_SIDECAR_DIR = "nkn_sidecar"
 NODE_BRIDGE_FILE = "nkn_router_bridge.js"
 
-DEFAULT_LISTEN_HOST = "127.0.0.1"
+DEFAULT_LISTEN_HOST = "0.0.0.0"
 DEFAULT_LISTEN_PORT = 5070
 
 DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5180/router_info"
@@ -159,6 +159,10 @@ service_endpoints = {
     "adapter_router_info_url": DEFAULT_ADAPTER_ROUTER_INFO_URL,
     "camera_router_info_url": DEFAULT_CAMERA_ROUTER_INFO_URL,
     "audio_router_info_url": DEFAULT_AUDIO_ROUTER_INFO_URL,
+}
+router_network_runtime = {
+    "listen_host": DEFAULT_LISTEN_HOST,
+    "listen_port": DEFAULT_LISTEN_PORT,
 }
 service_snapshot = {
     "timestamp_ms": 0,
@@ -603,11 +607,50 @@ def _prefer_non_loopback_url(*values):
     return first_any
 
 
+def _resolve_lan_host(bind_host=""):
+    bind = str(bind_host or "").strip()
+    if bind and not _is_loopback_host(bind) and bind not in ("0.0.0.0", "::"):
+        return bind
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidate = str(sock.getsockname()[0] or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    try:
+        candidate = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
 def _httpish_url(value):
     text = str(value or "").strip()
     if text.startswith("http://") or text.startswith("https://"):
         return text
     return ""
+
+
+def _router_network_urls():
+    listen_host = str(router_network_runtime.get("listen_host", DEFAULT_LISTEN_HOST) or "").strip()
+    listen_port = int(router_network_runtime.get("listen_port", DEFAULT_LISTEN_PORT) or DEFAULT_LISTEN_PORT)
+    loopback_base = f"http://127.0.0.1:{listen_port}"
+    bind_base = f"http://{listen_host or DEFAULT_LISTEN_HOST}:{listen_port}"
+    lan_host = _resolve_lan_host(listen_host)
+    lan_base = f"http://{lan_host}:{listen_port}" if lan_host else ""
+    return {
+        "listen_host": listen_host or DEFAULT_LISTEN_HOST,
+        "listen_port": listen_port,
+        "loopback_base_url": loopback_base,
+        "bind_base_url": bind_base,
+        "lan_base_url": lan_base,
+        "dashboard_url": f"{loopback_base}/dashboard",
+        "lan_dashboard_url": f"{lan_base}/dashboard" if lan_base else "",
+    }
 
 
 def _normalize_nkn_address(value):
@@ -672,6 +715,8 @@ def _load_router_settings(config):
         ),
         DEFAULT_LISTEN_HOST,
     )
+    if _is_loopback_host(listen_host):
+        listen_host = DEFAULT_LISTEN_HOST
     promote("router.network.listen_host", listen_host)
 
     listen_port = _as_int(
@@ -1891,6 +1936,7 @@ def _coerce_router_info_shape(name, query_url, data):
                 "service": "audio_router",
                 "local": {
                     "base_url": base_local,
+                    "dashboard_url": f"{base_local}/",
                     "auth_url": f"{base_local}/auth",
                     "list_url": f"{base_local}/list",
                     "health_url": f"{base_local}/health",
@@ -1900,6 +1946,7 @@ def _coerce_router_info_shape(name, query_url, data):
                 "tunnel": {
                     "state": "active" if tunnel_url else "inactive",
                     "tunnel_url": tunnel_url,
+                    "dashboard_url": f"{tunnel_url}/" if tunnel_url else "",
                     "list_url": f"{tunnel_url}/list" if tunnel_url else "",
                     "health_url": f"{tunnel_url}/health" if tunnel_url else "",
                     "webrtc_offer_url": f"{tunnel_url}/webrtc/offer" if tunnel_url else "",
@@ -1910,6 +1957,7 @@ def _coerce_router_info_shape(name, query_url, data):
             "service": "camera_router",
             "local": {
                 "base_url": base_local,
+                "dashboard_url": f"{base_local}/",
                 "auth_url": f"{base_local}/auth",
                 "list_url": f"{base_local}/list",
                 "health_url": f"{base_local}/health",
@@ -1918,6 +1966,7 @@ def _coerce_router_info_shape(name, query_url, data):
             "tunnel": {
                 "state": "active" if tunnel_url else "inactive",
                 "tunnel_url": tunnel_url,
+                "dashboard_url": f"{tunnel_url}/" if tunnel_url else "",
                 "list_url": f"{tunnel_url}/list" if tunnel_url else "",
                 "health_url": f"{tunnel_url}/health" if tunnel_url else "",
                 "frame_packet_template": f"{tunnel_url}/frame_packet/<camera_id>" if tunnel_url else "",
@@ -1951,6 +2000,7 @@ def _coerce_router_info_shape(name, query_url, data):
                 "service": "audio_router",
                 "local": {
                     "base_url": base_local,
+                    "dashboard_url": f"{base_local}/",
                     "auth_url": f"{base_local}/auth",
                     "list_url": f"{base_local}/list",
                     "health_url": f"{base_local}/health",
@@ -1959,6 +2009,7 @@ def _coerce_router_info_shape(name, query_url, data):
                 "tunnel": {
                     "state": "active" if tunnel_url else "inactive",
                     "tunnel_url": tunnel_url,
+                    "dashboard_url": f"{tunnel_url}/" if tunnel_url else "",
                     "list_url": f"{tunnel_url}/list" if tunnel_url else "",
                     "health_url": f"{tunnel_url}/health" if tunnel_url else "",
                     "webrtc_offer_url": f"{tunnel_url}/webrtc/offer" if tunnel_url else "",
@@ -1969,6 +2020,7 @@ def _coerce_router_info_shape(name, query_url, data):
             "service": "camera_router",
             "local": {
                 "base_url": base_local,
+                "dashboard_url": f"{base_local}/",
                 "auth_url": f"{base_local}/auth",
                 "list_url": f"{base_local}/list",
                 "health_url": f"{base_local}/health",
@@ -1977,6 +2029,7 @@ def _coerce_router_info_shape(name, query_url, data):
             "tunnel": {
                 "state": "active" if tunnel_url else "inactive",
                 "tunnel_url": tunnel_url,
+                "dashboard_url": f"{tunnel_url}/" if tunnel_url else "",
                 "list_url": f"{tunnel_url}/list" if tunnel_url else "",
                 "health_url": f"{tunnel_url}/health" if tunnel_url else "",
                 "frame_packet_template": f"{tunnel_url}/frame_packet/<camera_id>" if tunnel_url else "",
@@ -2122,7 +2175,12 @@ def build_resolved_endpoints(services):
         adapter_tunnel.get("stale_tunnel_url"),
         adapter_data.get("tunnel_url"),
     )
-    adapter_local_base = str(adapter_local.get("base_url") or adapter_data.get("local_base_url") or "").strip()
+    adapter_local_base = _prefer_non_loopback_url(
+        adapter_local.get("lan_base_url"),
+        adapter_local.get("bind_base_url"),
+        adapter_local.get("base_url"),
+        adapter_data.get("local_base_url"),
+    )
     adapter_upnp_base = _httpish_url(
         adapter_fallback_upnp.get("public_base_url")
         or adapter_fallback_upnp.get("base_url")
@@ -2151,8 +2209,16 @@ def build_resolved_endpoints(services):
         adapter_fallback_nats.get("ws_endpoint"),
         adapter_fallback_nkn.get("ws_endpoint"),
     )
-    adapter_local_http = str(adapter_local.get("http_endpoint") or adapter_data.get("local_http_endpoint") or "").strip()
-    adapter_local_ws = str(adapter_local.get("ws_endpoint") or adapter_data.get("local_ws_endpoint") or "").strip()
+    adapter_local_http = _first_nonempty(
+        adapter_local.get("lan_http_endpoint"),
+        adapter_local.get("http_endpoint"),
+        adapter_data.get("local_http_endpoint"),
+    )
+    adapter_local_ws = _first_nonempty(
+        adapter_local.get("lan_ws_endpoint"),
+        adapter_local.get("ws_endpoint"),
+        adapter_data.get("local_ws_endpoint"),
+    )
     adapter_http = str(adapter_tunnel.get("http_endpoint") or adapter_data.get("http_endpoint") or "").strip()
     adapter_ws = str(adapter_tunnel.get("ws_endpoint") or adapter_data.get("ws_endpoint") or "").strip()
     adapter_base = _prefer_non_loopback_url(
@@ -2219,6 +2285,11 @@ def build_resolved_endpoints(services):
         _normalize_nkn_address(camera_fallback_nkn.get("address")),
         _normalize_nkn_address(camera_fallback_nkn.get("target_address")),
     )
+    camera_local_base = _prefer_non_loopback_url(
+        camera_local.get("lan_base_url"),
+        camera_local.get("bind_base_url"),
+        camera_local.get("base_url"),
+    )
     camera_base = _prefer_non_loopback_url(
         camera_tunnel_url,
         camera_upnp_base,
@@ -2226,7 +2297,7 @@ def build_resolved_endpoints(services):
         camera_nkn_base,
     )
     if not camera_base:
-        camera_base = str(camera_local.get("base_url") or "").strip()
+        camera_base = camera_local_base
     camera_list = _first_nonempty(
         camera_tunnel.get("list_url"),
         camera_fallback_upnp.get("list_url"),
@@ -2246,8 +2317,17 @@ def build_resolved_endpoints(services):
         camera_fallback_upnp.get("frame_packet_template"),
         camera_fallback_nats.get("frame_packet_template"),
         camera_fallback_nkn.get("frame_packet_template"),
+        camera_local.get("lan_frame_packet_template"),
         camera_local.get("frame_packet_template"),
         f"{camera_base}/frame_packet/<camera_id>" if camera_base else "",
+    )
+    camera_dashboard = _first_nonempty(
+        camera_local.get("lan_dashboard_url"),
+        camera_local.get("dashboard_url"),
+        camera_fallback_upnp.get("dashboard_url"),
+        camera_fallback_nats.get("dashboard_url"),
+        camera_fallback_nkn.get("dashboard_url"),
+        f"{camera_base}/" if camera_base else "",
     )
     camera_transport = str(
         _first_nonempty(
@@ -2290,6 +2370,11 @@ def build_resolved_endpoints(services):
         _normalize_nkn_address(audio_fallback_nkn.get("address")),
         _normalize_nkn_address(audio_fallback_nkn.get("target_address")),
     )
+    audio_local_base = _prefer_non_loopback_url(
+        audio_local.get("lan_base_url"),
+        audio_local.get("bind_base_url"),
+        audio_local.get("base_url"),
+    )
     audio_base = _prefer_non_loopback_url(
         audio_tunnel_url,
         audio_upnp_base,
@@ -2297,7 +2382,7 @@ def build_resolved_endpoints(services):
         audio_nkn_base,
     )
     if not audio_base:
-        audio_base = str(audio_local.get("base_url") or "").strip()
+        audio_base = audio_local_base
     audio_list = _first_nonempty(
         audio_tunnel.get("list_url"),
         audio_fallback_upnp.get("list_url"),
@@ -2317,7 +2402,17 @@ def build_resolved_endpoints(services):
         audio_fallback_upnp.get("webrtc_offer_url"),
         audio_fallback_nats.get("webrtc_offer_url"),
         audio_fallback_nkn.get("webrtc_offer_url"),
+        audio_local.get("lan_webrtc_offer_url"),
+        audio_local.get("webrtc_offer_url"),
         f"{audio_base}/webrtc/offer" if audio_base else "",
+    )
+    audio_dashboard = _first_nonempty(
+        audio_local.get("lan_dashboard_url"),
+        audio_local.get("dashboard_url"),
+        audio_fallback_upnp.get("dashboard_url"),
+        audio_fallback_nats.get("dashboard_url"),
+        audio_fallback_nkn.get("dashboard_url"),
+        f"{audio_base}/" if audio_base else "",
     )
     audio_transport = str(
         _first_nonempty(
@@ -2348,6 +2443,7 @@ def build_resolved_endpoints(services):
     ).strip()
     adapter_dashboard = str(
         _first_nonempty(
+            adapter_local.get("lan_dashboard_url"),
             adapter_local.get("dashboard_url"),
             adapter_fallback_upnp.get("dashboard_url"),
             adapter_fallback_nats.get("dashboard_url"),
@@ -2383,7 +2479,8 @@ def build_resolved_endpoints(services):
             "list_url": str(camera_list).strip(),
             "health_url": str(camera_health).strip(),
             "frame_packet_template": str(camera_frame_packet_template).strip(),
-            "local_base_url": str(camera_local.get("base_url") or "").strip(),
+            "dashboard_url": str(camera_dashboard).strip(),
+            "local_base_url": str(camera_local_base or "").strip(),
             "fallback": camera_fallback,
         },
         "audio": {
@@ -2394,7 +2491,8 @@ def build_resolved_endpoints(services):
             "list_url": str(audio_list).strip(),
             "health_url": str(audio_health).strip(),
             "webrtc_offer_url": str(audio_webrtc_offer).strip(),
-            "local_base_url": str(audio_local.get("base_url") or "").strip(),
+            "dashboard_url": str(audio_dashboard).strip(),
+            "local_base_url": str(audio_local_base or "").strip(),
             "fallback": audio_fallback,
         },
     }
@@ -3295,9 +3393,11 @@ ROUTER_DASHBOARD_HTML = """
 
 
 def _index_payload():
+    network_urls = _router_network_urls()
     return {
         "status": "ok",
         "service": "nkn_router",
+        "network": network_urls,
         "routes": {
             "dashboard": "/dashboard",
             "dashboard_data": "/dashboard/data",
@@ -3367,6 +3467,7 @@ def health():
     with nkn_process_lock:
         if nkn_process and nkn_process.poll() is None:
             process_running = True
+    network_urls = _router_network_urls()
     return jsonify(
         {
             "status": "ok",
@@ -3374,6 +3475,7 @@ def health():
             "uptime_seconds": round(time.time() - startup_time, 2),
             "requests_served": request_counter["value"],
             "pending_resolves": pending_count,
+            "network": network_urls,
             "nkn": {
                 "running": process_running,
                 "ready": nkn_state["ready"],
@@ -3401,9 +3503,11 @@ def nkn_info():
     with nkn_runtime_lock:
         nkn_state = dict(nkn_runtime)
     snapshot = get_service_snapshot()
+    network_urls = _router_network_urls()
     return jsonify(
         {
             "status": "success",
+            "network": network_urls,
             "nkn": {
                 "enabled": bool(nkn_settings["enable"]),
                 "ready": bool(nkn_state["ready"]),
@@ -3557,6 +3661,8 @@ def main():
 
     listen_host = settings["listen_host"]
     listen_port = settings["listen_port"]
+    router_network_runtime["listen_host"] = str(listen_host or DEFAULT_LISTEN_HOST)
+    router_network_runtime["listen_port"] = int(listen_port)
 
     service_endpoints["adapter_router_info_url"] = settings["adapter_router_info_url"]
     service_endpoints["camera_router_info_url"] = settings["camera_router_info_url"]
@@ -3590,15 +3696,14 @@ def main():
     else:
         log("NKN sidecar disabled by config")
 
-    try:
-        lan_ip = socket.gethostbyname(socket.gethostname())
-    except Exception:
-        lan_ip = "N/A"
-    local_url = f"http://{listen_host}:{listen_port}"
-    lan_url = f"http://{lan_ip}:{listen_port}" if lan_ip != "N/A" else "N/A"
+    network_urls = _router_network_urls()
+    bind_url = str(network_urls.get("bind_base_url") or f"http://{listen_host}:{listen_port}")
+    local_url = str(network_urls.get("loopback_base_url") or f"http://127.0.0.1:{listen_port}")
+    lan_url = str(network_urls.get("lan_base_url") or "") or "N/A"
 
     if ui:
         ui.update_metric("Local URL", local_url)
+        ui.update_metric("Bind URL", bind_url)
         ui.update_metric("LAN URL", lan_url)
         ui.update_metric("Adapter URL", service_endpoints["adapter_router_info_url"])
         ui.update_metric("Camera URL", service_endpoints["camera_router_info_url"])
@@ -3608,7 +3713,8 @@ def main():
         ui.running = True
         threading.Thread(target=metrics_update_loop, daemon=True).start()
 
-    log(f"Starting NKN router API on {local_url}")
+    log(f"Starting NKN router API on {bind_url}")
+    log(f"Loopback URL: {local_url}")
     if lan_url != "N/A":
         log(f"LAN URL: {lan_url}")
 

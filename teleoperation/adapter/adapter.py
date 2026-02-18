@@ -948,6 +948,9 @@ def _load_adapter_settings(config):
             config, "adapter.network.listen_host", DEFAULT_LISTEN_HOST, legacy_keys=("listen_host",)
         )
     ).strip() or DEFAULT_LISTEN_HOST
+    lowered_listen_host = listen_host.lower()
+    if lowered_listen_host in ("localhost", "::1") or lowered_listen_host.startswith("127."):
+        listen_host = DEFAULT_LISTEN_HOST
     promote("adapter.network.listen_host", listen_host)
 
     listen_port = _as_int(
@@ -1735,6 +1738,7 @@ def main():
             "public_ip": "",
             "external_port": 0,
             "public_base_url": "",
+            "dashboard_url": "",
             "http_endpoint": "",
             "ws_endpoint": "",
             "error": "",
@@ -1821,6 +1825,7 @@ def main():
             "public_ip": "",
             "external_port": 0,
             "public_base_url": "",
+            "dashboard_url": "",
             "http_endpoint": "",
             "ws_endpoint": "",
             "error": "",
@@ -1900,6 +1905,7 @@ def main():
                     "public_ip": public_ip,
                     "external_port": mapped_port,
                     "public_base_url": public_base,
+                    "dashboard_url": f"{public_base}/",
                     "http_endpoint": f"{public_base}{listen_route}",
                     "ws_endpoint": f"{ws_base}/ws",
                     "error": "",
@@ -2633,7 +2639,7 @@ def main():
         upnp_ws = str((upnp_payload or {}).get("ws_endpoint") or "").strip()
         tunnel_http = f"{current_tunnel}{listen_route}" if current_tunnel else ""
         tunnel_ws = f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else ""
-        effective_base = current_tunnel or (upnp_base if selected_transport == "upnp" else "") or local_base
+        effective_base = current_tunnel or (upnp_base if selected_transport == "upnp" else "") or lan_base or local_base
 
         tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
         if stale_tunnel and not process_running:
@@ -2657,6 +2663,7 @@ def main():
             local_payload["bind_base_url"] = bind_base
         if lan_base:
             local_payload["lan_base_url"] = lan_base
+            local_payload["lan_dashboard_url"] = f"{lan_base}/"
             local_payload["lan_http_endpoint"] = lan_http
             local_payload["lan_ws_endpoint"] = lan_ws
 
@@ -2664,8 +2671,8 @@ def main():
             "service": "adapter",
             "transport": selected_transport,
             "base_url": effective_base,
-            "http_endpoint": tunnel_http or upnp_http or local_http,
-            "ws_endpoint": tunnel_ws or upnp_ws or local_ws,
+            "http_endpoint": tunnel_http or upnp_http or lan_http or local_http,
+            "ws_endpoint": tunnel_ws or upnp_ws or lan_ws or local_ws,
             "serial": {
                 "connected": bool(ser is not None and getattr(ser, "is_open", False)),
                 "device": serial_device or "",

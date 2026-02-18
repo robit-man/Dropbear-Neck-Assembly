@@ -321,6 +321,7 @@ upnp_fallback_state = {
     "public_ip": "",
     "external_port": 0,
     "public_base_url": "",
+    "dashboard_url": "",
     "list_url": "",
     "health_url": "",
     "frame_packet_template": "",
@@ -489,6 +490,7 @@ def _refresh_upnp_fallback(listen_port, force=False):
         "public_ip": "",
         "external_port": 0,
         "public_base_url": "",
+        "dashboard_url": "",
         "list_url": "",
         "health_url": "",
         "frame_packet_template": "",
@@ -569,6 +571,7 @@ def _refresh_upnp_fallback(listen_port, force=False):
                 "public_ip": public_ip,
                 "external_port": mapped_port,
                 "public_base_url": public_base,
+                "dashboard_url": f"{public_base}/",
                 "list_url": f"{public_base}/list",
                 "health_url": f"{public_base}/health",
                 "frame_packet_template": f"{public_base}/frame_packet/<camera_id>",
@@ -877,6 +880,27 @@ def _as_int(value, default, minimum=None, maximum=None):
     return parsed
 
 
+def _resolve_lan_host(bind_host=""):
+    host = str(bind_host or "").strip()
+    if host and host not in ("0.0.0.0", "::", "127.0.0.1", "localhost"):
+        return host
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidate = str(sock.getsockname()[0] or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    try:
+        candidate = str(socket.gethostbyname(socket.gethostname()) or "").strip()
+        if candidate and not candidate.startswith("127."):
+            return candidate
+    except Exception:
+        pass
+    return ""
+
+
 def _parse_rotation_degrees(value):
     if isinstance(value, bool):
         return 90 if value else 0
@@ -970,6 +994,9 @@ def _load_camera_settings(config):
             legacy_keys=("host", "listen_host", "camera_host"),
         )
     ).strip() or DEFAULT_LISTEN_HOST
+    lowered_listen_host = listen_host.lower()
+    if lowered_listen_host in ("localhost", "::1") or lowered_listen_host.startswith("127."):
+        listen_host = DEFAULT_LISTEN_HOST
     promote("camera_router.network.listen_host", listen_host)
 
     listen_port = _as_int(
@@ -4061,6 +4088,11 @@ def index():
     return render_template_string(INDEX_HTML)
 
 
+@app.route("/dashboard", methods=["GET"])
+def dashboard():
+    return index()
+
+
 @app.route("/auth", methods=["POST"])
 def auth():
     data = request.get_json(silent=True) or {}
@@ -5014,17 +5046,41 @@ def router_info():
 
     listen_port = int(network_runtime.get("listen_port", DEFAULT_LISTEN_PORT))
     listen_host = str(network_runtime.get("listen_host", DEFAULT_LISTEN_HOST))
+    bind_host = listen_host if listen_host else DEFAULT_LISTEN_HOST
     local_base = f"http://127.0.0.1:{listen_port}"
+    bind_base = f"http://{bind_host}:{listen_port}"
+    lan_host = _resolve_lan_host(bind_host)
+    lan_base = f"http://{lan_host}:{listen_port}" if lan_host else ""
     fallback_payload = _camera_fallback_payload(current_tunnel, process_running, listen_port)
     selected_transport = str(fallback_payload.get("selected_transport") or "local").strip().lower()
     upnp_payload = fallback_payload.get("upnp", {}) if isinstance(fallback_payload, dict) else {}
     upnp_base = str((upnp_payload or {}).get("public_base_url") or "").strip()
-    selected_base = current_tunnel or (upnp_base if selected_transport == "upnp" else "") or local_base
+    selected_base = current_tunnel or (upnp_base if selected_transport == "upnp" else "") or lan_base or local_base
     tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
     if stale_tunnel and not process_running:
         tunnel_state = "stale"
     if current_error and not process_running and not current_tunnel and not stale_tunnel:
         tunnel_state = "error"
+
+    local_payload = {
+        "base_url": local_base,
+        "listen_host": listen_host,
+        "listen_port": listen_port,
+        "dashboard_url": f"{local_base}/",
+        "auth_url": f"{local_base}/auth",
+        "list_url": f"{local_base}/list",
+        "health_url": f"{local_base}/health",
+        "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
+    }
+    if bind_base and bind_base != local_base:
+        local_payload["bind_base_url"] = bind_base
+    if lan_base:
+        local_payload["lan_base_url"] = lan_base
+        local_payload["lan_dashboard_url"] = f"{lan_base}/"
+        local_payload["lan_auth_url"] = f"{lan_base}/auth"
+        local_payload["lan_list_url"] = f"{lan_base}/list"
+        local_payload["lan_health_url"] = f"{lan_base}/health"
+        local_payload["lan_frame_packet_template"] = f"{lan_base}/frame_packet/<camera_id>"
 
     return jsonify(
         {
@@ -5032,18 +5088,11 @@ def router_info():
             "service": "camera_router",
             "transport": selected_transport,
             "base_url": selected_base,
-            "local": {
-                "base_url": local_base,
-                "listen_host": listen_host,
-                "listen_port": listen_port,
-                "auth_url": f"{local_base}/auth",
-                "list_url": f"{local_base}/list",
-                "health_url": f"{local_base}/health",
-                "frame_packet_template": f"{local_base}/frame_packet/<camera_id>",
-            },
+            "local": local_payload,
             "tunnel": {
                 "state": tunnel_state,
                 "tunnel_url": current_tunnel,
+                "dashboard_url": f"{current_tunnel}/" if current_tunnel else "",
                 "list_url": f"{current_tunnel}/list" if current_tunnel else "",
                 "health_url": f"{current_tunnel}/health" if current_tunnel else "",
                 "frame_packet_template": (
@@ -5265,15 +5314,14 @@ def main():
     _refresh_upnp_fallback(listen_port, force=True)
     threading.Thread(target=fallback_refresh_loop, daemon=True).start()
 
-    local_url = f"http://{listen_host}:{listen_port}"
-    try:
-        lan_ip = socket.gethostbyname(socket.gethostname())
-        lan_url = f"http://{lan_ip}:{listen_port}"
-    except Exception:
-        lan_url = "N/A"
+    bind_url = f"http://{listen_host}:{listen_port}"
+    local_url = f"http://127.0.0.1:{listen_port}"
+    lan_host = _resolve_lan_host(listen_host)
+    lan_url = f"http://{lan_host}:{listen_port}" if lan_host else "N/A"
 
     if ui:
         ui.update_metric("Local URL", local_url)
+        ui.update_metric("Bind URL", bind_url)
         ui.update_metric("LAN URL", lan_url)
         ui.update_metric("Mode", "Safe" if SAFE_MODE_ACTIVE else "Normal")
         ui.update_metric("Feeds", f"0/{len(all_feed_statuses())}")
@@ -5284,7 +5332,8 @@ def main():
         ui.update_metric("Session Timeout", str(SESSION_TIMEOUT))
         ui.update_metric("Tunnel", "Starting..." if enable_tunnel else "Disabled")
 
-    log(f"Starting camera router on {local_url}")
+    log(f"Starting camera router on {bind_url}")
+    log(f"Loopback URL: {local_url}")
     if lan_url != "N/A":
         log(f"LAN URL: {lan_url}")
 
