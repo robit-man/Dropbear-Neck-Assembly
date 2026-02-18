@@ -11,8 +11,8 @@ const LEGACY_DEFAULT_HTTP_URLS = [
 ];
 
 // Connection state - no auto-fill, only use saved or query params
-let WS_URL = localStorage.getItem('wsUrl') || "";
-let HTTP_URL = localStorage.getItem('httpUrl') || "";
+let WS_URL = sanitizeStoredRemoteOrigin(localStorage.getItem('wsUrl') || "", "wsUrl");
+let HTTP_URL = sanitizeStoredRemoteOrigin(localStorage.getItem('httpUrl') || "", "httpUrl");
 if (WS_URL === SERVER_DEFAULT_WS_URL || LEGACY_DEFAULT_WS_URLS.includes(WS_URL)) {
     WS_URL = "";
 }
@@ -2497,12 +2497,22 @@ function parseConnectionFromQuery() {
   if (adapterParam) {
     const endpoints = buildAdapterEndpoints(adapterParam);
     if (endpoints) {
-      localStorage.setItem('httpUrl', endpoints.httpUrl);
-      localStorage.setItem('wsUrl', endpoints.wsUrl);
-      HTTP_URL = endpoints.httpUrl;
-      WS_URL = endpoints.wsUrl;
-      adapterConfigured = true;
-      logToConsole(`[OK] Adapter configured from URL: ${endpoints.origin}`);
+      const frontendIsLoopback = isFrontendLoopbackOrigin();
+      const adapterIsLoopback = isLoopbackServiceOrigin(endpoints.origin);
+      if (!frontendIsLoopback && adapterIsLoopback) {
+        localStorage.removeItem('httpUrl');
+        localStorage.removeItem('wsUrl');
+        HTTP_URL = "";
+        WS_URL = "";
+        logToConsole(`[WARN] Ignored loopback adapter URL in query: ${endpoints.origin}`);
+      } else {
+        localStorage.setItem('httpUrl', endpoints.httpUrl);
+        localStorage.setItem('wsUrl', endpoints.wsUrl);
+        HTTP_URL = endpoints.httpUrl;
+        WS_URL = endpoints.wsUrl;
+        adapterConfigured = true;
+        logToConsole(`[OK] Adapter configured from URL: ${endpoints.origin}`);
+      }
     } else {
       console.error('Invalid adapter URL in query parameter:', adapterParam);
       logToConsole('[WARN] Invalid adapter URL in query parameter');
@@ -3061,6 +3071,25 @@ function isFrontendLoopbackOrigin() {
   }
 }
 
+function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
+  const value = String(rawOrigin || "").trim();
+  if (!value) {
+    return "";
+  }
+  if (isFrontendLoopbackOrigin()) {
+    return value;
+  }
+  if (!isLoopbackServiceOrigin(value)) {
+    return value;
+  }
+  if (storageKey) {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch (err) {}
+  }
+  return "";
+}
+
 function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
   let firstPublic = "";
   let firstLoopback = "";
@@ -3097,12 +3126,15 @@ function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
   }
 
   const frontendIsLoopback = isFrontendLoopbackOrigin();
-  const currentIsPublic = String(currentOrigin || "").trim() && !isLoopbackServiceOrigin(currentOrigin);
-  if (!frontendIsLoopback && currentIsPublic) {
+  if (!frontendIsLoopback) {
+    const currentNonLoopback = sanitizeStoredRemoteOrigin(currentOrigin);
+    if (currentNonLoopback) {
+      return currentNonLoopback;
+    }
     if (serviceLabel) {
       logToConsole(`[ROUTER] Ignoring loopback ${serviceLabel} endpoint update while using a remote frontend origin`);
     }
-    return String(currentOrigin || "").trim();
+    return "";
   }
   return firstLoopback;
 }
@@ -3628,10 +3660,9 @@ function applyResolvedEndpoints(resolved) {
   const frontendIsLoopback = isFrontendLoopbackOrigin();
   let adapterEndpoints = firstPublicAdapterEndpoints;
   if (!adapterEndpoints && firstLoopbackAdapterEndpoints) {
-    const currentIsPublic = currentAdapterEndpoints && !isLoopbackServiceOrigin(currentAdapterEndpoints.origin);
-    const shouldRejectLoopbackDowngrade = !frontendIsLoopback && currentIsPublic;
-    if (shouldRejectLoopbackDowngrade) {
-      adapterEndpoints = currentAdapterEndpoints;
+    if (!frontendIsLoopback) {
+      const currentIsPublic = currentAdapterEndpoints && !isLoopbackServiceOrigin(currentAdapterEndpoints.origin);
+      adapterEndpoints = currentIsPublic ? currentAdapterEndpoints : null;
       logToConsole("[ROUTER] Ignoring loopback adapter endpoint update while using a remote frontend origin");
     } else {
       adapterEndpoints = firstLoopbackAdapterEndpoints;
@@ -4109,7 +4140,10 @@ function initNknRouterUi() {
   refreshNknClientInfo({ resolveNow: true }).catch(() => {});
 }
 
-const CAMERA_ROUTER_DEFAULT_BASE = localStorage.getItem("cameraRouterBaseUrl") || "";
+const CAMERA_ROUTER_DEFAULT_BASE = sanitizeStoredRemoteOrigin(
+  localStorage.getItem("cameraRouterBaseUrl") || "",
+  "cameraRouterBaseUrl"
+);
 const STREAM_MODE_MJPEG = "mjpeg";
 const STREAM_MODE_JPEG = "jpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
@@ -4275,7 +4309,10 @@ const pinnedPreviewInteraction = {
   startHeight: 0,
 };
 
-const AUDIO_ROUTER_DEFAULT_BASE = localStorage.getItem("audioRouterBaseUrl") || "";
+const AUDIO_ROUTER_DEFAULT_BASE = sanitizeStoredRemoteOrigin(
+  localStorage.getItem("audioRouterBaseUrl") || "",
+  "audioRouterBaseUrl"
+);
 let audioRouterBaseUrl = AUDIO_ROUTER_DEFAULT_BASE;
 let audioRouterPassword = localStorage.getItem("audioRouterPassword") || "";
 let audioRouterSessionKey = localStorage.getItem("audioRouterSessionKey") || "";
