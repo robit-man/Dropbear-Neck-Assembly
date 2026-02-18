@@ -21,6 +21,7 @@
   <script src="./script.js" defer></script>
   <script type="module" src="./headstream-module.js"></script>
   <script type="module" src="./orientation-module.js"></script>
+  <script type="module" src="./hybrid-touch-hud.js"></script>
 </head>
 <body>
   <div id="connectionModal" class="modal">
@@ -875,6 +876,7 @@
               <div id="hybridMorphSceneMount" class="hybrid-mode-overlay hybrid-scene-overlay" data-overlay-mode="morph" aria-hidden="true"></div>
               <div id="hybridOrientationSceneMount" class="hybrid-mode-overlay hybrid-scene-overlay" data-overlay-mode="orientation" aria-hidden="true"></div>
               <div id="hybridTouchOverlay" class="hybrid-mode-overlay hybrid-touch-overlay active" data-overlay-mode="touch" aria-hidden="false">
+                <div id="hybridTouchHudLayer" class="hybrid-touch-hud-layer" aria-hidden="true"></div>
                 <div id="hybridDragSurface" class="hybrid-drag-surface" aria-label="Hybrid drag control area"></div>
                 <button class="hybrid-arrow hybrid-arrow-up" type="button" data-axis="P" data-delta="8" aria-label="Pitch Up">&#9650;</button>
                 <button class="hybrid-arrow hybrid-arrow-right" type="button" data-axis="X" data-delta="-8" aria-label="Yaw Right">&#9654;</button>

@@ -4322,6 +4322,19 @@ function updateCameraImuReadouts(payload = null, options = {}) {
       el.style.color = metaColor;
     }
   });
+
+  window.dispatchEvent(new CustomEvent("hybrid-touch-imu", {
+    detail: {
+      accel: accel ? { ...accel } : null,
+      gyro: gyro ? { ...gyro } : null,
+      fetchedAtMs: payload && Number.isFinite(payload.fetchedAtMs) ? payload.fetchedAtMs : Date.now(),
+      source: payload && payload.source ? String(payload.source) : "unknown",
+      message: metaText,
+      error,
+      mode: activeHybridTab,
+      timestampMs: Date.now(),
+    },
+  }));
 }
 
 async function refreshCameraImu(options = {}) {
@@ -7023,6 +7036,7 @@ function dispatchHybridCommand(options = {}) {
 
 function applyHybridDeltas(deltas, options = {}) {
   let changed = false;
+  const appliedDeltas = {};
   Object.entries(deltas || {}).forEach(([axis, rawDelta]) => {
     if (!Object.prototype.hasOwnProperty.call(hybridPose, axis)) {
       return;
@@ -7031,12 +7045,27 @@ function applyHybridDeltas(deltas, options = {}) {
     if (!Number.isFinite(delta) || delta === 0) {
       return;
     }
+    appliedDeltas[axis] = delta;
     const nextValue = hybridClampValue(axis, (Number(hybridPose[axis]) || 0) + delta);
     if (nextValue !== hybridPose[axis]) {
       hybridPose[axis] = nextValue;
       changed = true;
     }
   });
+
+  const source = String(options.source || "unspecified");
+  if (Object.keys(appliedDeltas).length) {
+    window.dispatchEvent(new CustomEvent("hybrid-touch-deltas", {
+      detail: {
+        deltas: appliedDeltas,
+        pose: { ...hybridPose },
+        changed,
+        source,
+        mode: activeHybridTab,
+        timestampMs: Date.now(),
+      },
+    }));
+  }
 
   if (changed) {
     dispatchHybridCommand({
@@ -7233,9 +7262,15 @@ function startHybridArrowHold(axis, delta, buttonEl) {
   if (hybridHoldState.button) {
     hybridHoldState.button.classList.add("active");
   }
-  applyHybridDeltas({ [hybridHoldState.axis]: hybridHoldState.delta }, { force: true });
+  applyHybridDeltas({ [hybridHoldState.axis]: hybridHoldState.delta }, {
+    force: true,
+    source: "arrow-hold",
+  });
   hybridHoldState.timer = setInterval(() => {
-    applyHybridDeltas({ [hybridHoldState.axis]: hybridHoldState.delta }, { force: true });
+    applyHybridDeltas({ [hybridHoldState.axis]: hybridHoldState.delta }, {
+      force: true,
+      source: "arrow-hold",
+    });
   }, HYBRID_HOLD_INTERVAL_MS);
 }
 
@@ -7279,7 +7314,57 @@ function hybridDragMode(event, dragButton = 0) {
   return "yaw_pitch";
 }
 
-function endHybridDragSession() {
+function buildHybridDragPointerPayload(type, event = null) {
+  const dragSurface = document.getElementById("hybridDragSurface");
+  if (!dragSurface) {
+    return null;
+  }
+  const rect = dragSurface.getBoundingClientRect();
+  if (!rect || rect.width <= 0 || rect.height <= 0) {
+    return null;
+  }
+  const clientX = Number(event && Number.isFinite(event.clientX) ? event.clientX : hybridDragState.lastX);
+  const clientY = Number(event && Number.isFinite(event.clientY) ? event.clientY : hybridDragState.lastY);
+  if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) {
+    return null;
+  }
+
+  const normalizedX = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+  const normalizedY = Math.min(1, Math.max(0, (clientY - rect.top) / rect.height));
+  const pointerId = event && Number.isFinite(Number(event.pointerId))
+    ? Number(event.pointerId)
+    : hybridDragState.pointerId;
+  return {
+    type: String(type || "move"),
+    pointerId,
+    pointerType: event && event.pointerType ? String(event.pointerType) : "",
+    clientX,
+    clientY,
+    normalizedX,
+    normalizedY,
+    ndcX: (normalizedX * 2) - 1,
+    ndcY: 1 - (normalizedY * 2),
+    active: type === "start" || type === "move",
+    mode: activeHybridTab,
+    timestampMs: Date.now(),
+  };
+}
+
+function dispatchHybridDragPointer(type, event = null) {
+  const payload = buildHybridDragPointerPayload(type, event);
+  if (!payload) {
+    return;
+  }
+  window.dispatchEvent(new CustomEvent("hybrid-touch-pointer", {
+    detail: payload,
+  }));
+}
+
+function endHybridDragSession(reason = "end", event = null) {
+  if (!hybridDragState.active) {
+    return;
+  }
+  dispatchHybridDragPointer(reason, event);
   hybridDragState.active = false;
   hybridDragState.pointerId = null;
   hybridDragState.button = 0;
@@ -7305,6 +7390,7 @@ function onHybridDragPointerDown(event) {
       dragSurface.setPointerCapture(event.pointerId);
     } catch (err) {}
   }
+  dispatchHybridDragPointer("start", event);
   event.preventDefault();
 }
 
@@ -7322,6 +7408,7 @@ function onHybridDragPointerMove(event) {
   }
 
   const mode = hybridDragMode(event, hybridDragState.button);
+  dispatchHybridDragPointer("move", event);
   const deltas = {};
   if (mode === "translate") {
     const lateralGain = hybridDragState.button === 2 ? -2.0 : 2.0;
@@ -7340,6 +7427,9 @@ function onHybridDragPointerMove(event) {
   applyHybridDeltas(deltas, {
     force: false,
     minIntervalMs: HYBRID_COMMAND_INTERVAL_MS,
+    source: mode === "translate"
+      ? "drag-translate"
+      : (mode === "roll_height" ? "drag-roll-height" : "drag-yaw-pitch"),
   });
   event.preventDefault();
 }
@@ -7349,7 +7439,8 @@ function onHybridDragPointerStop(event) {
     return;
   }
   event.preventDefault();
-  endHybridDragSession();
+  const reason = event.type === "pointercancel" ? "cancel" : "end";
+  endHybridDragSession(reason, event);
 }
 
 function onHybridDragWheel(event) {
@@ -7359,6 +7450,7 @@ function onHybridDragWheel(event) {
   applyHybridDeltas({ H: direction * step }, {
     force: true,
     minIntervalMs: 25,
+    source: "wheel-height",
   });
 }
 
@@ -7425,7 +7517,7 @@ function setupHybridUi() {
   window.addEventListener("pointerup", stopHybridArrowHold);
   window.addEventListener("blur", () => {
     stopHybridArrowHold();
-    endHybridDragSession();
+    endHybridDragSession("cancel");
   });
 
   syncHybridHeightControl();

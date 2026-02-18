@@ -1336,6 +1336,19 @@ h3 {
     z-index: 4;
 }
 
+.hybrid-touch-hud-layer {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.hybrid-touch-hud-layer canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
 .hybrid-scene-overlay {
     z-index: 2;
     background: transparent;
