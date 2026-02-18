@@ -3022,6 +3022,45 @@ function normalizeServiceOrigin(rawInput) {
   return `${protocol}//${parsed.host}`;
 }
 
+function isLoopbackHostname(hostname) {
+  const host = String(hostname || "").trim().toLowerCase();
+  if (!host) {
+    return false;
+  }
+  if (host === "localhost" || host === "::1" || host === "[::1]") {
+    return true;
+  }
+  if (host.endsWith(".localhost")) {
+    return true;
+  }
+  if (host.startsWith("127.")) {
+    return true;
+  }
+  return false;
+}
+
+function isLoopbackServiceOrigin(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) {
+    return false;
+  }
+  try {
+    const candidate = raw.includes("://") ? raw : `https://${raw}`;
+    const parsed = new URL(candidate);
+    return isLoopbackHostname(parsed.hostname);
+  } catch (err) {
+    return false;
+  }
+}
+
+function isFrontendLoopbackOrigin() {
+  try {
+    return isLoopbackHostname(window.location && window.location.hostname);
+  } catch (err) {
+    return false;
+  }
+}
+
 function pickFirstValidServiceOrigin(...values) {
   for (const value of values) {
     const text = String(value || "").trim();
@@ -3525,14 +3564,34 @@ function applyResolvedEndpoints(resolved) {
     adapter.local_base_url,
     adapterLocal.base_url,
   ];
-  let adapterEndpoints = null;
+  let firstLoopbackAdapterEndpoints = null;
+  let firstPublicAdapterEndpoints = null;
   for (const candidate of adapterCandidates) {
     const parsed = buildAdapterEndpoints(candidate);
     if (parsed) {
-      adapterEndpoints = parsed;
-      break;
+      if (isLoopbackServiceOrigin(parsed.origin)) {
+        if (!firstLoopbackAdapterEndpoints) {
+          firstLoopbackAdapterEndpoints = parsed;
+        }
+      } else if (!firstPublicAdapterEndpoints) {
+        firstPublicAdapterEndpoints = parsed;
+      }
     }
   }
+  const currentAdapterEndpoints = buildAdapterEndpoints(HTTP_URL || WS_URL || "");
+  const frontendIsLoopback = isFrontendLoopbackOrigin();
+  let adapterEndpoints = firstPublicAdapterEndpoints;
+  if (!adapterEndpoints && firstLoopbackAdapterEndpoints) {
+    const currentIsPublic = currentAdapterEndpoints && !isLoopbackServiceOrigin(currentAdapterEndpoints.origin);
+    const shouldRejectLoopbackDowngrade = !frontendIsLoopback && currentIsPublic;
+    if (shouldRejectLoopbackDowngrade) {
+      adapterEndpoints = currentAdapterEndpoints;
+      logToConsole("[ROUTER] Ignoring loopback adapter endpoint update while using a remote frontend origin");
+    } else {
+      adapterEndpoints = firstLoopbackAdapterEndpoints;
+    }
+  }
+
   if (adapterEndpoints) {
     const nextHttp = String(adapterEndpoints.httpUrl || "").trim();
     const nextWs = String(adapterEndpoints.wsUrl || "").trim();
