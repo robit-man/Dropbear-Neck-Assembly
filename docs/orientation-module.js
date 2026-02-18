@@ -7,6 +7,10 @@ const ROLL_PITCH_LIMIT = 300;
 const HEIGHT_MIN = 0;
 const HEIGHT_MAX = 70;
 const SPHERE_RADIUS = 6.0;
+const GRAVITY_AXIS_MIN = 7.0;
+const GRAVITY_AXIS_MAX = 12.6;
+const GRAVITY_AXIS_STEADY_ANGLE_RAD = THREE.MathUtils.degToRad(5.5);
+const GRAVITY_AXIS_SETTLE_SECONDS = 0.45;
 
 const defaultTuneables = {
   orientationSensitivity: 1.0,
@@ -54,6 +58,10 @@ const state = {
   headingAcc: null,
   acc: { x: 0, y: 0, z: 0 },
   accG: null,
+  gravityCalReady: false,
+  gravityFiltered: new THREE.Vector3(),
+  gravityBaseline: new THREE.Vector3(0, 1, 0),
+  gravitySteadySeconds: 0,
   gps: null,
   locationWatchId: null,
 
@@ -87,6 +95,11 @@ const NORTH_POLE = new THREE.Vector3(0, 1, 0);
 const FALLBACK_REF = new THREE.Vector3(0, 0, -1);
 const ORIGIN = new THREE.Vector3(0, 0, 0);
 const WORLD_G = new THREE.Vector3(0, -9.81, 0);
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+const TMP_GRAVITY_VEC = new THREE.Vector3();
+const TMP_GRAVITY_UNIT = new THREE.Vector3();
+const TMP_CALIBRATED_GRAVITY = new THREE.Vector3();
+const TMP_GRAVITY_ALIGN = new THREE.Quaternion();
 
 // DeviceOrientationControls-compatible quaternion conversion.
 const zee = new THREE.Vector3(0, 0, 1);
@@ -120,6 +133,76 @@ function clamp(value, min, max) {
 function toFinite(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function updateGravityAxisCalibration(accG, dtSeconds = 0.02) {
+  if (!accG) {
+    return;
+  }
+  TMP_GRAVITY_VEC.set(
+    toFinite(accG.x, 0),
+    toFinite(accG.y, 0),
+    toFinite(accG.z, 0)
+  );
+  const magnitude = TMP_GRAVITY_VEC.length();
+  if (!Number.isFinite(magnitude) || magnitude < GRAVITY_AXIS_MIN || magnitude > GRAVITY_AXIS_MAX) {
+    const decay = Number.isFinite(dtSeconds) && dtSeconds > 0 ? dtSeconds : 0.02;
+    state.gravitySteadySeconds = clamp(state.gravitySteadySeconds - (decay * 1.35), 0, 2.5);
+    return;
+  }
+
+  TMP_GRAVITY_UNIT.copy(TMP_GRAVITY_VEC).divideScalar(Math.max(0.0001, magnitude));
+  if (!state.gravityCalReady && state.gravitySteadySeconds <= 0) {
+    state.gravityFiltered.copy(TMP_GRAVITY_UNIT);
+  }
+  if (state.gravityFiltered.lengthSq() < 1e-8) {
+    state.gravityFiltered.copy(TMP_GRAVITY_UNIT);
+  }
+
+  const filterAlpha = clamp((dtSeconds > 0 ? dtSeconds * 3.8 : 0.12), 0.08, 0.3);
+  const deltaAngle = state.gravityFiltered.angleTo(TMP_GRAVITY_UNIT);
+  state.gravityFiltered.lerp(TMP_GRAVITY_UNIT, filterAlpha).normalize();
+
+  const nearOneG = Math.abs(magnitude - 9.81) < 2.4;
+  const steady = nearOneG && deltaAngle <= GRAVITY_AXIS_STEADY_ANGLE_RAD;
+  const settleStep = dtSeconds > 0 ? dtSeconds : 0.02;
+  state.gravitySteadySeconds = clamp(
+    state.gravitySteadySeconds + (steady ? settleStep : (-settleStep * 1.5)),
+    0,
+    2.5
+  );
+
+  if (!state.gravityCalReady && state.gravitySteadySeconds >= GRAVITY_AXIS_SETTLE_SECONDS) {
+    state.gravityBaseline.copy(state.gravityFiltered).normalize();
+    state.gravityCalReady = true;
+    return;
+  }
+
+  if (state.gravityCalReady && steady && state.gravitySteadySeconds > 1.2) {
+    const baselineAngle = state.gravityBaseline.angleTo(state.gravityFiltered);
+    if (baselineAngle < THREE.MathUtils.degToRad(9)) {
+      state.gravityBaseline.lerp(state.gravityFiltered, 0.01).normalize();
+    }
+  }
+}
+
+function calibratedGravityDirection(accG) {
+  if (!state.gravityCalReady || !accG) {
+    return null;
+  }
+  TMP_GRAVITY_VEC.set(
+    toFinite(accG.x, 0),
+    toFinite(accG.y, 0),
+    toFinite(accG.z, 0)
+  );
+  const magnitude = TMP_GRAVITY_VEC.length();
+  if (!Number.isFinite(magnitude) || magnitude <= 0.0001) {
+    return null;
+  }
+  TMP_GRAVITY_UNIT.copy(TMP_GRAVITY_VEC).divideScalar(magnitude);
+  TMP_GRAVITY_ALIGN.setFromUnitVectors(state.gravityBaseline, WORLD_UP);
+  TMP_CALIBRATED_GRAVITY.copy(TMP_GRAVITY_UNIT).applyQuaternion(TMP_GRAVITY_ALIGN);
+  return TMP_CALIBRATED_GRAVITY;
 }
 
 function setOrientationStatus(message, error = false) {
@@ -344,6 +427,16 @@ function applyLocalVisual() {
   }
   if (state.grid) {
     state.grid.visible = mode === "plane";
+    if (mode === "plane") {
+      const gravityDir = calibratedGravityDirection(state.accG);
+      const targetTiltX = gravityDir ? clamp(gravityDir.z * 0.92, -0.78, 0.78) : 0;
+      const targetTiltZ = gravityDir ? clamp(-gravityDir.x * 0.92, -0.78, 0.78) : 0;
+      state.grid.rotation.x += (targetTiltX - state.grid.rotation.x) * 0.22;
+      state.grid.rotation.z += (targetTiltZ - state.grid.rotation.z) * 0.22;
+    } else {
+      state.grid.rotation.x += (0 - state.grid.rotation.x) * 0.18;
+      state.grid.rotation.z += (0 - state.grid.rotation.z) * 0.18;
+    }
   }
   if (state.anchorMarker) {
     state.anchorMarker.visible = mode === "sphere";
@@ -555,8 +648,10 @@ function onDeviceMotion(event) {
 
   const a = event.acceleration;
   const ag = event.accelerationIncludingGravity;
+  const motionDt = clamp(toFinite(event && event.interval, 20) / 1000, 0.005, 0.12);
   if (ag && Number.isFinite(ag.x) && Number.isFinite(ag.y) && Number.isFinite(ag.z)) {
     state.accG = { x: ag.x, y: ag.y, z: ag.z };
+    updateGravityAxisCalibration(state.accG, motionDt);
   }
   if (a && Number.isFinite(a.x) && Number.isFinite(a.y) && Number.isFinite(a.z)) {
     state.acc = { x: a.x, y: a.y, z: a.z };

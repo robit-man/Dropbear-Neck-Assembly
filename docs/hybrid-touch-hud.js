@@ -3,9 +3,15 @@ import * as THREE from "three";
 const HUD_COLOR_HEX = 0xffae00;
 const HUD_COLOR_CSS = "#ffae00";
 const HUD_DEPTH = 2.35;
+const GRID_HUD_DEPTH = 2.85;
+const GRID_HUD_NDC_Y = -0.74;
 const GRID_BASE_OPACITY = 0.08;
 const GRID_PULSE_OPACITY = 0.7;
 const MAX_PIXEL_RATIO = 2;
+const ACCEL_GRAVITY_MIN = 7.0;
+const ACCEL_GRAVITY_MAX = 12.6;
+const ACCEL_STEADY_ANGLE_RAD = THREE.MathUtils.degToRad(5.5);
+const ACCEL_CALIBRATION_SETTLE_SECONDS = 0.45;
 
 const refs = {
   layer: null,
@@ -15,6 +21,7 @@ const refs = {
   scene: null,
   camera: null,
   gridPivot: null,
+  gridBasePosition: new THREE.Vector3(0, -0.62, -GRID_HUD_DEPTH),
   gridUniforms: null,
   hudGroup: null,
   ring: null,
@@ -42,6 +49,13 @@ const state = {
     roll: 0,
     gyroPitch: 0,
     gyroRoll: 0,
+    hasGravity: false,
+    gravityFiltered: new THREE.Vector3(),
+    baselineGravity: new THREE.Vector3(0, 1, 0),
+    steadySeconds: 0,
+    calibrationReady: false,
+    dominantAxis: "y",
+    dominantSign: 1,
     lastSampleMs: 0,
   },
   motion: {
@@ -67,6 +81,79 @@ function clamp(value, min, max) {
 function num(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+const TMP_ACCEL_VEC = new THREE.Vector3();
+const TMP_GRAVITY_NORM = new THREE.Vector3();
+const TMP_CALIBRATED_GRAVITY = new THREE.Vector3();
+const TMP_ALIGN_QUAT = new THREE.Quaternion();
+const WORLD_UP = new THREE.Vector3(0, 1, 0);
+
+function dominantAxisFromAccelVector(vector) {
+  const components = [vector.x, vector.y, vector.z];
+  let dominantIndex = 0;
+  for (let idx = 1; idx < components.length; idx += 1) {
+    if (Math.abs(components[idx]) > Math.abs(components[dominantIndex])) {
+      dominantIndex = idx;
+    }
+  }
+  return {
+    axis: dominantIndex === 0 ? "x" : (dominantIndex === 1 ? "y" : "z"),
+    sign: components[dominantIndex] < 0 ? -1 : 1,
+  };
+}
+
+function calibratedTiltFromAccel(ax, ay, az, dt) {
+  TMP_ACCEL_VEC.set(ax, ay, az);
+  const magnitude = TMP_ACCEL_VEC.length();
+  if (!Number.isFinite(magnitude) || magnitude < ACCEL_GRAVITY_MIN || magnitude > ACCEL_GRAVITY_MAX) {
+    const decay = dt > 0 ? dt : 0.05;
+    state.imu.steadySeconds = clamp(state.imu.steadySeconds - (decay * 1.35), 0, 2.5);
+    return null;
+  }
+
+  TMP_GRAVITY_NORM.copy(TMP_ACCEL_VEC).divideScalar(Math.max(0.0001, magnitude));
+  if (!state.imu.hasGravity) {
+    state.imu.gravityFiltered.copy(TMP_GRAVITY_NORM);
+    state.imu.hasGravity = true;
+  }
+
+  const filterAlpha = clamp((dt > 0 ? dt * 3.8 : 0.18), 0.08, 0.32);
+  const deltaAngle = state.imu.gravityFiltered.angleTo(TMP_GRAVITY_NORM);
+  state.imu.gravityFiltered.lerp(TMP_GRAVITY_NORM, filterAlpha).normalize();
+
+  const nearOneG = Math.abs(magnitude - 9.81) < 2.4;
+  const isSteady = nearOneG && deltaAngle <= ACCEL_STEADY_ANGLE_RAD;
+  const settleStep = dt > 0 ? dt : 0.05;
+  state.imu.steadySeconds = clamp(
+    state.imu.steadySeconds + (isSteady ? settleStep : (-settleStep * 1.45)),
+    0,
+    2.5
+  );
+
+  if (!state.imu.calibrationReady && state.imu.steadySeconds >= ACCEL_CALIBRATION_SETTLE_SECONDS) {
+    state.imu.baselineGravity.copy(state.imu.gravityFiltered).normalize();
+    const dominant = dominantAxisFromAccelVector(TMP_ACCEL_VEC);
+    state.imu.dominantAxis = dominant.axis;
+    state.imu.dominantSign = dominant.sign;
+    state.imu.calibrationReady = true;
+  } else if (state.imu.calibrationReady && isSteady && state.imu.steadySeconds > 1.2) {
+    const baselineAngle = state.imu.baselineGravity.angleTo(state.imu.gravityFiltered);
+    if (baselineAngle < THREE.MathUtils.degToRad(9.0)) {
+      state.imu.baselineGravity.lerp(state.imu.gravityFiltered, 0.012).normalize();
+    }
+  }
+
+  if (!state.imu.calibrationReady) {
+    return null;
+  }
+
+  TMP_ALIGN_QUAT.setFromUnitVectors(state.imu.baselineGravity, WORLD_UP);
+  TMP_CALIBRATED_GRAVITY.copy(TMP_GRAVITY_NORM).applyQuaternion(TMP_ALIGN_QUAT);
+  return {
+    pitch: clamp(-TMP_CALIBRATED_GRAVITY.x * 1.3, -1.0, 1.0),
+    roll: clamp(TMP_CALIBRATED_GRAVITY.z * 1.3, -1.0, 1.0),
+  };
 }
 
 function isTouchModeActive() {
@@ -203,6 +290,7 @@ function syncHudLayout() {
   const anchor = ndcToHud(0, 0);
   const lateralScale = Math.min(anchor.halfW, anchor.halfH) * 0.24;
   const rollScale = lateralScale * 0.9;
+  const gridAnchor = ndcToHud(0, GRID_HUD_NDC_Y, GRID_HUD_DEPTH);
 
   refs.chevrons.lateralLeft.sprite.position.set(-anchor.halfW * 0.74, 0, -HUD_DEPTH);
   refs.chevrons.lateralRight.sprite.position.set(anchor.halfW * 0.74, 0, -HUD_DEPTH);
@@ -215,6 +303,7 @@ function syncHudLayout() {
   refs.chevrons.rollRight.sprite.userData.baseScale = rollScale;
 
   refs.ringBaseScale = Math.max(0.04, Math.min(anchor.halfW, anchor.halfH) * 0.085);
+  refs.gridBasePosition.set(gridAnchor.x, gridAnchor.y, gridAnchor.z);
 }
 
 function resizeRenderer(force = false) {
@@ -244,14 +333,14 @@ function buildScene() {
   refs.scene.add(refs.camera);
 
   const gridPivot = new THREE.Group();
-  refs.scene.add(gridPivot);
+  refs.camera.add(gridPivot);
   refs.gridPivot = gridPivot;
 
   const gridMaterial = createGridMaterial();
   refs.gridUniforms = gridMaterial.uniforms;
 
   const gridMesh = new THREE.Mesh(new THREE.PlaneGeometry(8.8, 6.4), gridMaterial);
-  gridMesh.position.set(0, -0.56, -0.7);
+  gridMesh.position.set(0, 0, 0);
   gridMesh.rotation.x = -Math.PI * 0.5;
   gridMesh.frustumCulled = false;
   gridMesh.renderOrder = 3;
@@ -311,11 +400,17 @@ function onImuEvent(event) {
     const ax = num(accel.x, 0);
     const ay = num(accel.y, 0);
     const az = num(accel.z, 9.81);
-    const accelPitch = Math.atan2(-ax, Math.max(0.0001, Math.hypot(ay, az)));
-    const accelRoll = Math.atan2(ay, Math.max(0.0001, az));
-    state.imu.targetPitch = clamp(accelPitch, -1.0, 1.0);
-    state.imu.targetRoll = clamp(accelRoll, -1.0, 1.0);
-    state.gridPulse = Math.max(state.gridPulse, 0.34);
+    const calibratedTilt = calibratedTiltFromAccel(ax, ay, az, dt);
+    if (calibratedTilt) {
+      state.imu.targetPitch = calibratedTilt.pitch;
+      state.imu.targetRoll = calibratedTilt.roll;
+    } else {
+      const fallbackPitch = Math.atan2(-ax, Math.max(0.0001, Math.hypot(ay, az)));
+      const fallbackRoll = Math.atan2(ay, Math.max(0.0001, az));
+      state.imu.targetPitch = clamp(fallbackPitch, -1.0, 1.0);
+      state.imu.targetRoll = clamp(fallbackRoll, -1.0, 1.0);
+    }
+    state.gridPulse = Math.max(state.gridPulse, state.imu.calibrationReady ? 0.36 : 0.24);
   }
 
   if (gyro && dt > 0) {
@@ -413,7 +508,9 @@ function animate(nowMs) {
     0.95
   );
   refs.gridUniforms.uOpacity.value = gridOpacity;
-  refs.gridPivot.position.x = clamp(state.motion.swayX * 0.44, -0.42, 0.42);
+  refs.gridPivot.position.copy(refs.gridBasePosition);
+  refs.gridPivot.position.x += clamp(state.motion.swayX * 0.44, -0.42, 0.42);
+  refs.gridPivot.position.y += clamp(state.motion.swayRoll * 0.08, -0.08, 0.08);
   refs.gridPivot.rotation.x = state.imu.pitch * 0.9 + state.motion.swayRoll * 0.1;
   refs.gridPivot.rotation.z = -state.imu.roll * 0.9;
 
