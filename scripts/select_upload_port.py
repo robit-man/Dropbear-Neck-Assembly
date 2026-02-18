@@ -1,10 +1,11 @@
 """
-Pick a safe serial port for ESP32 uploads on Windows.
+Pick a safe serial port for ESP32 uploads.
 
 Why this exists:
 - Windows can expose Bluetooth SPP ports as COM devices.
 - PlatformIO auto-detection may choose a Bluetooth COM port instead of USB UART,
   which causes upload failures such as "Access is denied" or serial write timeout.
+- On Linux/macOS, serial device paths are case-sensitive (e.g. /dev/ttyUSB0).
 
 Behavior:
 - Only runs for targets that need a serial port (upload/monitor/program).
@@ -43,6 +44,24 @@ KNOWN_ESP32_USB_IDS = (
 def needs_serial_port():
     targets = {t.lower() for t in COMMAND_LINE_TARGETS}
     return bool(targets & TARGETS_NEEDING_SERIAL)
+
+
+def _is_windows():
+    return platform.system().lower() == "windows"
+
+
+def _normalize_port_name(device):
+    port = str(device or "").strip()
+    if not port:
+        return ""
+    return port.upper() if _is_windows() else port
+
+
+def _dedupe_key(device):
+    port = str(device or "").strip()
+    if _is_windows():
+        return port.upper()
+    return port
 
 
 def is_bluetooth_port(instance_id, description):
@@ -91,7 +110,7 @@ def connected_ports_windows():
             if match:
                 ports.append(
                     {
-                        "device": match.group(1).upper(),
+                        "device": _normalize_port_name(match.group(1)),
                         "description": desc,
                         "instance_id": current_instance,
                     }
@@ -110,7 +129,7 @@ def connected_ports_pyserial():
     for port in list_ports.comports():
         ports.append(
             {
-                "device": (port.device or "").upper(),
+                "device": _normalize_port_name(port.device),
                 "description": port.description or "",
                 "instance_id": port.hwid or "",
             }
@@ -121,7 +140,7 @@ def connected_ports_pyserial():
 def dedupe_by_port_prefer_usb(ports):
     selected = {}
     for item in ports:
-        key = item["device"]
+        key = _dedupe_key(item.get("device", ""))
         if key not in selected:
             selected[key] = item
             continue
@@ -149,11 +168,21 @@ def print_ports(ports):
 
 def choose_port():
     override = os.getenv("PIO_UPLOAD_PORT") or os.getenv("ESP32_UPLOAD_PORT")
-    if override:
-        return override.strip().upper(), "manual override"
+    normalized_override = _normalize_port_name(override) if override else ""
+    if normalized_override:
+        if _is_windows():
+            return normalized_override, "manual override"
+
+        # On POSIX, allow automatic recovery if the manual path is stale.
+        if os.path.exists(normalized_override):
+            return normalized_override, "manual override"
+        print(
+            f"Manual upload port {normalized_override} does not exist; "
+            "falling back to auto-detection."
+        )
 
     ports = []
-    if platform.system().lower() == "windows":
+    if _is_windows():
         ports = connected_ports_windows()
     if not ports:
         ports = connected_ports_pyserial()
