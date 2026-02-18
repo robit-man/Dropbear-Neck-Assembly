@@ -4,12 +4,13 @@
   This code controls a Stewart platform using 6 stepper motors via lead screws.
   It accepts movement commands from both USB Serial and BluetoothSerial.
 
-  The code supports three kinds of commands:
+  The code supports four kinds of commands:
     1. Direct control commands for individual steppers (e.g., "1:30,2:45")
     2. General movement commands that specify platform head angles,
        height offsets, and speed/acceleration multipliers (e.g., "H-40,S2,A2")
     3. Quaternion-based commands for orientation control (e.g.,
        "Q:0.7071,0,0.7071,0,S1,A1")
+    4. Health/discovery commands (e.g., "HEALTH") that report DEVICE key + metrics.
 
   Homing commands:
     - "HOME" or "HOME_BRUTE": aggressive overtravel homing then software zero.
@@ -49,6 +50,8 @@ void zeroAllSteppers();
 void runHomeStep(int heightMm, float speedMultiplier, float accelMultiplier, unsigned long settleMs);
 void runSoftHome();
 void runBruteHome();
+void emitHealthReport();
+void emitHealthReport(Stream &out);
 
 // ----------------------- Pin Definitions and Constants -----------------------
 
@@ -102,6 +105,10 @@ const int BRUTE_HOME_HEIGHT_MM = -80;
 const float BRUTE_HOME_SPEED_MULT = 3.0f;
 const float BRUTE_HOME_ACCEL_MULT = 3.0f;
 const unsigned long BRUTE_HOME_SETTLE_MS = 2600;
+
+const char *DEVICE_KEY = "NECK";
+const char *CONTROLLER_ROLE = "STEWART_NECK";
+const int HEALTH_PROTOCOL_VERSION = 1;
 
 // Create a FastAccelStepperEngine instance to manage stepper motor actions.
 FastAccelStepperEngine engine = FastAccelStepperEngine();
@@ -172,6 +179,37 @@ void runBruteHome()
   runHomeStep(BRUTE_HOME_PREP_HEIGHT_MM, BRUTE_HOME_PREP_SPEED_MULT, BRUTE_HOME_PREP_ACCEL_MULT, BRUTE_HOME_PREP_SETTLE_MS);
   delay(150);
   runHomeStep(BRUTE_HOME_HEIGHT_MM, BRUTE_HOME_SPEED_MULT, BRUTE_HOME_ACCEL_MULT, BRUTE_HOME_SETTLE_MS);
+}
+
+void emitHealthReport(Stream &out)
+{
+  out.print("HEALTH|DEVICE=");
+  out.print(DEVICE_KEY);
+  out.print("|ROLE=");
+  out.print(CONTROLLER_ROLE);
+  out.print("|PROTO=");
+  out.print(HEALTH_PROTOCOL_VERSION);
+  out.print("|UPTIME_MS=");
+  out.print(millis());
+  out.print("|BAUD=");
+  out.print(115200);
+  out.print("|BT_NAME=NECK_BT");
+  out.print("|MOTORS=6");
+  out.print("|SPEED_HZ=");
+  out.print(speedVar);
+  out.print("|ACCEL=");
+  out.print(accVar);
+  out.print("|BYPASS_CLAMP=");
+  out.println(bypassClamp ? 1 : 0);
+}
+
+void emitHealthReport()
+{
+  emitHealthReport(Serial);
+  if (BTSerial.hasClient())
+  {
+    emitHealthReport(BTSerial);
+  }
 }
 
 void setup()
@@ -362,6 +400,7 @@ void parseAndMove(String input)
   Command types:
     - "HOME" or "HOME_BRUTE" runs aggressive homing + software zero.
     - "HOME_SOFT" runs gentler homing + software zero.
+    - "HEALTH" or "STATUS" reports a parseable controller identity payload.
     - If the command starts with 'Q', it is treated as a quaternion command.
     - If the command contains a colon (':'), it is processed as direct
       control of individual steppers (e.g., "1:30,2:45").
@@ -385,6 +424,11 @@ void executeCommand(String command)
   if (command.equalsIgnoreCase("HOME_SOFT"))
   {
     runSoftHome();
+    return;
+  }
+  if (command.equalsIgnoreCase("HEALTH") || command.equalsIgnoreCase("STATUS"))
+  {
+    emitHealthReport();
     return;
   }
 

@@ -4,8 +4,8 @@ All-in-one Python script that:
 1. Auto-creates a virtual environment (if needed) and installs required packages (pyserial, Flask, Flask-SocketIO),
    then re-launches itself from the venv.
 2. Loads configuration from config.json if available.
-3. For the serial device and baudrate, attempts to use the saved values; if the connection fails,
-   auto-tries /dev/ttyUSB0 and /dev/ttyUSB1 at 115200; if those fail, prompts for new values.
+3. For the serial controller, probes available ports with a HEALTH command, validates DEVICE key,
+   and binds the matching controller (default DEVICE=NECK).
 4. For the network host, port, and route, attempts to use saved values; if any fail,
    prompts for new ones.
 5. Saves any new valid configuration automatically.
@@ -137,7 +137,15 @@ LEGACY_DEFAULT_LISTEN_PORTS = {5001, 5060, 5160}
 DEFAULT_LISTEN_ROUTE = "/send_command"
 DEFAULT_ENABLE_TUNNEL = True
 DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
-AUTO_SERIAL_CANDIDATES = ("/dev/ttyUSB0", "/dev/ttyUSB1")
+DEFAULT_SERIAL_EXPECTED_DEVICE_KEY = "NECK"
+AUTO_SERIAL_USB_INDEX_MIN = 0
+AUTO_SERIAL_USB_INDEX_MAX = 5
+AUTO_SERIAL_PROBE_COMMAND = "HEALTH"
+AUTO_SERIAL_PROBE_ATTEMPTS = 3
+AUTO_SERIAL_PROBE_WARMUP_SECONDS = 0.35
+AUTO_SERIAL_PROBE_RESPONSE_WINDOW_SECONDS = 0.9
+AUTO_SERIAL_PROBE_READ_TIMEOUT_SECONDS = 0.15
+AUTO_SERIAL_PROBE_WRITE_TIMEOUT_SECONDS = 0.6
 
 # --- Cloudflare Tunnel ---
 tunnel_url = None
@@ -556,6 +564,297 @@ def _normalize_route(value):
     return route
 
 
+def _normalize_device_key(value):
+    key = re.sub(r"[^A-Za-z0-9_]+", "", str(value or "").strip().upper())
+    return key
+
+
+def _ordered_serial_candidates(preferred_device=None, candidate_devices=None):
+    ordered = []
+    seen = set()
+
+    def add(device):
+        port = str(device or "").strip()
+        if not port or port in seen:
+            return
+        seen.add(port)
+        ordered.append(port)
+
+    add(preferred_device)
+
+    if candidate_devices:
+        for item in candidate_devices:
+            add(item)
+        return ordered
+
+    env_ports = str(os.environ.get("ADAPTER_SERIAL_SCAN_PORTS", "")).strip()
+    if env_ports:
+        for token in env_ports.split(","):
+            add(token)
+
+    try:
+        from serial.tools import list_ports
+
+        discovered = []
+        for port_info in list_ports.comports():
+            port_name = str(getattr(port_info, "device", "") or "").strip()
+            if port_name:
+                discovered.append(port_name)
+        for port_name in sorted(discovered):
+            add(port_name)
+    except Exception:
+        pass
+
+    if os.name == "nt":
+        for idx in range(1, 33):
+            add(f"COM{idx}")
+    else:
+        for idx in range(AUTO_SERIAL_USB_INDEX_MIN, AUTO_SERIAL_USB_INDEX_MAX + 1):
+            add(f"/dev/ttyUSB{idx}")
+        for idx in range(AUTO_SERIAL_USB_INDEX_MIN, AUTO_SERIAL_USB_INDEX_MAX + 1):
+            add(f"/dev/ttyACM{idx}")
+
+    return ordered
+
+
+def _parse_serial_health_line(line):
+    raw = str(line or "").strip()
+    if not raw:
+        return None
+
+    # Optional JSON fallback for future controller variants.
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            parsed = {}
+            for key, value in payload.items():
+                clean_key = re.sub(r"[^A-Za-z0-9_]+", "", str(key).strip().upper())
+                if not clean_key:
+                    continue
+                parsed[clean_key] = str(value).strip()
+            device_key = _normalize_device_key(
+                parsed.get("DEVICE")
+                or parsed.get("DEVICE_KEY")
+                or parsed.get("TYPE")
+                or parsed.get("ROLE")
+            )
+            if device_key:
+                parsed["DEVICE"] = device_key
+            parsed["RAW"] = raw
+            return parsed if parsed else None
+
+    upper = raw.upper()
+    tail = ""
+    separators = None
+    if upper == "HEALTH":
+        return {"RAW": raw}
+    if upper.startswith("HEALTH|"):
+        tail = raw.split("|", 1)[1]
+        separators = "|"
+    elif upper.startswith("HEALTH:"):
+        tail = raw.split(":", 1)[1]
+        separators = "mixed"
+    elif upper.startswith("HEALTH "):
+        tail = raw.split(" ", 1)[1]
+        separators = "mixed"
+    else:
+        return None
+
+    if separators == "|":
+        tokens = [part.strip() for part in tail.split("|") if part.strip()]
+    else:
+        tokens = [part.strip() for part in re.split(r"[|,\s]+", tail) if part.strip()]
+
+    parsed = {}
+    for token in tokens:
+        key = ""
+        value = ""
+        if "=" in token:
+            key, value = token.split("=", 1)
+        elif ":" in token:
+            key, value = token.split(":", 1)
+        clean_key = re.sub(r"[^A-Za-z0-9_]+", "", str(key).strip().upper())
+        if not clean_key:
+            continue
+        parsed[clean_key] = str(value).strip()
+
+    device_key = _normalize_device_key(
+        parsed.get("DEVICE")
+        or parsed.get("DEVICE_KEY")
+        or parsed.get("TYPE")
+        or parsed.get("ROLE")
+    )
+    if device_key:
+        parsed["DEVICE"] = device_key
+    parsed["RAW"] = raw
+    return parsed
+
+
+def _probe_serial_candidate(device, baudrate, expected_device_key):
+    expected = _normalize_device_key(expected_device_key)
+    result = {
+        "serial": None,
+        "device": str(device or "").strip(),
+        "baudrate": int(baudrate),
+        "matched": False,
+        "mismatch": False,
+        "device_key": "",
+        "health": {},
+        "error": "",
+    }
+    serial_conn = None
+    matched = False
+
+    try:
+        serial_conn = serial.Serial(
+            result["device"],
+            int(baudrate),
+            timeout=AUTO_SERIAL_PROBE_READ_TIMEOUT_SECONDS,
+            write_timeout=AUTO_SERIAL_PROBE_WRITE_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        result["error"] = f"open failed: {exc}"
+        return result
+
+    try:
+        time.sleep(AUTO_SERIAL_PROBE_WARMUP_SECONDS)
+        try:
+            serial_conn.reset_input_buffer()
+        except Exception:
+            pass
+        try:
+            serial_conn.reset_output_buffer()
+        except Exception:
+            pass
+
+        parsed_any = False
+
+        for _ in range(AUTO_SERIAL_PROBE_ATTEMPTS):
+            try:
+                serial_conn.write((AUTO_SERIAL_PROBE_COMMAND + "\n").encode("utf-8"))
+                serial_conn.flush()
+            except Exception as exc:
+                result["error"] = f"probe write failed: {exc}"
+                return result
+
+            deadline = time.time() + AUTO_SERIAL_PROBE_RESPONSE_WINDOW_SECONDS
+            while time.time() < deadline:
+                try:
+                    raw_bytes = serial_conn.readline()
+                except Exception as exc:
+                    result["error"] = f"probe read failed: {exc}"
+                    return result
+                if not raw_bytes:
+                    continue
+                line = raw_bytes.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
+
+                parsed = _parse_serial_health_line(line)
+                if not parsed:
+                    continue
+
+                parsed_any = True
+                result["health"] = dict(parsed)
+                device_key = _normalize_device_key(parsed.get("DEVICE") or parsed.get("DEVICE_KEY"))
+                result["device_key"] = device_key
+                if device_key:
+                    result["health"]["DEVICE"] = device_key
+
+                if expected and device_key and device_key != expected:
+                    result["mismatch"] = True
+                    result["error"] = f"reported DEVICE={device_key}"
+                    return result
+                if expected and not device_key:
+                    result["error"] = "HEALTH response missing DEVICE key"
+                    continue
+
+                matched = True
+                result["matched"] = True
+                result["serial"] = serial_conn
+                return result
+
+        if parsed_any and not result["error"]:
+            result["error"] = "HEALTH response did not match expected device key"
+        if not parsed_any and not result["error"]:
+            result["error"] = "No HEALTH response"
+        return result
+    finally:
+        if not matched and serial_conn is not None:
+            try:
+                serial_conn.close()
+            except Exception:
+                pass
+
+
+def discover_serial_connection(
+    expected_device_key,
+    preferred_device=None,
+    preferred_baudrate=DEFAULT_BAUDRATE,
+    candidate_devices=None,
+):
+    expected = _normalize_device_key(expected_device_key)
+    resolved_baudrate = _as_int(
+        preferred_baudrate,
+        DEFAULT_BAUDRATE,
+        minimum=300,
+        maximum=2_000_000,
+    )
+    baudrates = [int(resolved_baudrate)]
+    if int(DEFAULT_BAUDRATE) not in baudrates:
+        baudrates.append(int(DEFAULT_BAUDRATE))
+
+    candidates = _ordered_serial_candidates(
+        preferred_device=preferred_device,
+        candidate_devices=candidate_devices,
+    )
+    if not candidates:
+        return None, "", int(resolved_baudrate), {}, "No serial candidates available"
+
+    mismatch_reports = []
+    probe_errors = []
+
+    for baud in baudrates:
+        for device in candidates:
+            probe = _probe_serial_candidate(device, baud, expected)
+            if probe["matched"] and probe["serial"] is not None:
+                health = dict(probe.get("health") or {})
+                if expected and "DEVICE" not in health:
+                    health["DEVICE"] = expected
+                return probe["serial"], probe["device"], int(baud), health, ""
+
+            detail = str(probe.get("error") or "probe failed").strip() or "probe failed"
+            if probe.get("mismatch"):
+                found_key = probe.get("device_key") or "UNKNOWN"
+                mismatch_reports.append(f"{probe['device']} -> {found_key}")
+            else:
+                probe_errors.append(f"{probe['device']}@{baud}: {detail}")
+
+    expected_desc = expected or "ANY"
+    if mismatch_reports:
+        return (
+            None,
+            "",
+            int(resolved_baudrate),
+            {},
+            f"No controller with DEVICE={expected_desc} matched HEALTH probe. Found: {', '.join(mismatch_reports)}",
+        )
+
+    if probe_errors:
+        return (
+            None,
+            "",
+            int(resolved_baudrate),
+            {},
+            f"No controller with DEVICE={expected_desc} responded to HEALTH. Last probe error: {probe_errors[-1]}",
+        )
+
+    return None, "", int(resolved_baudrate), {}, f"No serial candidates available for DEVICE={expected_desc}"
+
+
 def load_config():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fp:
@@ -603,6 +902,16 @@ def _load_adapter_settings(config):
         maximum=2_000_000,
     )
     promote("adapter.serial.baudrate", baudrate)
+
+    expected_device_key = _normalize_device_key(
+        _read_config_value(
+            config,
+            "adapter.serial.expected_device_key",
+            DEFAULT_SERIAL_EXPECTED_DEVICE_KEY,
+            legacy_keys=("expected_device_key", "device_key"),
+        )
+    ) or DEFAULT_SERIAL_EXPECTED_DEVICE_KEY
+    promote("adapter.serial.expected_device_key", expected_device_key)
 
     listen_host = str(
         _read_config_value(
@@ -673,6 +982,7 @@ def _load_adapter_settings(config):
     return {
         "serial_device": serial_device,
         "baudrate": baudrate,
+        "expected_device_key": expected_device_key,
         "listen_host": listen_host,
         "listen_port": listen_port,
         "listen_route": listen_route,
@@ -711,6 +1021,15 @@ def _build_adapter_config_spec():
                         min_value=300,
                         max_value=2000000,
                         description="UART baudrate for the neck controller.",
+                        restart_required=False,
+                    ),
+                    SettingSpec(
+                        id="expected_device_key",
+                        label="Expected Device Key",
+                        path="adapter.serial.expected_device_key",
+                        value_type="str",
+                        default=DEFAULT_SERIAL_EXPECTED_DEVICE_KEY,
+                        description="Expected DEVICE value returned by HEALTH probe (e.g. NECK, LLEG).",
                         restart_required=False,
                     ),
                 ),
@@ -982,6 +1301,11 @@ def main():
     ser = None
     serial_device = adapter_settings["serial_device"]
     baudrate = adapter_settings["baudrate"]
+    serial_expected_device_key = (
+        _normalize_device_key(adapter_settings.get("expected_device_key"))
+        or DEFAULT_SERIAL_EXPECTED_DEVICE_KEY
+    )
+    serial_health_report = {}
 
     def _persist(path, value):
         nonlocal config_changed
@@ -989,10 +1313,76 @@ def main():
         if current is _MISSING or current != value:
             _set_nested(config, path, value)
             config_changed = True
+            return True
+        return False
+
+    def _close_serial_locked():
+        nonlocal ser
+        if ser is None:
+            return
+        try:
+            if getattr(ser, "is_open", False):
+                ser.close()
+                log(f"Serial disconnected: {serial_device or 'N/A'}@{baudrate}")
+        except Exception as close_exc:
+            log(f"Serial close warning: {close_exc}")
+        finally:
+            ser = None
+
+    def _connect_serial_controller(
+        preferred_device=None,
+        preferred_baudrate=None,
+        candidate_devices=None,
+        context_label="[SERIAL]",
+        save_if_changed=False,
+    ):
+        nonlocal ser, serial_device, baudrate, serial_health_report
+
+        target_baudrate = _as_int(
+            preferred_baudrate if preferred_baudrate is not None else baudrate,
+            DEFAULT_BAUDRATE,
+            minimum=300,
+            maximum=2_000_000,
+        )
+        expected_key = _normalize_device_key(serial_expected_device_key) or DEFAULT_SERIAL_EXPECTED_DEVICE_KEY
+
+        with serial_io_lock:
+            _close_serial_locked()
+            found_ser, found_device, found_baud, found_health, failure_reason = discover_serial_connection(
+                expected_device_key=expected_key,
+                preferred_device=preferred_device,
+                preferred_baudrate=target_baudrate,
+                candidate_devices=candidate_devices,
+            )
+            if found_ser is None:
+                ser = None
+                serial_health_report = {}
+                return False, failure_reason
+
+            ser = found_ser
+            serial_device = str(found_device or "").strip()
+            baudrate = int(found_baud)
+            serial_health_report = dict(found_health or {})
+            if expected_key and "DEVICE" not in serial_health_report:
+                serial_health_report["DEVICE"] = expected_key
+
+        changed_any = False
+        changed_any = _persist("adapter.serial.device", serial_device) or changed_any
+        changed_any = _persist("adapter.serial.baudrate", int(baudrate)) or changed_any
+        changed_any = _persist("adapter.serial.expected_device_key", expected_key) or changed_any
+        if save_if_changed and changed_any:
+            save_config(config)
+
+        discovered_key = _normalize_device_key(
+            serial_health_report.get("DEVICE") or serial_health_report.get("device_key")
+        )
+        key_suffix = f", DEVICE={discovered_key}" if discovered_key else ""
+        log(f"{context_label} Serial connected: {serial_device}@{baudrate}{key_suffix}")
+        return True, "Serial connected"
 
     def _apply_runtime_config(saved_config):
         global SESSION_TIMEOUT
-        nonlocal ser, serial_device, baudrate
+        nonlocal ser, serial_device, baudrate, serial_expected_device_key, serial_health_report
         password = str(
             _read_config_value(
                 saved_config,
@@ -1030,56 +1420,72 @@ def main():
             minimum=300,
             maximum=2_000_000,
         )
+        configured_expected_device_key = _normalize_device_key(
+            _read_config_value(
+                saved_config,
+                "adapter.serial.expected_device_key",
+                serial_expected_device_key,
+                legacy_keys=("expected_device_key", "device_key"),
+            )
+        ) or DEFAULT_SERIAL_EXPECTED_DEVICE_KEY
 
         runtime_security["password"] = password
         SESSION_TIMEOUT = timeout
+        current_detected_key = _normalize_device_key(
+            serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+        )
         serial_apply = {
             "changed": False,
             "attempted": False,
             "configured_device": configured_serial_device or "",
             "baudrate": int(configured_baudrate),
+            "expected_device_key": configured_expected_device_key,
             "connected": bool(ser is not None and getattr(ser, "is_open", False)),
+            "detected_device_key": current_detected_key,
             "error": "",
         }
 
-        if configured_serial_device != serial_device or int(configured_baudrate) != int(baudrate):
+        if (
+            configured_serial_device != serial_device
+            or int(configured_baudrate) != int(baudrate)
+            or configured_expected_device_key != serial_expected_device_key
+        ):
             serial_apply["changed"] = True
+            serial_apply["attempted"] = True
+            serial_expected_device_key = configured_expected_device_key
 
-            with serial_io_lock:
-                if ser is not None:
-                    try:
-                        if getattr(ser, "is_open", False):
-                            ser.close()
-                            log(f"Serial disconnected: {serial_device}@{baudrate}")
-                    except Exception as close_exc:
-                        log(f"Serial close warning: {close_exc}")
-                    finally:
-                        ser = None
-
-                serial_device = configured_serial_device
-                baudrate = int(configured_baudrate)
-
-                if serial_device:
-                    serial_apply["attempted"] = True
-                    try:
-                        ser = serial.Serial(serial_device, int(baudrate), timeout=1)
-                        serial_apply["connected"] = True
-                        log(f"[CONFIG] Serial reconnected from config save: {serial_device}@{baudrate}")
-                    except Exception as open_exc:
-                        serial_apply["connected"] = False
-                        serial_apply["error"] = str(open_exc)
-                        log(
-                            f"[WARN] Configured serial connect failed: "
-                            f"{serial_device}@{baudrate} ({open_exc})"
-                        )
-                else:
-                    serial_apply["connected"] = False
-                    log("[CONFIG] Serial device cleared; serial connection disabled")
+            connected, connect_message = _connect_serial_controller(
+                preferred_device=configured_serial_device,
+                preferred_baudrate=int(configured_baudrate),
+                context_label="[CONFIG]",
+                save_if_changed=True,
+            )
+            serial_apply["connected"] = connected
+            serial_apply["error"] = "" if connected else connect_message
+            serial_apply["configured_device"] = configured_serial_device or ""
+            serial_apply["baudrate"] = int(configured_baudrate)
+            serial_apply["detected_device_key"] = _normalize_device_key(
+                serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+            )
+            if not connected:
+                log(
+                    f"[WARN] Configured serial connect failed for "
+                    f"{configured_serial_device or '(auto)'}@{configured_baudrate} "
+                    f"(DEVICE={serial_expected_device_key}): {connect_message}"
+                )
 
         if ui:
             ui.update_metric("Session Timeout (s)", str(SESSION_TIMEOUT))
             ui.update_metric("Serial Port", serial_device or "N/A")
             ui.update_metric("Baudrate", str(baudrate))
+            ui.update_metric("Expected Device", serial_expected_device_key or "N/A")
+            ui.update_metric(
+                "Detected Device",
+                _normalize_device_key(
+                    serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+                )
+                or "N/A",
+            )
             ui.update_metric(
                 "Serial",
                 "Connected" if (ser is not None and getattr(ser, "is_open", False)) else "Disconnected",
@@ -1101,122 +1507,103 @@ def main():
     interactive_prompts = _interactive_prompts_allowed()
     if not interactive_prompts:
         log("[BOOT] Interactive prompts disabled; adapter will continue without blocking for manual input")
+    log(f"[BOOT] Serial HEALTH probe target DEVICE={serial_expected_device_key}")
 
-    # 1) Try saved config
-    if serial_device:
-        try:
-            ser = serial.Serial(serial_device, int(baudrate), timeout=1)
-            print("Serial connection OK from saved config")
-        except Exception as exc:
-            print(f"Saved config failed: {exc}")
-            log(f"[WARN] Saved serial config failed: {serial_device}@{baudrate} ({exc})")
+    boot_connected, boot_message = _connect_serial_controller(
+        preferred_device=serial_device,
+        preferred_baudrate=baudrate,
+        context_label="[BOOT]",
+    )
+    if boot_connected:
+        print("Serial connection OK via HEALTH discovery")
+    else:
+        log(f"[WARN] {boot_message}")
 
-    # 2) Auto-try default candidates at default baudrate if the initial probe failed.
-    if ser is None:
-        fallback_candidates = []
-        for dev in AUTO_SERIAL_CANDIDATES:
-            candidate = str(dev or "").strip()
-            if not candidate:
-                continue
-            if serial_device and candidate == serial_device:
-                continue
-            fallback_candidates.append(candidate)
-
-        if serial_device and fallback_candidates:
-            log(
-                f"[WARN] Configured serial device {serial_device}@{baudrate} unavailable; "
-                f"trying fallback candidates: {', '.join(fallback_candidates)}"
-            )
-
-        for dev in fallback_candidates:
-            try:
-                ser = serial.Serial(dev, DEFAULT_BAUDRATE, timeout=1)
-                print(f"Auto-connected fallback: {dev}@{DEFAULT_BAUDRATE}")
-                log(f"[BOOT] Fallback serial connected: {dev}@{DEFAULT_BAUDRATE}")
-                serial_device = dev
-                baudrate = DEFAULT_BAUDRATE
-                _persist("adapter.serial.device", serial_device)
-                _persist("adapter.serial.baudrate", baudrate)
-                break
-            except Exception:
-                continue
-
-        if ser is None and serial_device and not fallback_candidates:
-            log(
-                f"[WARN] Configured serial device {serial_device}@{baudrate} unavailable; "
-                "no fallback candidates configured"
-            )
-
-    # 3) Interactive fallback (optional in supervised/headless mode)
+    # Optional interactive fallback for manual override in supervised mode.
     if ser is None and interactive_prompts:
         while ser is None:
-            device = input("Serial device (e.g. /dev/ttyUSB0 or COM3): ").strip()
+            device = input("Serial device (e.g. /dev/ttyUSB2 or COM3): ").strip()
             baud_in = input(f"Baudrate (default {DEFAULT_BAUDRATE}): ").strip() or str(DEFAULT_BAUDRATE)
             try:
                 baud = int(baud_in)
             except ValueError:
                 print("Invalid baudrate.\n")
                 continue
-            try:
-                ser = serial.Serial(device, baud, timeout=1)
+
+            manual_device = str(device or "").strip() or None
+            connected, connect_message = _connect_serial_controller(
+                preferred_device=manual_device,
+                preferred_baudrate=baud,
+                candidate_devices=[manual_device] if manual_device else None,
+                context_label="[MANUAL]",
+                save_if_changed=True,
+            )
+            if connected:
                 print("Serial connection successful!")
-                serial_device = device
-                baudrate = baud
-                _persist("adapter.serial.device", serial_device)
-                _persist("adapter.serial.baudrate", baudrate)
-            except Exception as exc:
-                print(f"Serial connect error: {exc}\n")
+            else:
+                print(f"Serial connect error: {connect_message}\n")
     elif ser is None:
         log("[WARN] Serial not connected; starting HTTP/WS endpoints in degraded mode")
 
     def reset_serial_connection(trigger_home=True, home_command="HOME_BRUTE"):
-        """Disconnect and reconnect serial port, optionally issuing a home command."""
-        nonlocal ser, serial_device, baudrate
+        """Reconnect serial port using HEALTH discovery, optionally issuing a home command."""
+        nonlocal ser, serial_device, baudrate, serial_health_report
 
         normalized_home = _normalized_home_command(str(home_command)) or "home_brute"
         outbound_home = normalized_home.upper()
+        preferred_device = serial_device
+        preferred_baudrate = baudrate
 
-        if not serial_device:
-            return False, "No serial device configured", None
+        if preferred_device:
+            connected, reconnect_message = _connect_serial_controller(
+                preferred_device=preferred_device,
+                preferred_baudrate=preferred_baudrate,
+                candidate_devices=[preferred_device],
+                context_label="[RESET]",
+                save_if_changed=True,
+            )
+            if not connected:
+                log(
+                    f"[WARN] Reconnect on configured serial device failed ({preferred_device}@{preferred_baudrate}); "
+                    "running full HEALTH discovery scan"
+                )
+                log(f"[WARN] {reconnect_message}")
+        else:
+            connected = False
+            reconnect_message = "No configured serial device"
 
-        with serial_io_lock:
-            if ser is not None:
-                try:
-                    if getattr(ser, "is_open", False):
-                        ser.close()
-                        log(f"Serial disconnected: {serial_device}@{baudrate}")
-                except Exception as close_exc:
-                    log(f"Serial close warning: {close_exc}")
+        if not connected:
+            connected, reconnect_message = _connect_serial_controller(
+                preferred_device=preferred_device,
+                preferred_baudrate=preferred_baudrate,
+                context_label="[RESET]",
+                save_if_changed=True,
+            )
+            if not connected:
+                return False, f"Reconnect failed: {reconnect_message}", None
 
-            # Give USB CDC device a moment to drop before reconnect attempts.
-            time.sleep(0.35)
+        # Give firmware a moment after reconnect before optional home command.
+        time.sleep(0.2)
 
-            last_exc = None
-            reconnect_attempts = 8
-            for attempt in range(1, reconnect_attempts + 1):
-                try:
-                    ser = serial.Serial(serial_device, int(baudrate), timeout=1)
-                    log(f"Serial reconnected: {serial_device}@{baudrate} (attempt {attempt})")
-                    break
-                except Exception as open_exc:
-                    last_exc = open_exc
-                    if attempt < reconnect_attempts:
-                        time.sleep(0.4)
-            else:
-                return False, f"Reconnect failed: {last_exc}", None
-
-            # Give firmware a moment after reconnect before optional home command.
-            time.sleep(0.2)
-
-            if trigger_home:
-                try:
+        if trigger_home:
+            try:
+                with serial_io_lock:
+                    if ser is None or not getattr(ser, "is_open", False):
+                        return False, "Reconnect succeeded but serial is not open", None
                     ser.write((outbound_home + "\n").encode("utf-8"))
-                    _reset_state_to_home_defaults()
-                    log(f"Sent command after serial reset: {outbound_home}")
-                except Exception as home_exc:
-                    return False, f"Reconnect succeeded but home send failed: {home_exc}", outbound_home
+                _reset_state_to_home_defaults()
+                log(f"Sent command after serial reset: {outbound_home}")
+            except Exception as home_exc:
+                return False, f"Reconnect succeeded but home send failed: {home_exc}", outbound_home
 
-        return True, "Serial port reset complete", outbound_home if trigger_home else None
+        detected_key = _normalize_device_key(
+            serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+        )
+        message = f"Serial port reset complete ({serial_device}@{baudrate}"
+        if detected_key:
+            message += f", DEVICE={detected_key}"
+        message += ")"
+        return True, message, outbound_home if trigger_home else None
 
     # --- Network Host/Port/Route ---
     listen_host = adapter_settings["listen_host"]
@@ -1246,6 +1633,7 @@ def main():
     _persist("adapter.network.listen_host", listen_host)
     _persist("adapter.network.listen_port", listen_port)
     _persist("adapter.network.listen_route", listen_route)
+    _persist("adapter.serial.expected_device_key", serial_expected_device_key)
     _persist("adapter.security.password", runtime_security["password"])
     _persist("adapter.security.session_timeout", SESSION_TIMEOUT)
     _persist("adapter.tunnel.enable", adapter_settings["enable_tunnel"])
@@ -1809,6 +2197,9 @@ def main():
         with sessions_lock:
             session_count = len(sessions)
         serial_connected = bool(ser is not None and getattr(ser, "is_open", False))
+        serial_detected_device_key = _normalize_device_key(
+            serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+        )
         process_running = tunnel_process is not None and tunnel_process.poll() is None
         current_tunnel = None
         current_error = ""
@@ -1833,6 +2224,9 @@ def main():
                 "serial_connected": serial_connected,
                 "serial_device": serial_device or "",
                 "baudrate": int(baudrate),
+                "serial_expected_device_key": serial_expected_device_key,
+                "serial_detected_device_key": serial_detected_device_key,
+                "serial_health": dict(serial_health_report) if isinstance(serial_health_report, dict) else {},
                 "sessions_active": session_count,
                 "commands_served": int(command_count["value"]),
                 "requests_served": int(request_count["value"]),
@@ -1863,6 +2257,11 @@ def main():
                 "connected": serial_connected,
                 "device": serial_device or "",
                 "baudrate": int(baudrate),
+                "expected_device_key": serial_expected_device_key,
+                "detected_device_key": _normalize_device_key(
+                    serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+                ),
+                "health": dict(serial_health_report) if isinstance(serial_health_report, dict) else {},
             },
             "network": {
                 "listen_host": listen_host,
@@ -2013,6 +2412,16 @@ def main():
         return {
             "service": "adapter",
             "base_url": effective_base,
+            "serial": {
+                "connected": bool(ser is not None and getattr(ser, "is_open", False)),
+                "device": serial_device or "",
+                "baudrate": int(baudrate),
+                "expected_device_key": serial_expected_device_key,
+                "detected_device_key": _normalize_device_key(
+                    serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+                ),
+                "health": dict(serial_health_report) if isinstance(serial_health_report, dict) else {},
+            },
             "local": local_payload,
             "tunnel": {
                 "state": tunnel_state,
@@ -2085,6 +2494,11 @@ def main():
             "message": message,
             "serial_device": serial_device,
             "baudrate": int(baudrate),
+            "serial_expected_device_key": serial_expected_device_key,
+            "serial_detected_device_key": _normalize_device_key(
+                serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+            ),
+            "serial_health": dict(serial_health_report) if isinstance(serial_health_report, dict) else {},
             "home_sent": home_sent,
         }
         return jsonify(response)
@@ -2190,6 +2604,14 @@ def main():
     if ui:
         ui.update_metric("Serial Port", serial_device or "N/A")
         ui.update_metric("Baudrate", str(baudrate))
+        ui.update_metric("Expected Device", serial_expected_device_key or "N/A")
+        ui.update_metric(
+            "Detected Device",
+            _normalize_device_key(
+                serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+            )
+            or "N/A",
+        )
         ui.update_metric("Local URL", local_base)
         ui.update_metric("LAN URL", lan_base or "N/A")
         ui.update_metric("HTTP Endpoint", local_http)
@@ -2209,6 +2631,20 @@ def main():
                 session_count = len(sessions)
             ui.update_metric("Sessions", str(session_count))
             ui.update_metric("Commands", str(command_count["value"]))
+            ui.update_metric("Serial Port", serial_device or "N/A")
+            ui.update_metric("Baudrate", str(baudrate))
+            ui.update_metric("Expected Device", serial_expected_device_key or "N/A")
+            ui.update_metric(
+                "Detected Device",
+                _normalize_device_key(
+                    serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+                )
+                or "N/A",
+            )
+            ui.update_metric(
+                "Serial",
+                "Connected" if (ser is not None and getattr(ser, "is_open", False)) else "Disconnected",
+            )
 
             process_running = tunnel_process is not None and tunnel_process.poll() is None
             with tunnel_url_lock:

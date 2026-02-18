@@ -64,7 +64,8 @@
     },
     "adapter": {
         "serial": {
-            "baudrate": 115200
+            "baudrate": 115200,
+            "expected_device_key": "NECK"
         },
         "network": {
             "listen_host": "0.0.0.0",
