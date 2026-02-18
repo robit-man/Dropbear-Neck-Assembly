@@ -11,8 +11,12 @@ const LEGACY_DEFAULT_HTTP_URLS = [
 ];
 
 // Connection state - no auto-fill, only use saved or query params
-let WS_URL = sanitizeStoredRemoteOrigin(localStorage.getItem('wsUrl') || "", "wsUrl");
-let HTTP_URL = sanitizeStoredRemoteOrigin(localStorage.getItem('httpUrl') || "", "httpUrl");
+let WS_URL = "";
+let HTTP_URL = "";
+try {
+    localStorage.removeItem("wsUrl");
+    localStorage.removeItem("httpUrl");
+} catch (err) {}
 if (WS_URL === SERVER_DEFAULT_WS_URL || LEGACY_DEFAULT_WS_URLS.includes(WS_URL)) {
     WS_URL = "";
 }
@@ -2492,26 +2496,8 @@ function parseConnectionFromQuery() {
   let passwordProvided = false;
 
   if (adapterParam) {
-    const endpoints = buildAdapterEndpoints(adapterParam);
-    if (endpoints) {
-      if (!isCloudflareTunnelOrigin(endpoints.origin)) {
-        localStorage.removeItem('httpUrl');
-        localStorage.removeItem('wsUrl');
-        HTTP_URL = "";
-        WS_URL = "";
-        logToConsole(`[WARN] Ignored non-Cloudflare adapter URL in query: ${endpoints.origin}`);
-      } else {
-        localStorage.setItem('httpUrl', endpoints.httpUrl);
-        localStorage.setItem('wsUrl', endpoints.wsUrl);
-        HTTP_URL = endpoints.httpUrl;
-        WS_URL = endpoints.wsUrl;
-        adapterConfigured = true;
-        logToConsole(`[OK] Adapter configured from URL: ${endpoints.origin}`);
-      }
-    } else {
-      console.error('Invalid adapter URL in query parameter:', adapterParam);
-      logToConsole('[WARN] Invalid adapter URL in query parameter');
-    }
+    adapterConfigured = false;
+    logToConsole("[WARN] Ignored adapter URL query parameter; adapter endpoints are sourced from router service resolution only");
   }
 
   if (passwordParam) {
@@ -4094,10 +4080,10 @@ function initNknRouterUi() {
   refreshNknClientInfo({ resolveNow: true }).catch(() => {});
 }
 
-const CAMERA_ROUTER_DEFAULT_BASE = sanitizeStoredRemoteOrigin(
-  localStorage.getItem("cameraRouterBaseUrl") || "",
-  "cameraRouterBaseUrl"
-);
+const CAMERA_ROUTER_DEFAULT_BASE = "";
+try {
+  localStorage.removeItem("cameraRouterBaseUrl");
+} catch (err) {}
 const STREAM_MODE_MJPEG = "mjpeg";
 const STREAM_MODE_JPEG = "jpeg";
 const PINNED_PREVIEW_STORAGE_KEY = "cameraPinnedPreviewStateV1";
@@ -4263,10 +4249,10 @@ const pinnedPreviewInteraction = {
   startHeight: 0,
 };
 
-const AUDIO_ROUTER_DEFAULT_BASE = sanitizeStoredRemoteOrigin(
-  localStorage.getItem("audioRouterBaseUrl") || "",
-  "audioRouterBaseUrl"
-);
+const AUDIO_ROUTER_DEFAULT_BASE = "";
+try {
+  localStorage.removeItem("audioRouterBaseUrl");
+} catch (err) {}
 let audioRouterBaseUrl = AUDIO_ROUTER_DEFAULT_BASE;
 let audioRouterPassword = localStorage.getItem("audioRouterPassword") || "";
 let audioRouterSessionKey = localStorage.getItem("audioRouterSessionKey") || "";
