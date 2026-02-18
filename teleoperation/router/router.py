@@ -10,6 +10,7 @@ Responsibilities:
 """
 
 import datetime
+import base64
 import json
 import os
 import pathlib
@@ -144,6 +145,8 @@ CAMERA_FRAME_DEFAULT_MAX_KBPS = 900
 CAMERA_FRAME_DEFAULT_INTERVAL_MS = 280
 CAMERA_FRAME_DEFAULT_QUALITY = 56
 CAMERA_FRAME_DEFAULT_MIN_QUALITY = 22
+SERVICE_RPC_REQUEST_TIMEOUT_SECONDS = 8.5
+SERVICE_RPC_MAX_RESPONSE_BYTES = 2_500_000
 
 _MISSING = object()
 request_counter = {"value": 0}
@@ -605,6 +608,25 @@ def _httpish_url(value):
     if text.startswith("http://") or text.startswith("https://"):
         return text
     return ""
+
+
+def _normalize_nkn_address(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("nkn://"):
+        text = text[6:]
+    text = text.strip().strip("/")
+    pubkey = parse_nkn_pubkey(text)
+    if not pubkey:
+        return ""
+    parts = [part for part in text.split(".") if part]
+    if not parts:
+        return pubkey
+    if len(parts) == 1:
+        return pubkey
+    prefix = ".".join(parts[:-1]).strip()
+    return f"{prefix}.{pubkey}" if prefix else pubkey
 
 
 def _normalize_seed_hex(value):
@@ -1624,6 +1646,190 @@ def _camera_fetch_frame_packet(camera_id, options, auth):
     return True, packet, ""
 
 
+def _service_rpc_pick_base_url(snapshot, service_name):
+    service = str(service_name or "").strip().lower()
+    if service not in ("adapter", "camera", "audio"):
+        return ""
+    source = snapshot if isinstance(snapshot, dict) else {}
+    resolved = source.get("resolved", {}) if isinstance(source.get("resolved"), dict) else {}
+    services = source.get("services", {}) if isinstance(source.get("services"), dict) else {}
+    resolved_service = resolved.get(service, {}) if isinstance(resolved.get(service), dict) else {}
+    service_record = services.get(service, {}) if isinstance(services.get(service), dict) else {}
+    service_data = service_record.get("data", {}) if isinstance(service_record.get("data"), dict) else {}
+    service_local = service_data.get("local", {}) if isinstance(service_data.get("local"), dict) else {}
+
+    candidates = [
+        resolved_service.get("local_base_url"),
+        service_local.get("base_url"),
+        service_data.get("local_base_url"),
+        resolved_service.get("base_url"),
+        service_data.get("base_url"),
+    ]
+    for candidate in candidates:
+        url = _httpish_url(candidate)
+        if url:
+            return url.rstrip("/")
+    return ""
+
+
+def _service_rpc_target_url(base_url, raw_path):
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return ""
+    path = str(raw_path or "/").strip()
+    if not path:
+        path = "/"
+    parsed = urlparse(path)
+    if parsed.scheme in ("http", "https"):
+        path_only = parsed.path or "/"
+        if parsed.query:
+            path_only += f"?{parsed.query}"
+        path = path_only
+    elif not path.startswith("/"):
+        path = f"/{path}"
+    return f"{base}{path}"
+
+
+def _service_rpc_headers(raw_headers):
+    if not isinstance(raw_headers, dict):
+        return {}
+    blocked = {"host", "content-length", "connection", "accept-encoding"}
+    clean = {}
+    for key, value in raw_headers.items():
+        header = str(key or "").strip()
+        if not header:
+            continue
+        if header.lower() in blocked:
+            continue
+        if value is None:
+            continue
+        clean[header] = str(value)
+    return clean
+
+
+def _service_rpc_decode_request_body(payload):
+    body_kind = str(payload.get("body_kind") or "").strip().lower()
+    body = payload.get("body")
+    if body_kind in ("", "none") or body is None:
+        return None, None, ""
+    if body_kind == "json":
+        if isinstance(body, (dict, list, int, float, bool)) or body is None:
+            return body, None, ""
+        if isinstance(body, str):
+            try:
+                parsed = json.loads(body)
+            except Exception as exc:
+                return None, None, f"invalid json body: {exc}"
+            return parsed, None, ""
+        return None, None, "invalid json body type"
+    if body_kind == "base64":
+        try:
+            decoded = base64.b64decode(str(body).encode("utf-8"), validate=True)
+        except Exception as exc:
+            return None, None, f"invalid base64 body: {exc}"
+        return None, decoded, ""
+    if isinstance(body, (dict, list)):
+        return body, None, ""
+    return None, str(body), ""
+
+
+def _service_rpc_response_payload(response):
+    response_headers = response.headers if hasattr(response, "headers") else {}
+    content_type = str(response_headers.get("Content-Type") or "").strip()
+    raw = response.content or b""
+    truncated = False
+    if len(raw) > SERVICE_RPC_MAX_RESPONSE_BYTES:
+        raw = raw[:SERVICE_RPC_MAX_RESPONSE_BYTES]
+        truncated = True
+
+    payload = {
+        "status_code": int(response.status_code),
+        "ok": bool(response.ok),
+        "reason": str(response.reason or ""),
+        "headers": {
+            "content_type": content_type,
+        },
+        "body_kind": "none",
+        "body": "",
+        "truncated": truncated,
+    }
+
+    if not raw:
+        return payload
+
+    should_try_json = "json" in content_type.lower()
+    if should_try_json:
+        try:
+            payload["body_kind"] = "json"
+            payload["body"] = json.loads(raw.decode("utf-8", errors="replace"))
+            return payload
+        except Exception:
+            pass
+
+    try:
+        payload["body_kind"] = "text"
+        payload["body"] = raw.decode("utf-8", errors="replace")
+        return payload
+    except Exception:
+        pass
+
+    payload["body_kind"] = "base64"
+    payload["body"] = base64.b64encode(raw).decode("ascii")
+    return payload
+
+
+def _service_rpc_dispatch(service_name, request_payload):
+    service = str(service_name or "").strip().lower()
+    if service not in ("adapter", "camera", "audio"):
+        return False, {}, f"unsupported service '{service_name}'"
+
+    payload = request_payload if isinstance(request_payload, dict) else {}
+    path = str(payload.get("path") or "").strip() or "/"
+    method = str(payload.get("method") or "GET").strip().upper() or "GET"
+    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
+        return False, {}, f"unsupported method '{method}'"
+
+    timeout_ms = _as_int(
+        payload.get("timeout_ms"),
+        int(SERVICE_RPC_REQUEST_TIMEOUT_SECONDS * 1000),
+        minimum=500,
+        maximum=60000,
+    )
+    timeout_seconds = max(0.5, float(timeout_ms) / 1000.0)
+
+    snapshot = get_service_snapshot(force_refresh=False)
+    base_url = _service_rpc_pick_base_url(snapshot, service)
+    if not base_url:
+        return False, {}, f"service '{service}' local base URL unavailable"
+    target_url = _service_rpc_target_url(base_url, path)
+    if not target_url:
+        return False, {}, f"service '{service}' target URL unavailable"
+
+    headers = _service_rpc_headers(payload.get("headers"))
+    json_body, data_body, body_error = _service_rpc_decode_request_body(payload)
+    if body_error:
+        return False, {}, body_error
+
+    request_kwargs = {
+        "method": method,
+        "url": target_url,
+        "headers": headers,
+        "timeout": timeout_seconds,
+        "allow_redirects": False,
+    }
+    if json_body is not None:
+        request_kwargs["json"] = json_body
+    elif data_body is not None:
+        request_kwargs["data"] = data_body
+
+    try:
+        response = requests.request(**request_kwargs)
+    except Exception as exc:
+        return False, {}, f"service rpc request failed: {exc}"
+
+    return True, _service_rpc_response_payload(response), ""
+
+
 def _service_record(name, query_url):
     return {
         "service": name,
@@ -1929,6 +2135,12 @@ def build_resolved_endpoints(services):
         adapter_fallback_nkn.get("public_base_url")
         or adapter_fallback_nkn.get("base_url")
     )
+    adapter_nkn_address = _first_nonempty(
+        _normalize_nkn_address(adapter_data.get("nkn_address")),
+        _normalize_nkn_address(adapter_fallback_nkn.get("nkn_address")),
+        _normalize_nkn_address(adapter_fallback_nkn.get("address")),
+        _normalize_nkn_address(adapter_fallback_nkn.get("target_address")),
+    )
     adapter_fallback_http = _first_nonempty(
         _httpish_url(adapter_fallback_upnp.get("http_endpoint")),
         _httpish_url(adapter_fallback_nats.get("http_endpoint")),
@@ -1979,7 +2191,7 @@ def build_resolved_endpoints(services):
             adapter_transport = "upnp"
         elif adapter_nats_base:
             adapter_transport = "nats"
-        elif adapter_nkn_base:
+        elif adapter_nkn_base or adapter_nkn_address:
             adapter_transport = "nkn"
         else:
             adapter_transport = "local"
@@ -2000,6 +2212,12 @@ def build_resolved_endpoints(services):
     camera_nkn_base = _httpish_url(
         camera_fallback_nkn.get("public_base_url")
         or camera_fallback_nkn.get("base_url")
+    )
+    camera_nkn_address = _first_nonempty(
+        _normalize_nkn_address(camera_data.get("nkn_address")),
+        _normalize_nkn_address(camera_fallback_nkn.get("nkn_address")),
+        _normalize_nkn_address(camera_fallback_nkn.get("address")),
+        _normalize_nkn_address(camera_fallback_nkn.get("target_address")),
     )
     camera_base = _prefer_non_loopback_url(
         camera_tunnel_url,
@@ -2044,7 +2262,7 @@ def build_resolved_endpoints(services):
             camera_transport = "upnp"
         elif camera_nats_base:
             camera_transport = "nats"
-        elif camera_nkn_base:
+        elif camera_nkn_base or camera_nkn_address:
             camera_transport = "nkn"
         else:
             camera_transport = "local"
@@ -2065,6 +2283,12 @@ def build_resolved_endpoints(services):
     audio_nkn_base = _httpish_url(
         audio_fallback_nkn.get("public_base_url")
         or audio_fallback_nkn.get("base_url")
+    )
+    audio_nkn_address = _first_nonempty(
+        _normalize_nkn_address(audio_data.get("nkn_address")),
+        _normalize_nkn_address(audio_fallback_nkn.get("nkn_address")),
+        _normalize_nkn_address(audio_fallback_nkn.get("address")),
+        _normalize_nkn_address(audio_fallback_nkn.get("target_address")),
     )
     audio_base = _prefer_non_loopback_url(
         audio_tunnel_url,
@@ -2108,7 +2332,7 @@ def build_resolved_endpoints(services):
             audio_transport = "upnp"
         elif audio_nats_base:
             audio_transport = "nats"
-        elif audio_nkn_base:
+        elif audio_nkn_base or audio_nkn_address:
             audio_transport = "nkn"
         else:
             audio_transport = "local"
@@ -2140,6 +2364,7 @@ def build_resolved_endpoints(services):
             "transport": adapter_transport,
             "tunnel_url": adapter_tunnel_url,
             "base_url": adapter_base,
+            "nkn_address": adapter_nkn_address,
             "local_base_url": adapter_local_base,
             "http_endpoint": adapter_http,
             "ws_endpoint": adapter_ws,
@@ -2154,6 +2379,7 @@ def build_resolved_endpoints(services):
             "transport": camera_transport,
             "tunnel_url": camera_tunnel_url,
             "base_url": camera_base,
+            "nkn_address": camera_nkn_address,
             "list_url": str(camera_list).strip(),
             "health_url": str(camera_health).strip(),
             "frame_packet_template": str(camera_frame_packet_template).strip(),
@@ -2164,6 +2390,7 @@ def build_resolved_endpoints(services):
             "transport": audio_transport,
             "tunnel_url": audio_tunnel_url,
             "base_url": audio_base,
+            "nkn_address": audio_nkn_address,
             "list_url": str(audio_list).strip(),
             "health_url": str(audio_health).strip(),
             "webrtc_offer_url": str(audio_webrtc_offer).strip(),
@@ -2322,6 +2549,39 @@ def _handle_nkn_message(source, payload_text):
                 peer=source,
                 event="camera_frame_request",
                 extra={"request_id": request_id, "camera_id": requested_camera_id},
+            )
+        send_nkn_dm(source, reply, tries=1)
+        return
+
+    if event_name in ("service_rpc_request", "rpc_request"):
+        service_name = str(payload.get("service") or "").strip().lower()
+        ok, result, err = _service_rpc_dispatch(service_name, payload)
+        reply = {
+            "event": "service_rpc_result",
+            "request_id": request_id,
+            "service": service_name,
+            "timestamp_ms": int(time.time() * 1000),
+            "status": "success" if ok else "error",
+        }
+        if ok:
+            reply["result"] = result
+            _append_activity_log(
+                f"Service RPC relayed to {source} ({service_name} {result.get('status_code')})",
+                category="nkn",
+                direction="out",
+                peer=source,
+                event="service_rpc_result",
+                extra={"request_id": request_id, "service": service_name},
+            )
+        else:
+            reply["message"] = str(err or "service rpc failed")
+            _append_activity_log(
+                f"Service RPC request from {source} failed: {reply['message']}",
+                category="nkn",
+                direction="in",
+                peer=source,
+                event="service_rpc_request",
+                extra={"request_id": request_id, "service": service_name},
             )
         send_nkn_dm(source, reply, tries=1)
         return

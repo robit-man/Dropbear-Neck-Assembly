@@ -338,8 +338,48 @@ nats_fallback_state = {
 nkn_fallback_state = {
     "state": "inactive",
     "topic": f"dropbear.camera.{_nkn_topic_token}",
-    "error": "Per-service NKN sidecar fallback is not configured in this build",
+    "nkn_address": "",
+    "address": "",
+    "configured": False,
+    "error": "Set DROPBEAR_CAMERA_NKN_ADDRESS to enable per-service NKN fallback",
 }
+
+
+def _normalize_nkn_address(raw_value):
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("nkn://"):
+        text = text[6:]
+    text = text.strip().strip("/")
+    parts = [part for part in text.split(".") if part]
+    if not parts:
+        return ""
+    pubkey = str(parts[-1] or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", pubkey):
+        return ""
+    prefix = ".".join(parts[:-1]).strip()
+    return f"{prefix}.{pubkey}" if prefix else pubkey
+
+
+def _refresh_nkn_fallback():
+    configured_address = _normalize_nkn_address(
+        os.environ.get("DROPBEAR_CAMERA_NKN_ADDRESS")
+        or os.environ.get("DROPBEAR_NKN_ADDRESS")
+        or ""
+    )
+    payload = dict(nkn_fallback_state)
+    payload["nkn_address"] = configured_address
+    payload["address"] = configured_address
+    payload["configured"] = bool(configured_address)
+    if configured_address:
+        payload["state"] = "active"
+        payload["error"] = ""
+    else:
+        payload["state"] = "inactive"
+        payload["error"] = "Set DROPBEAR_CAMERA_NKN_ADDRESS to enable per-service NKN fallback"
+    nkn_fallback_state.update(payload)
+    return dict(nkn_fallback_state)
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 MPEGTS_AVAILABLE = shutil.which(FFMPEG_BIN) is not None
@@ -550,6 +590,7 @@ def _camera_fallback_payload(current_tunnel, process_running, listen_port):
         upnp_state = _upnp_snapshot()
     else:
         upnp_state = _refresh_upnp_fallback(listen_port, force=False)
+    nkn_state = _refresh_nkn_fallback()
 
     selected = "local"
     if tunnel_active:
@@ -558,7 +599,7 @@ def _camera_fallback_payload(current_tunnel, process_running, listen_port):
         selected = "upnp"
     elif str(nats_fallback_state.get("state") or "").strip().lower() == "active":
         selected = "nats"
-    elif str(nkn_fallback_state.get("state") or "").strip().lower() == "active":
+    elif str(nkn_state.get("state") or "").strip().lower() == "active":
         selected = "nkn"
 
     return {
@@ -566,7 +607,7 @@ def _camera_fallback_payload(current_tunnel, process_running, listen_port):
         "order": ["cloudflare", "upnp", "nats", "nkn", "local"],
         "upnp": upnp_state,
         "nats": dict(nats_fallback_state),
-        "nkn": dict(nkn_fallback_state),
+        "nkn": nkn_state,
     }
 
 

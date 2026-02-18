@@ -239,11 +239,25 @@ const resolvedServiceAuthEndpoints = {
     camera: "",
     audio: "",
 };
+const SERVICE_TRANSPORT_HTTP = "http";
+const SERVICE_TRANSPORT_NKN = "nkn";
+const serviceTransportModes = {
+    adapter: SERVICE_TRANSPORT_HTTP,
+    camera: SERVICE_TRANSPORT_HTTP,
+    audio: SERVICE_TRANSPORT_HTTP,
+};
+const serviceNknAddresses = {
+    adapter: "",
+    camera: "",
+    audio: "",
+};
 
 function isControlTransportReady() {
     const hasSession = !!String(SESSION_KEY || "").trim();
     const hasHttp = !!String(HTTP_URL || "").trim();
-    return !!(authenticated && hasSession && hasHttp);
+    const hasNkn = !!resolveServiceNknTarget("adapter");
+    const useNkn = getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN;
+    return !!(authenticated && hasSession && (useNkn ? hasNkn : hasHttp));
 }
 
 function publishControlTransportState() {
@@ -286,9 +300,9 @@ function updateVideoMetrics() {
       metrics.video.quality = "warning";
       return;
     }
-    if (!routerTargetNknAddress) {
+    if (!resolveServiceNknTarget("camera")) {
       metrics.video.state = "NKN target missing";
-      metrics.video.stats = "Set Router NKN address";
+      metrics.video.stats = "Set camera/router NKN address";
       metrics.video.quality = "error";
       return;
     }
@@ -368,7 +382,11 @@ function updateMetrics() {
 
     if (statusEl) {
         if (metrics.connected) {
-            statusEl.textContent = useWS ? 'WebSocket' : 'HTTP';
+            if (getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN) {
+                statusEl.textContent = 'NKN';
+            } else {
+                statusEl.textContent = useWS ? 'WebSocket' : 'HTTP';
+            }
             statusEl.className = 'metric-value good';
         } else {
             statusEl.textContent = 'Disconnected';
@@ -441,8 +459,15 @@ function updateServiceHeaderChips() {
         : "Offline";
     paintServiceChip("svcChipRouter", "Router", routerConnected, routerValue);
 
-    const adapterReady = !!(authenticated && SESSION_KEY && HTTP_URL);
-    const adapterValue = adapterReady ? "Connected" : "Offline";
+    const adapterUseNkn = getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN;
+    const adapterReady = !!(
+      authenticated &&
+      SESSION_KEY &&
+      (adapterUseNkn ? resolveServiceNknTarget("adapter") : HTTP_URL)
+    );
+    const adapterValue = adapterReady
+        ? (adapterUseNkn ? "NKN" : "Connected")
+        : "Offline";
     paintServiceChip("svcChipAdapter", "Adapter", adapterReady, adapterValue);
 
     const cameraReady = !!(cameraRouterBaseUrl && cameraRouterSessionKey);
@@ -1432,6 +1457,9 @@ function sendHomeSoftCommand() {
 }
 
 function getAdapterOrigin() {
+    if (getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN) {
+        return "";
+    }
     if (!HTTP_URL) {
         return null;
     }
@@ -1443,6 +1471,29 @@ function getAdapterOrigin() {
     }
 }
 
+function normalizeServicePath(path) {
+    const raw = String(path || "").trim();
+    if (!raw) {
+        return "/";
+    }
+    if (raw.startsWith("/")) {
+        return raw;
+    }
+    return `/${raw}`;
+}
+
+async function adapterApiFetch(path, options = {}) {
+    const normalizedPath = normalizeServicePath(path);
+    if (getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN) {
+        return requestServiceRpcViaNkn("adapter", normalizedPath, options);
+    }
+    const adapterOrigin = getAdapterOrigin();
+    if (!adapterOrigin) {
+        throw new Error("Adapter HTTP endpoint is not configured");
+    }
+    return fetch(`${adapterOrigin}${normalizedPath}`, options);
+}
+
 async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
     if (!SESSION_KEY) {
         logToConsole("[ERROR] No session key - please authenticate first");
@@ -1450,16 +1501,9 @@ async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
         return;
     }
 
-    const adapterOrigin = getAdapterOrigin();
-    if (!adapterOrigin) {
-        logToConsole("[ERROR] Cannot reset port: invalid adapter HTTP URL");
-        showConnectionModal();
-        return;
-    }
-
     logToConsole("[RESET] Resetting adapter serial port...");
     try {
-        const response = await fetch(`${adapterOrigin}/serial_reset`, {
+        const response = await adapterApiFetch("/serial_reset", {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
@@ -1490,21 +1534,56 @@ async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
 
 // Authenticate with adapter
 async function authenticate(password, wsUrl, httpUrl) {
+    const startTime = Date.now();
+    const endpointHint = String(httpUrl || wsUrl || "").trim();
+    const parsedHint = parseServiceEndpoint(endpointHint);
+    const shouldUseNkn =
+      parsedHint.transport === SERVICE_TRANSPORT_NKN ||
+      getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN;
     try {
-        let authUrl;
-        try {
-            const parsedHttpUrl = new URL(httpUrl.includes("://") ? httpUrl : `https://${httpUrl}`);
-            authUrl = `${parsedHttpUrl.origin}/auth`;
-        } catch (urlErr) {
-            logToConsole("[ERROR] Invalid HTTP URL: " + httpUrl);
-            return false;
+        let response = null;
+        if (shouldUseNkn) {
+            const nknAddress = normalizeNknAddress(
+              parsedHint.nknAddress ||
+              endpointHint ||
+              resolveServiceNknTarget("adapter")
+            );
+            if (!nknAddress) {
+                logToConsole("[ERROR] Adapter NKN address is not configured");
+                return false;
+            }
+            setServiceTransportMode("adapter", SERVICE_TRANSPORT_NKN);
+            setServiceNknAddress("adapter", nknAddress);
+            response = await requestServiceRpcViaNkn(
+              "adapter",
+              "/auth",
+              {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ password }),
+              }
+            );
+            WS_URL = "";
+            HTTP_URL = "";
+            localStorage.removeItem("wsUrl");
+            localStorage.removeItem("httpUrl");
+        } else {
+            let authUrl;
+            try {
+                const parsedHttpUrl = new URL(httpUrl.includes("://") ? httpUrl : `https://${httpUrl}`);
+                authUrl = `${parsedHttpUrl.origin}/auth`;
+            } catch (urlErr) {
+                logToConsole("[ERROR] Invalid HTTP URL: " + httpUrl);
+                return false;
+            }
+            setServiceTransportMode("adapter", SERVICE_TRANSPORT_HTTP);
+            setServiceNknAddress("adapter", "");
+            response = await fetch(authUrl, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({password: password})
+            });
         }
-        const startTime = Date.now();
-        const response = await fetch(authUrl, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({password: password})
-        });
         const data = await response.json();
 
         if (data.status === 'success') {
@@ -1512,8 +1591,10 @@ async function authenticate(password, wsUrl, httpUrl) {
             PASSWORD = password;
             localStorage.setItem('sessionKey', SESSION_KEY);
             localStorage.setItem('password', password);
-            localStorage.setItem('wsUrl', wsUrl);
-            localStorage.setItem('httpUrl', httpUrl);
+            if (getServiceTransportMode("adapter") !== SERVICE_TRANSPORT_NKN) {
+                localStorage.setItem('wsUrl', wsUrl);
+                localStorage.setItem('httpUrl', httpUrl);
+            }
 
             metrics.latency = Date.now() - startTime;
             metrics.connected = true;
@@ -1533,7 +1614,7 @@ async function authenticate(password, wsUrl, httpUrl) {
 }
 
 // Centralized sendCommand: whichever path is currently active.
-function sendCommand(command) {
+async function sendCommand(command) {
     if (suppressCommandDispatch) {
         return;
     }
@@ -1547,7 +1628,12 @@ function sendCommand(command) {
         return;
     }
 
-    if (useWS && socket && socket.connected) {
+    const adapterUseNkn = getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN;
+    if (adapterUseNkn) {
+        disableWebSocketMode();
+    }
+
+    if (!adapterUseNkn && useWS && socket && socket.connected) {
         socket.emit('message', {command: command, session_key: SESSION_KEY});
         logToConsole("WS -> " + command);
 
@@ -1559,24 +1645,20 @@ function sendCommand(command) {
         metrics.latency = Date.now() - startTime;
         updateMetrics();
     } else {
-        // If WS not yet open (or closed), do HTTP POST
-        if (!HTTP_URL) {
-            logToConsole("[ERROR] No HTTP URL configured");
+        if (!adapterUseNkn && !HTTP_URL) {
+            logToConsole("[ERROR] No adapter endpoint configured");
             showConnectionModal();
             return;
         }
-
-        fetch(HTTP_URL, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({command: command, session_key: SESSION_KEY})
-        })
-        .then(r => {
+        try {
+            const response = await adapterApiFetch("/send_command", {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command: command, session_key: SESSION_KEY}),
+            });
             metrics.latency = Date.now() - startTime;
-            return r.json();
-        })
-        .then(data => {
-            logToConsole("HTTP -> " + command);
+            const data = await response.json();
+            logToConsole(`${adapterUseNkn ? "NKN" : "HTTP"} -> ` + command);
             if (data.status !== 'success') {
                 logToConsole("[ERROR] " + (data.message || JSON.stringify(data)));
                 if (data.message && data.message.includes('session')) {
@@ -1591,12 +1673,11 @@ function sendCommand(command) {
             }
             metrics.lastCommandTime = Date.now();
             updateMetrics();
-        })
-        .catch(err => {
+        } catch (err) {
             logToConsole("[ERROR] Fetch error: " + err);
             metrics.connected = false;
             updateMetrics();
-        });
+        }
     }
 }
 
@@ -1604,6 +1685,10 @@ function sendCommand(command) {
 
 // Initialize the Socket.IO connection.
 function initWebSocket() {
+  if (getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN) {
+    disableWebSocketMode();
+    return;
+  }
   if (!SESSION_KEY) {
     logToConsole("[WARN] Cannot connect to WebSocket without session key");
     return;
@@ -1697,7 +1782,7 @@ function showConnectionModal(userInitiated = false) {
 }
 
 // HTTP-only path used by local orientation streaming.
-function sendCommandHttpOnly(command) {
+async function sendCommandHttpOnly(command) {
     if (suppressCommandDispatch) {
         return;
     }
@@ -1711,23 +1796,22 @@ function sendCommandHttpOnly(command) {
         return;
     }
 
-    if (!HTTP_URL) {
-        logToConsole("[ERROR] No HTTP URL configured");
+    const adapterUseNkn = getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN;
+    if (!adapterUseNkn && !HTTP_URL) {
+        logToConsole("[ERROR] No adapter endpoint configured");
         showConnectionModal();
         return;
     }
 
-    fetch(HTTP_URL, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({command: command, session_key: SESSION_KEY})
-    })
-    .then(r => {
+    try {
+        const response = await adapterApiFetch("/send_command", {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({command: command, session_key: SESSION_KEY}),
+        });
         metrics.latency = Date.now() - startTime;
-        return r.json();
-    })
-    .then(data => {
-        logToConsole("HTTP -> " + command);
+        const data = await response.json();
+        logToConsole(`${adapterUseNkn ? "NKN" : "HTTP"} -> ` + command);
         if (data.status !== 'success') {
             logToConsole("[ERROR] " + (data.message || JSON.stringify(data)));
             if (data.message && data.message.includes('session')) {
@@ -1742,12 +1826,11 @@ function sendCommandHttpOnly(command) {
         }
         metrics.lastCommandTime = Date.now();
         updateMetrics();
-    })
-    .catch(err => {
+    } catch (err) {
         logToConsole("[ERROR] Fetch error: " + err);
         metrics.connected = false;
         updateMetrics();
-    });
+    }
 }
 
 function hideConnectionModal() {
@@ -1857,8 +1940,13 @@ function isServiceSessionReady(service) {
 
 function normalizeServiceEndpointForAuth(service, endpoint) {
   const key = String(service || "").trim().toLowerCase();
-  const raw = String(endpoint || "").trim();
-  if (!raw) {
+  const parsedEndpoint = parseServiceEndpoint(endpoint);
+  if (parsedEndpoint.transport === SERVICE_TRANSPORT_NKN) {
+    return parsedEndpoint.value;
+  }
+
+  const raw = String(parsedEndpoint.value || endpoint || "").trim();
+  if (!raw || parsedEndpoint.transport !== SERVICE_TRANSPORT_HTTP) {
     return "";
   }
   let origin = "";
@@ -2054,21 +2142,33 @@ async function authenticateAdapterWithPassword(password, endpoint) {
   if (!normalized) {
     return false;
   }
-
-  HTTP_URL = String(normalized.httpUrl || "").trim();
-  WS_URL = String(normalized.wsUrl || "").trim();
-  localStorage.setItem("httpUrl", HTTP_URL);
-  localStorage.setItem("wsUrl", WS_URL);
+  const transport = String(normalized.transport || SERVICE_TRANSPORT_HTTP).trim().toLowerCase();
+  const adapterNknAddress = normalizeNknAddress(normalized.nknAddress || normalized.origin);
+  setServiceTransportMode("adapter", transport);
+  setServiceNknAddress("adapter", adapterNknAddress);
+  HTTP_URL = transport === SERVICE_TRANSPORT_HTTP ? String(normalized.httpUrl || "").trim() : "";
+  WS_URL = transport === SERVICE_TRANSPORT_HTTP ? String(normalized.wsUrl || "").trim() : "";
+  if (transport === SERVICE_TRANSPORT_HTTP) {
+    localStorage.setItem("httpUrl", HTTP_URL);
+    localStorage.setItem("wsUrl", WS_URL);
+  } else {
+    localStorage.removeItem("httpUrl");
+    localStorage.removeItem("wsUrl");
+  }
   setServiceAuthPassword("adapter", cleanPassword);
   syncAdapterConnectionInputs({ preserveUserInput: false });
 
-  const success = await authenticate(cleanPassword, WS_URL, HTTP_URL);
+  const success = await authenticate(
+    cleanPassword,
+    WS_URL,
+    transport === SERVICE_TRANSPORT_NKN ? nknEndpointForAddress(adapterNknAddress) : HTTP_URL
+  );
   if (!success) {
     return false;
   }
 
   const activeRoute = getRouteFromLocation();
-  if (WS_URL && routeAllowsWebSocket(activeRoute)) {
+  if (transport !== SERVICE_TRANSPORT_NKN && WS_URL && routeAllowsWebSocket(activeRoute)) {
     initWebSocket();
   } else {
     useWS = false;
@@ -2214,8 +2314,15 @@ function setResolvedServiceAuthEndpoint(service, endpoint) {
 function getServicePreferredAuthEndpoint(service) {
   const key = String(service || "").trim().toLowerCase();
   const resolved = String(resolvedServiceAuthEndpoints[key] || "").trim();
-  if (resolved && isRoutableServiceOrigin(resolved)) {
-    return resolved;
+  if (!resolved) {
+    return "";
+  }
+  const parsed = parseServiceEndpoint(resolved);
+  if (parsed.transport === SERVICE_TRANSPORT_NKN && parsed.value) {
+    return parsed.value;
+  }
+  if (parsed.transport === SERVICE_TRANSPORT_HTTP && parsed.value && isRoutableServiceOrigin(parsed.value)) {
+    return parsed.value;
   }
   return "";
 }
@@ -2290,6 +2397,20 @@ function buildAdapterEndpoints(baseInput) {
     return null;
   }
 
+  if (/^nkn:\/\//i.test(raw) || isLikelyNknAddress(raw)) {
+    const nknAddress = normalizeNknAddress(raw);
+    if (!nknAddress) {
+      return null;
+    }
+    return {
+      transport: SERVICE_TRANSPORT_NKN,
+      origin: nknEndpointForAddress(nknAddress),
+      nknAddress,
+      httpUrl: "",
+      wsUrl: "",
+    };
+  }
+
   const candidate = raw.includes("://") ? raw : `https://${raw}`;
   let adapterUrl;
   try {
@@ -2316,16 +2437,28 @@ function buildAdapterEndpoints(baseInput) {
   const httpUrl = `${baseOrigin}${defaultHttpPath}`;
   const wsProtocol = baseProtocol === "https:" ? "wss:" : "ws:";
   const wsUrl = `${wsProtocol}//${adapterUrl.host}${defaultWsPath}`;
-  return { httpUrl, wsUrl, origin: baseOrigin };
+  return {
+    transport: SERVICE_TRANSPORT_HTTP,
+    httpUrl,
+    wsUrl,
+    origin: baseOrigin,
+    nknAddress: "",
+  };
 }
 
-function setAdapterEndpointPreview(httpUrl = "", wsUrl = "") {
+function setAdapterEndpointPreview(httpUrl = "", wsUrl = "", options = {}) {
   const previewEl = document.getElementById("adapterEndpointPreview");
   if (!previewEl) {
     return;
   }
   const cleanHttp = String(httpUrl || "").trim();
   const cleanWs = String(wsUrl || "").trim();
+  const explicitTransport = String(options.transport || "").trim().toLowerCase();
+  const nknAddress = normalizeNknAddress(options.nknAddress || cleanHttp);
+  if (explicitTransport === SERVICE_TRANSPORT_NKN || nknAddress) {
+    previewEl.textContent = `NKN ${nknEndpointForAddress(nknAddress || resolveServiceNknTarget("adapter")) || "(missing address)"} | WS n/a`;
+    return;
+  }
   if (!cleanHttp && !cleanWs) {
     previewEl.textContent = "No adapter endpoint resolved yet.";
     return;
@@ -2335,6 +2468,7 @@ function setAdapterEndpointPreview(httpUrl = "", wsUrl = "") {
 
 function syncAdapterConnectionInputs(options = {}) {
   const preserveUserInput = !!options.preserveUserInput;
+  const adapterAddressInput = document.getElementById("adapterAddressInput");
   const passInput = document.getElementById("passwordInput");
   const httpInput = document.getElementById("httpUrlInput");
   const wsInput = document.getElementById("wsUrlInput");
@@ -2347,6 +2481,20 @@ function syncAdapterConnectionInputs(options = {}) {
   }
   if (wsInput && (!preserveUserInput || !wsInput.value.trim())) {
     wsInput.value = WS_URL || "";
+  }
+  if (getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN) {
+    const nknAddress = resolveServiceNknTarget("adapter");
+    if (httpInput) {
+      httpInput.value = "";
+    }
+    if (wsInput) {
+      wsInput.value = "";
+    }
+    if (adapterAddressInput && (!preserveUserInput || !adapterAddressInput.value.trim())) {
+      adapterAddressInput.value = nknEndpointForAddress(nknAddress);
+    }
+    setAdapterEndpointPreview("", "", { transport: SERVICE_TRANSPORT_NKN, nknAddress });
+    return;
   }
   hydrateEndpointInputs("http");
 }
@@ -2374,6 +2522,20 @@ function hydrateEndpointInputs(prefer = "address") {
   if (!endpoints) {
     setAdapterEndpointPreview(httpRaw, wsRaw);
     return null;
+  }
+  if (endpoints.transport === SERVICE_TRANSPORT_NKN) {
+    const nknAddress = normalizeNknAddress(endpoints.nknAddress || endpoints.origin);
+    if (!nknAddress) {
+      setAdapterEndpointPreview("", "");
+      return null;
+    }
+    httpInput.value = "";
+    wsInput.value = "";
+    if (adapterAddressInput) {
+      adapterAddressInput.value = nknEndpointForAddress(nknAddress);
+    }
+    setAdapterEndpointPreview("", "", { transport: SERVICE_TRANSPORT_NKN, nknAddress });
+    return endpoints;
   }
   if (!isRoutableServiceOrigin(endpoints.origin)) {
     setAdapterEndpointPreview("", "");
@@ -2430,8 +2592,11 @@ function fetchTunnelUrl() {
     alert("Resolve adapter service endpoints first; only router-resolved non-loopback endpoints are allowed.");
     return;
   }
-
-  logToConsole("Adapter endpoints filled from: " + endpoints.origin);
+  if (endpoints.transport === SERVICE_TRANSPORT_NKN) {
+    logToConsole("Adapter NKN endpoint selected: " + nknEndpointForAddress(endpoints.nknAddress));
+  } else {
+    logToConsole("Adapter endpoints filled from: " + endpoints.origin);
+  }
 }
 
 // Handle connection form submission
@@ -2445,7 +2610,7 @@ async function connectToAdapter() {
   const httpInputRaw = httpInputEl ? httpInputEl.value.trim() : "";
   const wsInputRaw = wsInputEl ? wsInputEl.value.trim() : "";
 
-  if (!password || (!addressRaw && !httpInputRaw && !wsInputRaw && !HTTP_URL && !WS_URL)) {
+  if (!password || (!addressRaw && !httpInputRaw && !wsInputRaw && !HTTP_URL && !WS_URL && !resolveServiceNknTarget("adapter"))) {
     alert("Please enter password. Adapter endpoint comes from router-resolved Cloudflare service endpoints.");
     return;
   }
@@ -2457,7 +2622,7 @@ async function connectToAdapter() {
     alert("Adapter endpoint must be a router-resolved non-loopback endpoint");
     return;
   }
-  if (!isRoutableServiceOrigin(normalized.origin)) {
+  if (normalized.transport === SERVICE_TRANSPORT_HTTP && !isRoutableServiceOrigin(normalized.origin)) {
     alert("Adapter endpoint must be a router-resolved non-loopback endpoint");
     return;
   }
@@ -2469,13 +2634,20 @@ async function connectToAdapter() {
     return;
   }
 
-  const httpUrl = normalized.httpUrl;
-  const wsUrl = normalized.wsUrl;
+  const httpUrl = normalized.transport === SERVICE_TRANSPORT_HTTP ? normalized.httpUrl : "";
+  const wsUrl = normalized.transport === SERVICE_TRANSPORT_HTTP ? normalized.wsUrl : "";
+  const adapterNknAddress = normalizeNknAddress(normalized.nknAddress || normalized.origin);
 
   logToConsole("[CONNECT] Connecting to adapter...");
 
   // Authenticate first
-  const success = await authenticate(password, wsUrl, httpUrl);
+  setServiceTransportMode("adapter", normalized.transport || SERVICE_TRANSPORT_HTTP);
+  setServiceNknAddress("adapter", adapterNknAddress);
+  const success = await authenticate(
+    password,
+    wsUrl,
+    normalized.transport === SERVICE_TRANSPORT_NKN ? nknEndpointForAddress(adapterNknAddress) : httpUrl
+  );
   if (success) {
     PASSWORD = password;
     localStorage.setItem("password", PASSWORD);
@@ -2485,7 +2657,7 @@ async function connectToAdapter() {
     const activeRoute = getRouteFromLocation();
 
     // Try WebSocket if URL provided
-    if (wsUrl && routeAllowsWebSocket(activeRoute)) {
+    if (normalized.transport !== SERVICE_TRANSPORT_NKN && wsUrl && routeAllowsWebSocket(activeRoute)) {
       initWebSocket();
     } else {
       disableWebSocketMode();
@@ -2580,6 +2752,7 @@ const ROUTER_NKN_FRAME_POLL_INTERVAL_MS = 280;
 const ROUTER_NKN_FRAME_MAX_KBPS = 900;
 const ROUTER_NKN_FRAME_MAX_WIDTH = 640;
 const ROUTER_NKN_FRAME_MAX_HEIGHT = 360;
+const ROUTER_NKN_RPC_TIMEOUT_MS = 10000;
 
 let nknUiInitialized = false;
 let browserNknClient = null;
@@ -2591,6 +2764,7 @@ let nknResolveInFlight = false;
 let routerAutoResolveTimer = null;
 const pendingNknResolveRequests = new Map();
 const pendingNknFrameRequests = new Map();
+const pendingNknServiceRpcRequests = new Map();
 let routerQrScannerActive = false;
 let routerQrScannerTimer = null;
 let routerQrScannerStream = null;
@@ -2985,6 +3159,104 @@ function isLikelyNknAddress(address) {
   return /^[a-zA-Z0-9._-]+\.[0-9a-fA-F]{64}$/.test(value) || /^[0-9a-fA-F]{64}$/.test(value);
 }
 
+function normalizeNknAddress(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) {
+    return "";
+  }
+  const stripped = raw.replace(/^nkn:\/\//i, "").trim();
+  if (!stripped) {
+    return "";
+  }
+  if (/^[0-9a-fA-F]{64}$/.test(stripped)) {
+    return stripped.toLowerCase();
+  }
+  const parts = stripped.split(".").filter(Boolean);
+  if (parts.length < 2) {
+    return "";
+  }
+  const pub = String(parts[parts.length - 1] || "").toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(pub)) {
+    return "";
+  }
+  const prefix = parts.slice(0, -1).join(".");
+  return prefix ? `${prefix}.${pub}` : pub;
+}
+
+function nknEndpointForAddress(address) {
+  const normalized = normalizeNknAddress(address);
+  return normalized ? `nkn://${normalized}` : "";
+}
+
+function parseServiceEndpoint(endpoint) {
+  const raw = String(endpoint || "").trim();
+  if (!raw) {
+    return { transport: "", value: "", nknAddress: "" };
+  }
+  if (/^nkn:\/\//i.test(raw) || isLikelyNknAddress(raw)) {
+    const nknAddress = normalizeNknAddress(raw);
+    return {
+      transport: nknAddress ? SERVICE_TRANSPORT_NKN : "",
+      value: nknAddress ? nknEndpointForAddress(nknAddress) : "",
+      nknAddress,
+    };
+  }
+  let origin = "";
+  try {
+    origin = normalizeServiceOrigin(raw);
+  } catch (err) {
+    return { transport: "", value: "", nknAddress: "" };
+  }
+  return {
+    transport: origin ? SERVICE_TRANSPORT_HTTP : "",
+    value: origin,
+    nknAddress: "",
+  };
+}
+
+function getServiceTransportMode(service) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key !== "adapter" && key !== "camera" && key !== "audio") {
+    return SERVICE_TRANSPORT_HTTP;
+  }
+  return serviceTransportModes[key] || SERVICE_TRANSPORT_HTTP;
+}
+
+function setServiceTransportMode(service, mode) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key !== "adapter" && key !== "camera" && key !== "audio") {
+    return;
+  }
+  const next = String(mode || "").trim().toLowerCase() === SERVICE_TRANSPORT_NKN
+    ? SERVICE_TRANSPORT_NKN
+    : SERVICE_TRANSPORT_HTTP;
+  serviceTransportModes[key] = next;
+}
+
+function setServiceNknAddress(service, address) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key !== "adapter" && key !== "camera" && key !== "audio") {
+    return;
+  }
+  serviceNknAddresses[key] = normalizeNknAddress(address);
+}
+
+function getServiceNknAddress(service) {
+  const key = String(service || "").trim().toLowerCase();
+  if (key !== "adapter" && key !== "camera" && key !== "audio") {
+    return "";
+  }
+  return normalizeNknAddress(serviceNknAddresses[key]);
+}
+
+function resolveServiceNknTarget(service) {
+  const preferred = getServiceNknAddress(service);
+  if (preferred) {
+    return preferred;
+  }
+  return normalizeNknAddress(routerTargetNknAddress || "");
+}
+
 function payloadValueToText(payload) {
   if (typeof payload === "string") {
     return payload;
@@ -3132,6 +3404,12 @@ function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
   if (!value) {
     return "";
   }
+  if (/^nkn:\/\//i.test(value) || isLikelyNknAddress(value)) {
+    const endpoint = nknEndpointForAddress(value);
+    if (endpoint) {
+      return endpoint;
+    }
+  }
   if (isRoutableServiceOrigin(value)) {
     try {
       return normalizeServiceOrigin(value);
@@ -3150,9 +3428,17 @@ function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
 function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
   let firstCloudflare = "";
   let firstRoutable = "";
+  let firstNkn = "";
   for (const value of candidates) {
     const text = String(value || "").trim();
     if (!text) {
+      continue;
+    }
+    if (/^nkn:\/\//i.test(text) || isLikelyNknAddress(text)) {
+      const endpoint = nknEndpointForAddress(text);
+      if (endpoint && !firstNkn) {
+        firstNkn = endpoint;
+      }
       continue;
     }
     let origin = "";
@@ -3180,6 +3466,9 @@ function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
   }
   if (firstRoutable) {
     return firstRoutable;
+  }
+  if (firstNkn) {
+    return firstNkn;
   }
 
   const currentRemote = sanitizeStoredRemoteOrigin(currentOrigin);
@@ -3256,7 +3545,20 @@ function extractResolvedFromPayload(data) {
     const service = asObject(candidate);
     const local = asObject(service.local);
     const tunnel = asObject(service.tunnel);
+    const fallback = asObject(service.fallback);
+    const fallbackNkn = asObject(fallback.nkn);
     adapterService.tunnel_url = pickFirstNonEmptyString(adapterService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
+    adapterService.transport = pickFirstNonEmptyString(
+      adapterService.transport,
+      service.transport,
+      fallback.selected_transport
+    );
+    adapterService.nkn_address = pickFirstNonEmptyString(
+      adapterService.nkn_address,
+      service.nkn_address,
+      fallbackNkn.nkn_address,
+      fallbackNkn.address
+    );
     adapterService.http_endpoint = pickFirstNonEmptyString(
       adapterService.http_endpoint,
       service.http_endpoint,
@@ -3286,6 +3588,9 @@ function extractResolvedFromPayload(data) {
     if (!adapterService.tunnel && Object.keys(tunnel).length > 0) {
       adapterService.tunnel = tunnel;
     }
+    if (!adapterService.fallback && Object.keys(fallback).length > 0) {
+      adapterService.fallback = fallback;
+    }
   }
 
   const cameraService = {};
@@ -3293,7 +3598,20 @@ function extractResolvedFromPayload(data) {
     const service = asObject(candidate);
     const local = asObject(service.local);
     const tunnel = asObject(service.tunnel);
+    const fallback = asObject(service.fallback);
+    const fallbackNkn = asObject(fallback.nkn);
     cameraService.tunnel_url = pickFirstNonEmptyString(cameraService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
+    cameraService.transport = pickFirstNonEmptyString(
+      cameraService.transport,
+      service.transport,
+      fallback.selected_transport
+    );
+    cameraService.nkn_address = pickFirstNonEmptyString(
+      cameraService.nkn_address,
+      service.nkn_address,
+      fallbackNkn.nkn_address,
+      fallbackNkn.address
+    );
     cameraService.base_url = pickFirstNonEmptyString(
       cameraService.base_url,
       tunnel.tunnel_url,
@@ -3320,6 +3638,9 @@ function extractResolvedFromPayload(data) {
     if (!cameraService.tunnel && Object.keys(tunnel).length > 0) {
       cameraService.tunnel = tunnel;
     }
+    if (!cameraService.fallback && Object.keys(fallback).length > 0) {
+      cameraService.fallback = fallback;
+    }
   }
 
   const audioService = {};
@@ -3327,7 +3648,20 @@ function extractResolvedFromPayload(data) {
     const service = asObject(candidate);
     const local = asObject(service.local);
     const tunnel = asObject(service.tunnel);
+    const fallback = asObject(service.fallback);
+    const fallbackNkn = asObject(fallback.nkn);
     audioService.tunnel_url = pickFirstNonEmptyString(audioService.tunnel_url, service.tunnel_url, tunnel.tunnel_url);
+    audioService.transport = pickFirstNonEmptyString(
+      audioService.transport,
+      service.transport,
+      fallback.selected_transport
+    );
+    audioService.nkn_address = pickFirstNonEmptyString(
+      audioService.nkn_address,
+      service.nkn_address,
+      fallbackNkn.nkn_address,
+      fallbackNkn.address
+    );
     audioService.base_url = pickFirstNonEmptyString(
       audioService.base_url,
       tunnel.tunnel_url,
@@ -3354,12 +3688,17 @@ function extractResolvedFromPayload(data) {
     if (!audioService.tunnel && Object.keys(tunnel).length > 0) {
       audioService.tunnel = tunnel;
     }
+    if (!audioService.fallback && Object.keys(fallback).length > 0) {
+      audioService.fallback = fallback;
+    }
   }
 
   return {
     ...resolved,
     adapter: {
       ...resolvedAdapter,
+      transport: pickFirstNonEmptyString(resolvedAdapter.transport, adapterService.transport),
+      nkn_address: pickFirstNonEmptyString(resolvedAdapter.nkn_address, adapterService.nkn_address),
       tunnel_url: pickFirstNonEmptyString(resolvedAdapter.tunnel_url, adapterService.tunnel_url),
       http_endpoint: pickFirstNonEmptyString(
         resolvedAdapter.http_endpoint,
@@ -3384,28 +3723,35 @@ function extractResolvedFromPayload(data) {
         adapterService.ws_endpoint
       ),
       base_url: pickFirstNonEmptyString(resolvedAdapter.base_url, adapterService.base_url),
+      fallback: Object.keys(asObject(resolvedAdapter.fallback)).length > 0 ? asObject(resolvedAdapter.fallback) : asObject(adapterService.fallback),
       local: Object.keys(asObject(resolvedAdapter.local)).length > 0 ? asObject(resolvedAdapter.local) : asObject(adapterService.local),
       tunnel: Object.keys(asObject(resolvedAdapter.tunnel)).length > 0 ? asObject(resolvedAdapter.tunnel) : asObject(adapterService.tunnel),
     },
     camera: {
       ...resolvedCamera,
+      transport: pickFirstNonEmptyString(resolvedCamera.transport, cameraService.transport),
+      nkn_address: pickFirstNonEmptyString(resolvedCamera.nkn_address, cameraService.nkn_address),
       tunnel_url: pickFirstNonEmptyString(resolvedCamera.tunnel_url, cameraService.tunnel_url),
       base_url: pickFirstNonEmptyString(resolvedCamera.base_url, cameraService.base_url),
       list_url: pickFirstNonEmptyString(resolvedCamera.list_url, cameraService.list_url),
       health_url: pickFirstNonEmptyString(resolvedCamera.health_url, cameraService.health_url),
       frame_packet_template: pickFirstNonEmptyString(resolvedCamera.frame_packet_template, cameraService.frame_packet_template),
       local_base_url: pickFirstNonEmptyString(resolvedCamera.local_base_url, cameraService.local_base_url),
+      fallback: Object.keys(asObject(resolvedCamera.fallback)).length > 0 ? asObject(resolvedCamera.fallback) : asObject(cameraService.fallback),
       local: Object.keys(asObject(resolvedCamera.local)).length > 0 ? asObject(resolvedCamera.local) : asObject(cameraService.local),
       tunnel: Object.keys(asObject(resolvedCamera.tunnel)).length > 0 ? asObject(resolvedCamera.tunnel) : asObject(cameraService.tunnel),
     },
     audio: {
       ...resolvedAudio,
+      transport: pickFirstNonEmptyString(resolvedAudio.transport, audioService.transport),
+      nkn_address: pickFirstNonEmptyString(resolvedAudio.nkn_address, audioService.nkn_address),
       tunnel_url: pickFirstNonEmptyString(audioService.tunnel_url, resolvedAudio.tunnel_url),
       base_url: pickFirstNonEmptyString(audioService.base_url, resolvedAudio.base_url),
       list_url: pickFirstNonEmptyString(audioService.list_url, resolvedAudio.list_url),
       health_url: pickFirstNonEmptyString(audioService.health_url, resolvedAudio.health_url),
       webrtc_offer_url: pickFirstNonEmptyString(audioService.webrtc_offer_url, resolvedAudio.webrtc_offer_url),
       local_base_url: pickFirstNonEmptyString(audioService.local_base_url, resolvedAudio.local_base_url),
+      fallback: Object.keys(asObject(resolvedAudio.fallback)).length > 0 ? asObject(resolvedAudio.fallback) : asObject(audioService.fallback),
       local: Object.keys(asObject(resolvedAudio.local)).length > 0 ? asObject(resolvedAudio.local) : asObject(audioService.local),
       tunnel: Object.keys(asObject(resolvedAudio.tunnel)).length > 0 ? asObject(resolvedAudio.tunnel) : asObject(audioService.tunnel),
     },
@@ -3474,6 +3820,16 @@ function clearPendingNknFrameRequests(reason) {
   pendingNknFrameRequests.clear();
 }
 
+function clearPendingNknServiceRpcRequests(reason) {
+  for (const [requestId, pending] of pendingNknServiceRpcRequests.entries()) {
+    clearTimeout(pending.timeoutHandle);
+    if (typeof pending.reject === "function") {
+      pending.reject(new Error(reason || `RPC request ${requestId} cancelled`));
+    }
+  }
+  pendingNknServiceRpcRequests.clear();
+}
+
 function closeBrowserNknClient() {
   const client = browserNknClient;
   browserNknClient = null;
@@ -3486,6 +3842,7 @@ function closeBrowserNknClient() {
   }
   clearPendingNknResolveRequests("Browser NKN client restarted");
   clearPendingNknFrameRequests("Browser NKN client restarted");
+  clearPendingNknServiceRpcRequests("Browser NKN client restarted");
 }
 
 function handleNknResolveMessage(source, data) {
@@ -3539,6 +3896,95 @@ function handleNknCameraFrameMessage(source, data) {
   pending.reject(new Error(message));
 }
 
+function createNknRpcResponse(result) {
+  const payload = asObject(result);
+  const status = Number(payload.status_code || 0) || 0;
+  const ok = typeof payload.ok === "boolean" ? payload.ok : (status >= 200 && status < 300);
+  const headers = asObject(payload.headers);
+  const contentType = String(headers.content_type || headers["content-type"] || "").trim();
+  const bodyKind = String(payload.body_kind || "none").trim().toLowerCase();
+  const body = payload.body;
+
+  const toText = () => {
+    if (bodyKind === "text") {
+      return String(body || "");
+    }
+    if (bodyKind === "json") {
+      try {
+        return JSON.stringify(body ?? {});
+      } catch (err) {
+        return "";
+      }
+    }
+    if (bodyKind === "base64") {
+      try {
+        return atob(String(body || ""));
+      } catch (err) {
+        return "";
+      }
+    }
+    return "";
+  };
+
+  return {
+    ok,
+    status,
+    statusText: String(payload.reason || ""),
+    redirected: false,
+    url: "",
+    headers: {
+      get(name) {
+        const key = String(name || "").trim().toLowerCase();
+        if (!key) {
+          return "";
+        }
+        if (key === "content-type") {
+          return contentType;
+        }
+        const found = Object.entries(headers).find(([header]) => String(header || "").trim().toLowerCase() === key);
+        return found ? String(found[1] || "") : "";
+      },
+    },
+    async json() {
+      if (bodyKind === "json") {
+        return body;
+      }
+      if (bodyKind === "text") {
+        try {
+          return JSON.parse(String(body || ""));
+        } catch (err) {
+          return {};
+        }
+      }
+      return {};
+    },
+    async text() {
+      return toText();
+    },
+  };
+}
+
+function handleNknServiceRpcMessage(source, data) {
+  const requestId = String((data || {}).request_id || "").trim();
+  if (!requestId) {
+    return;
+  }
+  const pending = pendingNknServiceRpcRequests.get(requestId);
+  if (!pending) {
+    return;
+  }
+  clearTimeout(pending.timeoutHandle);
+  pendingNknServiceRpcRequests.delete(requestId);
+
+  const status = String((data || {}).status || "").trim().toLowerCase();
+  if (status === "success") {
+    pending.resolve(createNknRpcResponse(asObject(data.result)));
+    return;
+  }
+  const message = String((data && data.message) || "Service RPC failed");
+  pending.reject(new Error(message));
+}
+
 function handleBrowserNknMessage(a, b) {
   const incoming = parseIncomingNknMessage(a, b);
   if (!incoming.payload) {
@@ -3562,6 +4008,10 @@ function handleBrowserNknMessage(a, b) {
   }
   if (eventName === "camera_frame_result") {
     handleNknCameraFrameMessage(incoming.source, data);
+    return;
+  }
+  if (eventName === "service_rpc_result") {
+    handleNknServiceRpcMessage(incoming.source, data);
   }
 }
 
@@ -3749,6 +4199,12 @@ function applyResolvedEndpoints(resolved) {
   const adapter = resolved.adapter || {};
   const camera = resolved.camera || {};
   const audio = resolved.audio || {};
+  const adapterFallback = asObject(adapter.fallback);
+  const cameraFallback = asObject(camera.fallback);
+  const audioFallback = asObject(audio.fallback);
+  const adapterFallbackNkn = asObject(adapterFallback.nkn);
+  const cameraFallbackNkn = asObject(cameraFallback.nkn);
+  const audioFallbackNkn = asObject(audioFallback.nkn);
   const adapterTunnel = (adapter.tunnel && typeof adapter.tunnel === "object") ? adapter.tunnel : {};
   const adapterLocal = (adapter.local && typeof adapter.local === "object") ? adapter.local : {};
   const cameraTunnel = (camera.tunnel && typeof camera.tunnel === "object") ? camera.tunnel : {};
@@ -3758,6 +4214,12 @@ function applyResolvedEndpoints(resolved) {
   let resolvedAdapterEndpoint = "";
   let resolvedCameraEndpoint = "";
   let resolvedAudioEndpoint = "";
+  const previousAdapterTransport = getServiceTransportMode("adapter");
+  const previousAdapterNknAddress = getServiceNknAddress("adapter");
+  const previousCameraTransport = getServiceTransportMode("camera");
+  const previousCameraNknAddress = getServiceNknAddress("camera");
+  const previousAudioTransport = getServiceTransportMode("audio");
+  const previousAudioNknAddress = getServiceNknAddress("audio");
 
   const adapterCandidates = [
     adapter.tunnel_url,
@@ -3775,12 +4237,28 @@ function applyResolvedEndpoints(resolved) {
     adapter.url,
     adapter.local_base_url,
     adapterLocal.base_url,
+    adapter.nkn_address,
+    adapterFallbackNkn.nkn_address,
+    adapterFallbackNkn.address,
   ];
   let firstCloudflareAdapterEndpoints = null;
   let firstRoutableAdapterEndpoints = null;
+  let adapterNknAddress = normalizeNknAddress(
+    pickFirstNonEmptyString(
+      adapter.nkn_address,
+      adapterFallbackNkn.nkn_address,
+      adapterFallbackNkn.address
+    )
+  );
   for (const candidate of adapterCandidates) {
     const parsed = buildAdapterEndpoints(candidate);
     if (parsed) {
+      if (parsed.transport === SERVICE_TRANSPORT_NKN) {
+        if (!adapterNknAddress) {
+          adapterNknAddress = normalizeNknAddress(parsed.nknAddress || parsed.origin);
+        }
+        continue;
+      }
       if (isCloudflareTunnelOrigin(parsed.origin) && !firstCloudflareAdapterEndpoints) {
         firstCloudflareAdapterEndpoints = parsed;
       } else if (isRoutableServiceOrigin(parsed.origin) && !firstRoutableAdapterEndpoints) {
@@ -3799,14 +4277,23 @@ function applyResolvedEndpoints(resolved) {
   if (!adapterEndpoints && Object.keys(adapter).length > 0) {
     logToConsole("[ROUTER] Ignoring loopback adapter endpoint update");
   }
+  const adapterTransportHint = String(
+    pickFirstNonEmptyString(adapter.transport, adapterFallback.selected_transport)
+  ).trim().toLowerCase();
 
-  if (adapterEndpoints) {
+  if (adapterEndpoints && adapterEndpoints.transport === SERVICE_TRANSPORT_HTTP) {
     const nextHttp = String(adapterEndpoints.httpUrl || "").trim();
     const nextWs = String(adapterEndpoints.wsUrl || "").trim();
     const nextAddress = String(adapterEndpoints.origin || "").trim();
-    const adapterChanged = HTTP_URL !== nextHttp || WS_URL !== nextWs;
+    const adapterChanged =
+      HTTP_URL !== nextHttp ||
+      WS_URL !== nextWs ||
+      previousAdapterTransport !== SERVICE_TRANSPORT_HTTP ||
+      !!previousAdapterNknAddress;
     resolvedAdapterEndpoint = nextAddress;
 
+    setServiceTransportMode("adapter", SERVICE_TRANSPORT_HTTP);
+    setServiceNknAddress("adapter", "");
     HTTP_URL = nextHttp;
     WS_URL = nextWs;
     localStorage.setItem("httpUrl", HTTP_URL);
@@ -3832,8 +4319,47 @@ function applyResolvedEndpoints(resolved) {
       publishControlTransportState();
     }
     changed = changed || adapterChanged;
+  } else if (adapterTransportHint === SERVICE_TRANSPORT_NKN || adapterNknAddress) {
+    const nextNknAddress = normalizeNknAddress(adapterNknAddress || previousAdapterNknAddress || routerTargetNknAddress);
+    if (nextNknAddress) {
+      const adapterChanged =
+        previousAdapterTransport !== SERVICE_TRANSPORT_NKN ||
+        previousAdapterNknAddress !== nextNknAddress ||
+        !!HTTP_URL ||
+        !!WS_URL;
+      resolvedAdapterEndpoint = nknEndpointForAddress(nextNknAddress);
+      setServiceTransportMode("adapter", SERVICE_TRANSPORT_NKN);
+      setServiceNknAddress("adapter", nextNknAddress);
+      HTTP_URL = "";
+      WS_URL = "";
+      localStorage.removeItem("httpUrl");
+      localStorage.removeItem("wsUrl");
+      const httpInput = document.getElementById("httpUrlInput");
+      const wsInput = document.getElementById("wsUrlInput");
+      const addressInput = document.getElementById("adapterAddressInput");
+      if (httpInput) {
+        httpInput.value = "";
+      }
+      if (wsInput) {
+        wsInput.value = "";
+      }
+      if (addressInput) {
+        addressInput.value = resolvedAdapterEndpoint;
+      }
+      setAdapterEndpointPreview("", "", { transport: SERVICE_TRANSPORT_NKN, nknAddress: nextNknAddress });
+      if (adapterChanged || SESSION_KEY || authenticated) {
+        SESSION_KEY = "";
+        authenticated = false;
+        localStorage.removeItem("sessionKey");
+        disableWebSocketMode();
+        publishControlTransportState();
+      }
+      changed = changed || adapterChanged;
+    }
   } else if (Object.keys(adapter).length > 0 || Object.keys(adapterTunnel).length > 0 || Object.keys(adapterLocal).length > 0) {
-    const adapterHadValues = !!(HTTP_URL || WS_URL);
+    const adapterHadValues = !!(HTTP_URL || WS_URL || previousAdapterNknAddress || previousAdapterTransport === SERVICE_TRANSPORT_NKN);
+    setServiceTransportMode("adapter", SERVICE_TRANSPORT_HTTP);
+    setServiceNknAddress("adapter", "");
     HTTP_URL = "";
     WS_URL = "";
     localStorage.removeItem("httpUrl");
@@ -3865,6 +4391,9 @@ function applyResolvedEndpoints(resolved) {
     camera.tunnel_url,
     cameraTunnel.tunnel_url,
     camera.base_url,
+    camera.nkn_address,
+    cameraFallbackNkn.nkn_address,
+    cameraFallbackNkn.address,
     camera.local_base_url,
     camera.list_url,
     camera.health_url,
@@ -3874,11 +4403,35 @@ function applyResolvedEndpoints(resolved) {
     cameraLocal.list_url,
     cameraLocal.health_url
   ], cameraRouterBaseUrl, "camera");
-  if (cameraCandidate) {
+  const cameraTransportHint = String(
+    pickFirstNonEmptyString(camera.transport, cameraFallback.selected_transport)
+  ).trim().toLowerCase();
+  const cameraNknAddress = normalizeNknAddress(
+    pickFirstNonEmptyString(
+      camera.nkn_address,
+      cameraFallbackNkn.nkn_address,
+      cameraFallbackNkn.address
+    )
+  );
+  const effectiveCameraCandidate = cameraCandidate || (
+    (cameraTransportHint === SERVICE_TRANSPORT_NKN && cameraNknAddress)
+      ? nknEndpointForAddress(cameraNknAddress)
+      : ""
+  );
+  if (effectiveCameraCandidate) {
+    const parsedCameraEndpoint = parseServiceEndpoint(effectiveCameraCandidate);
+    const nextCameraBase = parsedCameraEndpoint.value;
+    const nextCameraTransport = parsedCameraEndpoint.transport || SERVICE_TRANSPORT_HTTP;
+    const nextCameraNknAddress = parsedCameraEndpoint.nknAddress || "";
     const previousBase = cameraRouterBaseUrl;
-    cameraRouterBaseUrl = cameraCandidate;
+    cameraRouterBaseUrl = nextCameraBase;
+    setServiceTransportMode("camera", nextCameraTransport);
+    setServiceNknAddress("camera", nextCameraNknAddress);
     resolvedCameraEndpoint = cameraRouterBaseUrl;
-    const cameraChanged = previousBase !== cameraRouterBaseUrl;
+    const cameraChanged =
+      previousBase !== cameraRouterBaseUrl ||
+      previousCameraTransport !== nextCameraTransport ||
+      previousCameraNknAddress !== nextCameraNknAddress;
     localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
     const camInput = document.getElementById("cameraRouterBaseInput");
     if (camInput) {
@@ -3907,6 +4460,9 @@ function applyResolvedEndpoints(resolved) {
     changed = changed || cameraChanged;
   } else if (Object.keys(camera).length > 0 || Object.keys(cameraTunnel).length > 0 || Object.keys(cameraLocal).length > 0) {
     const cameraHadValue = !!cameraRouterBaseUrl;
+    const cameraHadTransport = previousCameraTransport === SERVICE_TRANSPORT_NKN || !!previousCameraNknAddress;
+    setServiceTransportMode("camera", SERVICE_TRANSPORT_HTTP);
+    setServiceNknAddress("camera", "");
     cameraRouterBaseUrl = "";
     cameraRouterSessionKey = "";
     localStorage.removeItem("cameraRouterBaseUrl");
@@ -3924,12 +4480,15 @@ function applyResolvedEndpoints(resolved) {
     if (typeof renderHybridFeedOptions === "function") {
       renderHybridFeedOptions();
     }
-    changed = changed || cameraHadValue;
+    changed = changed || cameraHadValue || cameraHadTransport;
   }
 
   const audioCandidate = pickPreferredResolvedOrigin([
     audio.tunnel_url,
     audioTunnel.tunnel_url,
+    audio.nkn_address,
+    audioFallbackNkn.nkn_address,
+    audioFallbackNkn.address,
     audioTunnel.base_url,
     audioTunnel.list_url,
     audioTunnel.health_url,
@@ -3944,11 +4503,35 @@ function applyResolvedEndpoints(resolved) {
     audioLocal.health_url,
     audioLocal.webrtc_offer_url
   ], audioRouterBaseUrl, "audio");
-  if (audioCandidate) {
+  const audioTransportHint = String(
+    pickFirstNonEmptyString(audio.transport, audioFallback.selected_transport)
+  ).trim().toLowerCase();
+  const audioNknAddress = normalizeNknAddress(
+    pickFirstNonEmptyString(
+      audio.nkn_address,
+      audioFallbackNkn.nkn_address,
+      audioFallbackNkn.address
+    )
+  );
+  const effectiveAudioCandidate = audioCandidate || (
+    (audioTransportHint === SERVICE_TRANSPORT_NKN && audioNknAddress)
+      ? nknEndpointForAddress(audioNknAddress)
+      : ""
+  );
+  if (effectiveAudioCandidate) {
+    const parsedAudioEndpoint = parseServiceEndpoint(effectiveAudioCandidate);
+    const nextAudioBase = parsedAudioEndpoint.value;
+    const nextAudioTransport = parsedAudioEndpoint.transport || SERVICE_TRANSPORT_HTTP;
+    const nextAudioNknAddress = parsedAudioEndpoint.nknAddress || "";
     const previousBase = audioRouterBaseUrl;
-    audioRouterBaseUrl = audioCandidate;
+    audioRouterBaseUrl = nextAudioBase;
+    setServiceTransportMode("audio", nextAudioTransport);
+    setServiceNknAddress("audio", nextAudioNknAddress);
     resolvedAudioEndpoint = audioRouterBaseUrl;
-    const audioChanged = previousBase !== audioRouterBaseUrl;
+    const audioChanged =
+      previousBase !== audioRouterBaseUrl ||
+      previousAudioTransport !== nextAudioTransport ||
+      previousAudioNknAddress !== nextAudioNknAddress;
     localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
     const audioInput = document.getElementById("audioRouterBaseInput");
     if (audioInput) {
@@ -3963,6 +4546,9 @@ function applyResolvedEndpoints(resolved) {
     changed = changed || audioChanged;
   } else if (Object.keys(audio).length > 0 || Object.keys(audioTunnel).length > 0 || Object.keys(audioLocal).length > 0) {
     const audioHadValue = !!audioRouterBaseUrl;
+    const audioHadTransport = previousAudioTransport === SERVICE_TRANSPORT_NKN || !!previousAudioNknAddress;
+    setServiceTransportMode("audio", SERVICE_TRANSPORT_HTTP);
+    setServiceNknAddress("audio", "");
     audioRouterBaseUrl = "";
     audioRouterSessionKey = "";
     localStorage.removeItem("audioRouterBaseUrl");
@@ -3972,7 +4558,7 @@ function applyResolvedEndpoints(resolved) {
       audioInput.value = "";
     }
     stopAudioBridge({ keepDesired: false, silent: true }).catch(() => {});
-    changed = changed || audioHadValue;
+    changed = changed || audioHadValue || audioHadTransport;
   }
 
   syncAdapterConnectionInputs({ preserveUserInput: false });
@@ -4069,9 +4655,9 @@ async function requestResolvedEndpointsViaNkn(targetAddress, timeoutMs = ROUTER_
 }
 
 async function requestCameraFrameViaNkn(cameraId, options = {}, timeoutMs = ROUTER_NKN_FRAME_TIMEOUT_MS) {
-  const targetAddress = String(routerTargetNknAddress || "").trim();
+  const targetAddress = resolveServiceNknTarget("camera");
   if (!targetAddress) {
-    throw new Error("Router NKN address is not configured");
+    throw new Error("Camera NKN target address is not configured");
   }
   await ensureBrowserNknClient();
   const ready = await waitForBrowserNknReady(timeoutMs + 2000);
@@ -4094,6 +4680,133 @@ async function requestCameraFrameViaNkn(cameraId, options = {}, timeoutMs = ROUT
     } catch (err) {
       clearTimeout(timeoutHandle);
       pendingNknFrameRequests.delete(requestId);
+      reject(err);
+    }
+  });
+}
+
+function normalizeNknRpcRequestOptions(options = {}) {
+  const opts = (options && typeof options === "object") ? options : {};
+  const method = String(opts.method || "GET").trim().toUpperCase() || "GET";
+  const headers = {};
+  if (opts.headers && typeof opts.headers === "object") {
+    Object.entries(opts.headers).forEach(([key, value]) => {
+      const header = String(key || "").trim();
+      if (!header) {
+        return;
+      }
+      headers[header] = String(value ?? "");
+    });
+  }
+
+  const normalized = {
+    method,
+    headers,
+    body_kind: "none",
+    body: "",
+  };
+
+  const hasBody = Object.prototype.hasOwnProperty.call(opts, "body") && opts.body !== undefined && opts.body !== null;
+  if (!hasBody) {
+    return normalized;
+  }
+
+  const body = opts.body;
+  if (typeof body === "string") {
+    const contentType = String(headers["Content-Type"] || headers["content-type"] || "").toLowerCase();
+    if (contentType.includes("application/json")) {
+      try {
+        normalized.body = JSON.parse(body);
+        normalized.body_kind = "json";
+        return normalized;
+      } catch (err) {}
+    }
+    normalized.body = body;
+    normalized.body_kind = "text";
+    return normalized;
+  }
+
+  if (body instanceof Uint8Array) {
+    let binary = "";
+    for (let i = 0; i < body.length; i += 1) {
+      binary += String.fromCharCode(body[i]);
+    }
+    normalized.body = btoa(binary);
+    normalized.body_kind = "base64";
+    return normalized;
+  }
+
+  if (body instanceof ArrayBuffer) {
+    const bytes = new Uint8Array(body);
+    let binary = "";
+    for (let i = 0; i < bytes.length; i += 1) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    normalized.body = btoa(binary);
+    normalized.body_kind = "base64";
+    return normalized;
+  }
+
+  if (typeof body === "object") {
+    normalized.body = body;
+    normalized.body_kind = "json";
+    return normalized;
+  }
+
+  normalized.body = String(body);
+  normalized.body_kind = "text";
+  return normalized;
+}
+
+async function requestServiceRpcViaNkn(service, path, options = {}, timeoutMs = ROUTER_NKN_RPC_TIMEOUT_MS) {
+  const serviceKey = String(service || "").trim().toLowerCase();
+  if (serviceKey !== "adapter" && serviceKey !== "camera" && serviceKey !== "audio") {
+    throw new Error(`Unsupported service '${service}'`);
+  }
+  const targetAddress = resolveServiceNknTarget(serviceKey);
+  if (!targetAddress) {
+    throw new Error(`${serviceKey} NKN target address is not configured`);
+  }
+
+  const effectiveTimeoutMs = Math.max(
+    1000,
+    Number((options && options.timeoutMs) || timeoutMs) || ROUTER_NKN_RPC_TIMEOUT_MS
+  );
+
+  await ensureBrowserNknClient();
+  const ready = await waitForBrowserNknReady(effectiveTimeoutMs + 2000);
+  if (!ready) {
+    throw new Error("Browser NKN client is not ready");
+  }
+
+  const rpcOptions = normalizeNknRpcRequestOptions(options);
+  const requestId = `rpc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const payload = {
+    event: "service_rpc_request",
+    request_id: requestId,
+    timestamp_ms: Date.now(),
+    from: browserNknClientAddress || browserNknPubHex || "",
+    service: serviceKey,
+    path: normalizeServicePath(path),
+    method: rpcOptions.method,
+    headers: rpcOptions.headers,
+    body_kind: rpcOptions.body_kind,
+    body: rpcOptions.body,
+    timeout_ms: Math.max(500, effectiveTimeoutMs),
+  };
+
+  return new Promise(async (resolve, reject) => {
+    const timeoutHandle = setTimeout(() => {
+      pendingNknServiceRpcRequests.delete(requestId);
+      reject(new Error("Timed out waiting for NKN service RPC response"));
+    }, effectiveTimeoutMs);
+
+    pendingNknServiceRpcRequests.set(requestId, { resolve, reject, timeoutHandle });
+    try {
+      await sendResolvePayloadWithRetry(targetAddress, payload, effectiveTimeoutMs);
+    } catch (err) {
+      clearTimeout(timeoutHandle);
+      pendingNknServiceRpcRequests.delete(requestId);
       reject(err);
     }
   });
@@ -4780,6 +5493,14 @@ function startCameraImuStream() {
     stopCameraImuStream();
     return false;
   }
+  const parsedEndpoint = parseServiceEndpoint(cameraRouterBaseUrl);
+  if (
+    parsedEndpoint.transport === SERVICE_TRANSPORT_NKN ||
+    getServiceTransportMode("camera") === SERVICE_TRANSPORT_NKN
+  ) {
+    stopCameraImuStream();
+    return false;
+  }
   const streamUrl = cameraRouterUrl(cameraRouterImuStreamPath(), true);
   if (!streamUrl) {
     stopCameraImuStream();
@@ -5277,7 +5998,7 @@ async function monitorCameraPreviewHealth() {
     return;
   }
   if (cameraPreview.activeMode === STREAM_MODE_NKN) {
-    if (!routerTargetNknAddress) {
+    if (!resolveServiceNknTarget("camera")) {
       cameraPreview.healthFailStreak += 1;
       if (cameraPreview.healthFailStreak >= 2) {
         scheduleCameraPreviewRestart("router nkn address missing");
@@ -5445,6 +6166,20 @@ async function cameraRouterFetch(path, options = {}, includeSession = true) {
   if (!cameraRouterBaseUrl) {
     throw new Error("Camera Router URL is not configured");
   }
+  const parsedEndpoint = parseServiceEndpoint(cameraRouterBaseUrl);
+  const useNkn =
+    parsedEndpoint.transport === SERVICE_TRANSPORT_NKN ||
+    getServiceTransportMode("camera") === SERVICE_TRANSPORT_NKN;
+  if (useNkn) {
+    const nknAddress = normalizeNknAddress(parsedEndpoint.nknAddress || getServiceNknAddress("camera"));
+    setServiceTransportMode("camera", SERVICE_TRANSPORT_NKN);
+    if (nknAddress) {
+      setServiceNknAddress("camera", nknAddress);
+    }
+    const rpcPath = withCameraSession(normalizeServicePath(path), includeSession);
+    return requestServiceRpcViaNkn("camera", rpcPath, options);
+  }
+  setServiceTransportMode("camera", SERVICE_TRANSPORT_HTTP);
   const url = cameraRouterUrl(path, includeSession);
   let response = null;
   try {
@@ -5586,16 +6321,8 @@ async function authenticateCameraRouterWithPassword(password, options = {}) {
   const silent = !!options.silent;
   const baseCandidate = String(options.baseUrl || cameraRouterBaseUrl || "").trim();
   const cleanPassword = String(password || "").trim();
-
-  let normalizedBase = "";
-  try {
-    normalizedBase = normalizeOrigin(baseCandidate);
-  } catch (err) {
-    if (!silent) {
-      setStreamStatus(`Invalid camera router URL: ${err}`, true);
-    }
-    return false;
-  }
+  const parsedEndpoint = parseServiceEndpoint(baseCandidate);
+  const normalizedBase = String(parsedEndpoint.value || "").trim();
 
   if (!normalizedBase || !cleanPassword) {
     if (!silent) {
@@ -5604,6 +6331,8 @@ async function authenticateCameraRouterWithPassword(password, options = {}) {
     return false;
   }
 
+  setServiceTransportMode("camera", parsedEndpoint.transport || SERVICE_TRANSPORT_HTTP);
+  setServiceNknAddress("camera", parsedEndpoint.nknAddress || "");
   cameraRouterBaseUrl = normalizedBase;
   setServiceAuthPassword("camera", cleanPassword);
   localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
@@ -6137,8 +6866,8 @@ async function startNknPreview(cameraId) {
   if (!imageEl) {
     return;
   }
-  if (!routerTargetNknAddress) {
-    throw new Error("Set Router NKN address before starting NKN preview");
+  if (!resolveServiceNknTarget("camera")) {
+    throw new Error("Set camera/router NKN address before starting NKN preview");
   }
 
   let frameInFlight = false;
@@ -6415,6 +7144,13 @@ async function startCameraPreview(options = {}) {
     mode = STREAM_MODE_MJPEG;
     modeSelect.value = mode;
   }
+  if (
+    getServiceTransportMode("camera") === SERVICE_TRANSPORT_NKN ||
+    parseServiceEndpoint(cameraRouterBaseUrl).transport === SERVICE_TRANSPORT_NKN
+  ) {
+    mode = STREAM_MODE_NKN;
+    modeSelect.value = mode;
+  }
   if (mode === STREAM_MODE_JPEG && isTryCloudflareBase(cameraRouterBaseUrl)) {
     mode = STREAM_MODE_MJPEG;
     modeSelect.value = mode;
@@ -6529,16 +7265,20 @@ function setupStreamConfigUi() {
   if (baseInput) {
     baseInput.value = cameraRouterBaseUrl;
     baseInput.addEventListener("change", () => {
-      try {
-        cameraRouterBaseUrl = normalizeOrigin(baseInput.value);
-        localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
-        hybridPreviewSourceKey = "";
-        stopCameraImuStream();
-        syncPinnedPreviewSource();
-        renderHybridFeedOptions();
-        startCameraImuStream();
-        refreshCameraImu({ silent: true }).catch(() => {});
-      } catch (err) {}
+      const parsed = parseServiceEndpoint(baseInput.value);
+      if (!parsed.value) {
+        return;
+      }
+      cameraRouterBaseUrl = parsed.value;
+      setServiceTransportMode("camera", parsed.transport || SERVICE_TRANSPORT_HTTP);
+      setServiceNknAddress("camera", parsed.nknAddress || "");
+      localStorage.setItem("cameraRouterBaseUrl", cameraRouterBaseUrl);
+      hybridPreviewSourceKey = "";
+      stopCameraImuStream();
+      syncPinnedPreviewSource();
+      renderHybridFeedOptions();
+      startCameraImuStream();
+      refreshCameraImu({ silent: true }).catch(() => {});
     });
   }
   if (passInput) {
@@ -6657,7 +7397,10 @@ function setupStreamConfigUi() {
     refreshCameraImu({ silent: true }).catch(() => {});
   } else {
     stopCameraImuStream();
-    if (modeSelect && modeSelect.value === STREAM_MODE_NKN) {
+    if (
+      (modeSelect && modeSelect.value === STREAM_MODE_NKN) ||
+      getServiceTransportMode("camera") === SERVICE_TRANSPORT_NKN
+    ) {
       setStreamStatus("NKN relay mode ready. Set Router NKN address in Settings.");
     } else {
       setStreamStatus("Configure camera router URL + password, then authenticate");
@@ -6878,6 +7621,20 @@ async function audioRouterFetch(path, options = {}, includeSession = true) {
   if (!audioRouterBaseUrl) {
     throw new Error("Audio Router URL is not configured");
   }
+  const parsedEndpoint = parseServiceEndpoint(audioRouterBaseUrl);
+  const useNkn =
+    parsedEndpoint.transport === SERVICE_TRANSPORT_NKN ||
+    getServiceTransportMode("audio") === SERVICE_TRANSPORT_NKN;
+  if (useNkn) {
+    const nknAddress = normalizeNknAddress(parsedEndpoint.nknAddress || getServiceNknAddress("audio"));
+    setServiceTransportMode("audio", SERVICE_TRANSPORT_NKN);
+    if (nknAddress) {
+      setServiceNknAddress("audio", nknAddress);
+    }
+    const rpcPath = withAudioSession(normalizeServicePath(path), includeSession);
+    return requestServiceRpcViaNkn("audio", rpcPath, options);
+  }
+  setServiceTransportMode("audio", SERVICE_TRANSPORT_HTTP);
   const url = audioRouterUrl(path, includeSession);
   let response = null;
   try {
@@ -7033,16 +7790,8 @@ async function authenticateAudioRouterWithPassword(password, options = {}) {
   const silent = !!options.silent;
   const baseCandidate = String(options.baseUrl || audioRouterBaseUrl || "").trim();
   const cleanPassword = String(password || "").trim();
-
-  let normalizedBase = "";
-  try {
-    normalizedBase = normalizeOrigin(baseCandidate);
-  } catch (err) {
-    if (!silent) {
-      setAudioStatus(`Invalid audio router URL: ${err}`, true);
-    }
-    return false;
-  }
+  const parsedEndpoint = parseServiceEndpoint(baseCandidate);
+  const normalizedBase = String(parsedEndpoint.value || "").trim();
 
   if (!normalizedBase || !cleanPassword) {
     if (!silent) {
@@ -7051,6 +7800,8 @@ async function authenticateAudioRouterWithPassword(password, options = {}) {
     return false;
   }
 
+  setServiceTransportMode("audio", parsedEndpoint.transport || SERVICE_TRANSPORT_HTTP);
+  setServiceNknAddress("audio", parsedEndpoint.nknAddress || "");
   audioRouterBaseUrl = normalizedBase;
   setServiceAuthPassword("audio", cleanPassword);
   localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
@@ -7384,10 +8135,14 @@ function setupAudioConfigUi() {
   if (baseInput) {
     baseInput.value = audioRouterBaseUrl;
     baseInput.addEventListener("change", () => {
-      try {
-        audioRouterBaseUrl = normalizeOrigin(baseInput.value);
-        localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
-      } catch (err) {}
+      const parsed = parseServiceEndpoint(baseInput.value);
+      if (!parsed.value) {
+        return;
+      }
+      audioRouterBaseUrl = parsed.value;
+      setServiceTransportMode("audio", parsed.transport || SERVICE_TRANSPORT_HTTP);
+      setServiceNknAddress("audio", parsed.nknAddress || "");
+      localStorage.setItem("audioRouterBaseUrl", audioRouterBaseUrl);
     });
   }
   if (passInput) {
@@ -8359,11 +9114,15 @@ async function ensureHybridAutoReady(initialRoute) {
     return;
   }
 
-  if (!authenticated && HTTP_URL && PASSWORD) {
+  const adapterUseNkn = getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN;
+  const adapterEndpoint = adapterUseNkn
+    ? nknEndpointForAddress(resolveServiceNknTarget("adapter"))
+    : HTTP_URL;
+  if (!authenticated && adapterEndpoint && PASSWORD) {
     try {
-      const adapterReady = await authenticate(PASSWORD, WS_URL, HTTP_URL);
+      const adapterReady = await authenticate(PASSWORD, WS_URL, adapterEndpoint);
       if (adapterReady) {
-        if (WS_URL) {
+        if (!adapterUseNkn && WS_URL) {
           initWebSocket();
         }
         hideConnectionModal();
@@ -8434,9 +9193,15 @@ window.addEventListener('load', async () => {
 
   if (queryConnection.adapterConfigured && queryConnection.passwordProvided) {
     logToConsole("[CONNECT] Adapter and password found in query; attempting auto-connect...");
-    const autoConnected = await authenticate(PASSWORD, WS_URL, HTTP_URL);
+    const autoConnected = await authenticate(
+      PASSWORD,
+      WS_URL,
+      getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN
+        ? nknEndpointForAddress(resolveServiceNknTarget("adapter"))
+        : HTTP_URL
+    );
     if (autoConnected) {
-      if (WS_URL && routeAllowsWebSocket(initialRoute)) {
+      if (getServiceTransportMode("adapter") !== SERVICE_TRANSPORT_NKN && WS_URL && routeAllowsWebSocket(initialRoute)) {
         initWebSocket();
       }
       await ensureHybridAutoReady(initialRoute);
@@ -8447,13 +9212,16 @@ window.addEventListener('load', async () => {
     return;
   }
 
-  if (SESSION_KEY && HTTP_URL) {
+  const hasAdapterEndpoint = getServiceTransportMode("adapter") === SERVICE_TRANSPORT_NKN
+    ? !!resolveServiceNknTarget("adapter")
+    : !!HTTP_URL;
+  if (SESSION_KEY && hasAdapterEndpoint) {
     logToConsole("[SESSION] Found saved session, attempting to reconnect...");
     metrics.connected = true;
     authenticated = true;
     updateMetrics();
 
-    if (WS_URL && routeAllowsWebSocket(initialRoute)) {
+    if (getServiceTransportMode("adapter") !== SERVICE_TRANSPORT_NKN && WS_URL && routeAllowsWebSocket(initialRoute)) {
       initWebSocket();
     }
   } else if (queryConnection.adapterConfigured) {
