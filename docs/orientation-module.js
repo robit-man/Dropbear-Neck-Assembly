@@ -342,6 +342,9 @@ function applyLocalVisual() {
   if (state.globe) {
     state.globe.visible = mode === "sphere";
   }
+  if (state.grid) {
+    state.grid.visible = mode === "plane";
+  }
   if (state.anchorMarker) {
     state.anchorMarker.visible = mode === "sphere";
   }
@@ -803,14 +806,6 @@ function initScene() {
   const dir = new THREE.DirectionalLight(0xffffff, 0.8);
   dir.position.set(5, 8, 5);
   state.scene.add(dir);
-
-  state.ground = new THREE.Mesh(
-    new THREE.CircleGeometry(20, 64),
-    new THREE.MeshStandardMaterial({ color: 0x050505, roughness: 1, metalness: 0 })
-  );
-  state.ground.rotation.x = -Math.PI / 2;
-  state.ground.position.y = 0;
-  state.scene.add(state.ground);
 
   state.grid = new THREE.GridHelper(20, 20, 0x222222, 0x111111);
   state.grid.position.y = 0.01;

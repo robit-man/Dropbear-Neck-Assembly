@@ -982,6 +982,7 @@ function setHybridTab(tab, options = {}) {
         const isActive = mode === nextTab;
         btn.classList.toggle("active", isActive);
         btn.disabled = !isActive;
+        btn.hidden = !isActive;
         btn.setAttribute("aria-hidden", isActive ? "false" : "true");
     });
     document.querySelectorAll(".hybrid-tuneables-panel[data-hybrid-tuneables-mode]").forEach((panel) => {
@@ -1217,6 +1218,7 @@ function reorganizeUnifiedViews() {
         if (morphToggleBtn) {
             morphToggleBtn.classList.add("hybrid-mode-toggle");
             morphToggleBtn.dataset.hybridModeToggle = "morph";
+            morphToggleBtn.hidden = true;
             moveNodeToMount(morphToggleBtn, hybridModeActionMount);
         }
         if (headstreamSections.length > 1) {
@@ -1238,6 +1240,7 @@ function reorganizeUnifiedViews() {
         if (orientationToggleBtn) {
             orientationToggleBtn.classList.add("hybrid-mode-toggle");
             orientationToggleBtn.dataset.hybridModeToggle = "orientation";
+            orientationToggleBtn.hidden = true;
             moveNodeToMount(orientationToggleBtn, hybridModeActionMount);
         }
         if (projectionPlaneBtn && projectionSphereBtn && hybridOrientationTuneablesMount) {
