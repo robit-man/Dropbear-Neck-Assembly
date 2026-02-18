@@ -23,6 +23,7 @@ import threading
 import time
 from collections import deque
 from threading import Lock
+from urllib.parse import urlparse
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +111,9 @@ NODE_BRIDGE_FILE = "nkn_router_bridge.js"
 DEFAULT_LISTEN_HOST = "127.0.0.1"
 DEFAULT_LISTEN_PORT = 5070
 
-DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5180/health"
+DEFAULT_ADAPTER_ROUTER_INFO_URL = "http://127.0.0.1:5180/router_info"
 LEGACY_ADAPTER_ROUTER_INFO_URLS = (
+    "http://127.0.0.1:5180/health",
     "http://127.0.0.1:5160/router_info",
     "http://127.0.0.1:5060/router_info",
     "http://127.0.0.1:5001/router_info",
@@ -533,6 +535,54 @@ def _as_int(value, default, minimum=None, maximum=None):
 def _as_nonempty_str(value, default):
     parsed = str(value).strip()
     return parsed if parsed else default
+
+
+def _first_nonempty(*values):
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _is_loopback_host(hostname):
+    host = str(hostname or "").strip().lower()
+    if not host:
+        return False
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if host in ("localhost", "::1"):
+        return True
+    if host.endswith(".localhost"):
+        return True
+    if host.startswith("127."):
+        return True
+    return False
+
+
+def _is_loopback_url(raw_url):
+    value = str(raw_url or "").strip()
+    if not value:
+        return False
+    candidate = value if "://" in value else f"http://{value}"
+    try:
+        parsed = urlparse(candidate)
+    except Exception:
+        return False
+    return _is_loopback_host(parsed.hostname)
+
+
+def _prefer_non_loopback_url(*values):
+    first_any = ""
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if not first_any:
+            first_any = text
+        if not _is_loopback_url(text):
+            return text
+    return first_any
 
 
 def _normalize_seed_hex(value):
@@ -1414,24 +1464,27 @@ def _build_service_query_candidates(query_url):
         if value and value not in candidates:
             candidates.append(value)
 
-    add(raw)
     trimmed = raw.rstrip("/")
     if trimmed.endswith("/health"):
         base = trimmed[:-len("/health")]
         add(base + "/router_info")
         add(base + "/tunnel_info")
+        add(trimmed)
     elif trimmed.endswith("/router_info"):
         base = trimmed[:-len("/router_info")]
+        add(trimmed)
         add(base + "/tunnel_info")
         add(base + "/health")
     elif trimmed.endswith("/tunnel_info"):
         base = trimmed[:-len("/tunnel_info")]
+        add(trimmed)
         add(base + "/router_info")
         add(base + "/health")
     else:
-        add(trimmed + "/health")
         add(trimmed + "/router_info")
         add(trimmed + "/tunnel_info")
+        add(trimmed + "/health")
+        add(raw)
 
     return candidates
 
@@ -1520,18 +1573,22 @@ def build_resolved_endpoints(services):
     audio_local = audio_data.get("local", {}) if isinstance(audio_data, dict) else {}
     audio_tunnel = audio_data.get("tunnel", {}) if isinstance(audio_data, dict) else {}
 
-    adapter_tunnel_url = str(adapter_tunnel.get("tunnel_url") or "").strip()
+    adapter_tunnel_url = _first_nonempty(
+        adapter_tunnel.get("tunnel_url"),
+        adapter_tunnel.get("stale_tunnel_url"),
+        adapter_data.get("tunnel_url"),
+    )
     adapter_local_base = str(adapter_local.get("base_url") or adapter_data.get("local_base_url") or "").strip()
     adapter_local_http = str(adapter_local.get("http_endpoint") or adapter_data.get("local_http_endpoint") or "").strip()
     adapter_local_ws = str(adapter_local.get("ws_endpoint") or adapter_data.get("local_ws_endpoint") or "").strip()
     adapter_http = str(adapter_tunnel.get("http_endpoint") or adapter_data.get("http_endpoint") or "").strip()
     adapter_ws = str(adapter_tunnel.get("ws_endpoint") or adapter_data.get("ws_endpoint") or "").strip()
-    adapter_base = str(adapter_data.get("base_url") or "").strip()
+    adapter_base = _prefer_non_loopback_url(
+        adapter_tunnel_url,
+        adapter_data.get("base_url"),
+    )
     if not adapter_base:
-        if adapter_tunnel_url:
-            adapter_base = adapter_tunnel_url
-        else:
-            adapter_base = adapter_local_base
+        adapter_base = adapter_local_base
     if not adapter_http:
         if adapter_tunnel_url:
             adapter_http = f"{adapter_tunnel_url}/send_command"
@@ -1543,12 +1600,20 @@ def build_resolved_endpoints(services):
         else:
             adapter_ws = adapter_local_ws
 
-    camera_tunnel_url = str(camera_tunnel.get("tunnel_url") or "").strip()
+    camera_tunnel_url = _first_nonempty(
+        camera_tunnel.get("tunnel_url"),
+        camera_tunnel.get("stale_tunnel_url"),
+        camera_data.get("tunnel_url"),
+    )
     camera_base = camera_tunnel_url
     if not camera_base:
         camera_base = str(camera_local.get("base_url") or "").strip()
 
-    audio_tunnel_url = str(audio_tunnel.get("tunnel_url") or "").strip()
+    audio_tunnel_url = _first_nonempty(
+        audio_tunnel.get("tunnel_url"),
+        audio_tunnel.get("stale_tunnel_url"),
+        audio_data.get("tunnel_url"),
+    )
     audio_base = audio_tunnel_url
     if not audio_base:
         audio_base = str(audio_local.get("base_url") or "").strip()
