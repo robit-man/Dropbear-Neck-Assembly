@@ -1835,15 +1835,21 @@ function normalizeServiceEndpointForAuth(service, endpoint) {
   if (!raw) {
     return "";
   }
+  let origin = "";
   if (key === "adapter") {
     const parsed = buildAdapterEndpoints(raw);
-    return parsed ? String(parsed.origin || "").trim() : "";
+    origin = parsed ? String(parsed.origin || "").trim() : "";
+  } else {
+    try {
+      origin = normalizeServiceOrigin(raw);
+    } catch (err) {
+      return "";
+    }
   }
-  try {
-    return normalizeServiceOrigin(raw);
-  } catch (err) {
+  if (!isCloudflareTunnelOrigin(origin)) {
     return "";
   }
+  return origin;
 }
 
 function buildServiceAuthQueueKey(service, endpoint) {
@@ -2182,17 +2188,8 @@ function setResolvedServiceAuthEndpoint(service, endpoint) {
 function getServicePreferredAuthEndpoint(service) {
   const key = String(service || "").trim().toLowerCase();
   const resolved = String(resolvedServiceAuthEndpoints[key] || "").trim();
-  if (resolved) {
+  if (resolved && isCloudflareTunnelOrigin(resolved)) {
     return resolved;
-  }
-  if (key === "adapter") {
-    return normalizeServiceEndpointForAuth("adapter", HTTP_URL || WS_URL || "");
-  }
-  if (key === "camera") {
-    return normalizeServiceEndpointForAuth("camera", cameraRouterBaseUrl || "");
-  }
-  if (key === "audio") {
-    return normalizeServiceEndpointForAuth("audio", audioRouterBaseUrl || "");
   }
   return "";
 }
@@ -2497,14 +2494,12 @@ function parseConnectionFromQuery() {
   if (adapterParam) {
     const endpoints = buildAdapterEndpoints(adapterParam);
     if (endpoints) {
-      const frontendIsLoopback = isFrontendLoopbackOrigin();
-      const adapterIsLoopback = isLoopbackServiceOrigin(endpoints.origin);
-      if (!frontendIsLoopback && adapterIsLoopback) {
+      if (!isCloudflareTunnelOrigin(endpoints.origin)) {
         localStorage.removeItem('httpUrl');
         localStorage.removeItem('wsUrl');
         HTTP_URL = "";
         WS_URL = "";
-        logToConsole(`[WARN] Ignored loopback adapter URL in query: ${endpoints.origin}`);
+        logToConsole(`[WARN] Ignored non-Cloudflare adapter URL in query: ${endpoints.origin}`);
       } else {
         localStorage.setItem('httpUrl', endpoints.httpUrl);
         localStorage.setItem('wsUrl', endpoints.wsUrl);
@@ -3032,24 +3027,15 @@ function normalizeServiceOrigin(rawInput) {
   return `${protocol}//${parsed.host}`;
 }
 
-function isLoopbackHostname(hostname) {
+function isCloudflareTunnelHostname(hostname) {
   const host = String(hostname || "").trim().toLowerCase();
   if (!host) {
     return false;
   }
-  if (host === "localhost" || host === "::1" || host === "[::1]") {
-    return true;
-  }
-  if (host.endsWith(".localhost")) {
-    return true;
-  }
-  if (host.startsWith("127.")) {
-    return true;
-  }
-  return false;
+  return host.endsWith(".trycloudflare.com") || host.endsWith(".cfargotunnel.com");
 }
 
-function isLoopbackServiceOrigin(rawInput) {
+function isCloudflareTunnelOrigin(rawInput) {
   const raw = String(rawInput || "").trim();
   if (!raw) {
     return false;
@@ -3057,15 +3043,7 @@ function isLoopbackServiceOrigin(rawInput) {
   try {
     const candidate = raw.includes("://") ? raw : `https://${raw}`;
     const parsed = new URL(candidate);
-    return isLoopbackHostname(parsed.hostname);
-  } catch (err) {
-    return false;
-  }
-}
-
-function isFrontendLoopbackOrigin() {
-  try {
-    return isLoopbackHostname(window.location && window.location.hostname);
+    return isCloudflareTunnelHostname(parsed.hostname);
   } catch (err) {
     return false;
   }
@@ -3076,10 +3054,7 @@ function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
   if (!value) {
     return "";
   }
-  if (isFrontendLoopbackOrigin()) {
-    return value;
-  }
-  if (!isLoopbackServiceOrigin(value)) {
+  if (isCloudflareTunnelOrigin(value)) {
     return value;
   }
   if (storageKey) {
@@ -3091,8 +3066,7 @@ function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
 }
 
 function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
-  let firstPublic = "";
-  let firstLoopback = "";
+  let firstCloudflare = "";
   for (const value of candidates) {
     const text = String(value || "").trim();
     if (!text) {
@@ -3107,36 +3081,25 @@ function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
     if (!origin) {
       continue;
     }
-    if (isLoopbackServiceOrigin(origin)) {
-      if (!firstLoopback) {
-        firstLoopback = origin;
+    if (isCloudflareTunnelOrigin(origin)) {
+      if (!firstCloudflare) {
+        firstCloudflare = origin;
       }
-      continue;
-    }
-    if (!firstPublic) {
-      firstPublic = origin;
     }
   }
 
-  if (firstPublic) {
-    return firstPublic;
-  }
-  if (!firstLoopback) {
-    return "";
+  if (firstCloudflare) {
+    return firstCloudflare;
   }
 
-  const frontendIsLoopback = isFrontendLoopbackOrigin();
-  if (!frontendIsLoopback) {
-    const currentNonLoopback = sanitizeStoredRemoteOrigin(currentOrigin);
-    if (currentNonLoopback) {
-      return currentNonLoopback;
-    }
-    if (serviceLabel) {
-      logToConsole(`[ROUTER] Ignoring loopback ${serviceLabel} endpoint update while using a remote frontend origin`);
-    }
-    return "";
+  const currentCloudflare = sanitizeStoredRemoteOrigin(currentOrigin);
+  if (currentCloudflare) {
+    return currentCloudflare;
   }
-  return firstLoopback;
+  if (serviceLabel) {
+    logToConsole(`[ROUTER] Ignoring non-Cloudflare ${serviceLabel} endpoint update`);
+  }
+  return "";
 }
 
 function pickFirstValidServiceOrigin(...values) {
@@ -3642,31 +3605,22 @@ function applyResolvedEndpoints(resolved) {
     adapter.local_base_url,
     adapterLocal.base_url,
   ];
-  let firstLoopbackAdapterEndpoints = null;
-  let firstPublicAdapterEndpoints = null;
+  let firstCloudflareAdapterEndpoints = null;
   for (const candidate of adapterCandidates) {
     const parsed = buildAdapterEndpoints(candidate);
     if (parsed) {
-      if (isLoopbackServiceOrigin(parsed.origin)) {
-        if (!firstLoopbackAdapterEndpoints) {
-          firstLoopbackAdapterEndpoints = parsed;
-        }
-      } else if (!firstPublicAdapterEndpoints) {
-        firstPublicAdapterEndpoints = parsed;
+      if (isCloudflareTunnelOrigin(parsed.origin) && !firstCloudflareAdapterEndpoints) {
+        firstCloudflareAdapterEndpoints = parsed;
       }
     }
   }
   const currentAdapterEndpoints = buildAdapterEndpoints(HTTP_URL || WS_URL || "");
-  const frontendIsLoopback = isFrontendLoopbackOrigin();
-  let adapterEndpoints = firstPublicAdapterEndpoints;
-  if (!adapterEndpoints && firstLoopbackAdapterEndpoints) {
-    if (!frontendIsLoopback) {
-      const currentIsPublic = currentAdapterEndpoints && !isLoopbackServiceOrigin(currentAdapterEndpoints.origin);
-      adapterEndpoints = currentIsPublic ? currentAdapterEndpoints : null;
-      logToConsole("[ROUTER] Ignoring loopback adapter endpoint update while using a remote frontend origin");
-    } else {
-      adapterEndpoints = firstLoopbackAdapterEndpoints;
-    }
+  let adapterEndpoints = firstCloudflareAdapterEndpoints;
+  if (!adapterEndpoints && currentAdapterEndpoints && isCloudflareTunnelOrigin(currentAdapterEndpoints.origin)) {
+    adapterEndpoints = currentAdapterEndpoints;
+  }
+  if (!adapterEndpoints && Object.keys(adapter).length > 0) {
+    logToConsole("[ROUTER] Ignoring non-Cloudflare adapter endpoint update");
   }
 
   if (adapterEndpoints) {
