@@ -2353,6 +2353,10 @@ function hydrateEndpointInputs(prefer = "address") {
     setAdapterEndpointPreview(httpRaw, wsRaw);
     return null;
   }
+  if (!isCloudflareTunnelOrigin(endpoints.origin)) {
+    setAdapterEndpointPreview("", "");
+    return null;
+  }
 
   httpInput.value = endpoints.httpUrl;
   wsInput.value = endpoints.wsUrl;
@@ -2399,7 +2403,7 @@ function ensureEndpointInputBindings() {
 function fetchTunnelUrl() {
   const endpoints = hydrateEndpointInputs("address");
   if (!endpoints) {
-    alert("Enter a valid adapter URL first (for example https://example.trycloudflare.com).");
+    alert("Enter a valid Cloudflare tunnel adapter URL first (for example https://example.trycloudflare.com).");
     return;
   }
 
@@ -2426,7 +2430,18 @@ async function connectToAdapter() {
     hydrateEndpointInputs(addressRaw ? "address" : "http") ||
     buildAdapterEndpoints(httpInputRaw || wsInputRaw || HTTP_URL || WS_URL);
   if (!normalized) {
-    alert("Please enter a valid adapter URL");
+    alert("Adapter endpoint must be a Cloudflare tunnel URL resolved from service endpoints");
+    return;
+  }
+  if (!isCloudflareTunnelOrigin(normalized.origin)) {
+    alert("Adapter endpoint must be a Cloudflare tunnel URL resolved from service endpoints");
+    return;
+  }
+  const resolvedAdapterEndpoint = getServicePreferredAuthEndpoint("adapter");
+  const normalizedOrigin = normalizeServiceEndpointForAuth("adapter", normalized.origin);
+  if (!resolvedAdapterEndpoint || !normalizedOrigin || normalizedOrigin !== resolvedAdapterEndpoint) {
+    alert("Adapter endpoint must match the router-resolved Cloudflare service endpoint");
+    logToConsole("[WARN] Adapter connect blocked: endpoint does not match router-resolved adapter tunnel");
     return;
   }
 
