@@ -2378,6 +2378,8 @@ function ensureEndpointInputBindings() {
   if (!adapterAddressInput || !httpInput || !wsInput) {
     return;
   }
+  adapterAddressInput.readOnly = true;
+  adapterAddressInput.title = "Resolved from router service endpoints";
 
   endpointInputBindingsInstalled = true;
 
@@ -2403,7 +2405,7 @@ function ensureEndpointInputBindings() {
 function fetchTunnelUrl() {
   const endpoints = hydrateEndpointInputs("address");
   if (!endpoints) {
-    alert("Enter a valid Cloudflare tunnel adapter URL first (for example https://example.trycloudflare.com).");
+    alert("Resolve adapter service endpoints first; only router-resolved Cloudflare endpoints are allowed.");
     return;
   }
 
@@ -2422,7 +2424,7 @@ async function connectToAdapter() {
   const wsInputRaw = wsInputEl ? wsInputEl.value.trim() : "";
 
   if (!password || (!addressRaw && !httpInputRaw && !wsInputRaw && !HTTP_URL && !WS_URL)) {
-    alert("Please enter password and adapter URL");
+    alert("Please enter password. Adapter endpoint comes from router-resolved Cloudflare service endpoints.");
     return;
   }
 

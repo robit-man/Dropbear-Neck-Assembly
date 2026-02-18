@@ -18,6 +18,7 @@ import glob
 import json
 import os
 import platform
+import random
 import re
 import secrets
 import signal
@@ -229,6 +230,8 @@ DEFAULT_WEBRTC_TARGET_FPS = 24
 DEFAULT_MPEGTS_TARGET_FPS = 24
 DEFAULT_MPEGTS_JPEG_QUALITY = 60
 DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
+DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS = 45.0
+MAX_TUNNEL_RESTART_DELAY_SECONDS = 300.0
 
 SESSION_TIMEOUT = DEFAULT_SESSION_TIMEOUT
 runtime_security = {
@@ -300,6 +303,7 @@ tunnel_process = None
 tunnel_last_error = ""
 tunnel_desired = False
 tunnel_restart_lock = Lock()
+tunnel_restart_failures = 0
 
 FFMPEG_BIN = os.environ.get("FFMPEG_BIN", "ffmpeg")
 MPEGTS_AVAILABLE = shutil.which(FFMPEG_BIN) is not None
@@ -365,6 +369,19 @@ def _release_all_active_capture_handles():
             handle.release()
         except Exception:
             pass
+
+
+def _next_tunnel_restart_delay(rate_limited=False):
+    global tunnel_restart_failures
+    tunnel_restart_failures = min(tunnel_restart_failures + 1, 8)
+    base_delay = (
+        DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS
+        if rate_limited
+        else DEFAULT_TUNNEL_RESTART_DELAY_SECONDS
+    )
+    delay = base_delay * (2 ** max(0, tunnel_restart_failures - 1))
+    jitter = random.uniform(0.0, min(6.0, max(1.0, delay * 0.15)))
+    return min(delay + jitter, MAX_TUNNEL_RESTART_DELAY_SECONDS)
 
 
 def _active_capture_handle_counts():
@@ -1569,8 +1586,9 @@ def install_cloudflared():
 
 
 def stop_cloudflared_tunnel():
-    global tunnel_process, tunnel_last_error, tunnel_url, tunnel_desired
+    global tunnel_process, tunnel_last_error, tunnel_url, tunnel_desired, tunnel_restart_failures
     tunnel_desired = False
+    tunnel_restart_failures = 0
     process = tunnel_process
     if not process:
         with tunnel_url_lock:
@@ -1632,9 +1650,10 @@ def start_cloudflared_tunnel(local_port):
         return False
 
     def monitor_output():
-        global tunnel_url, tunnel_process, tunnel_last_error
+        global tunnel_url, tunnel_process, tunnel_last_error, tunnel_restart_failures
         found_url = False
         captured_url = ""
+        rate_limited = False
         for raw_line in iter(process.stdout.readline, ""):
             line = raw_line.strip()
             if not line:
@@ -1642,6 +1661,8 @@ def start_cloudflared_tunnel(local_port):
             lowered = line.lower()
             if any(token in lowered for token in ("error", "failed", "unable", "panic")):
                 log(f"[CLOUDFLARED] {line}")
+            if "429 too many requests" in lowered or "error code: 1015" in lowered:
+                rate_limited = True
             if "trycloudflare.com" in line:
                 match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
                 if not match:
@@ -1653,6 +1674,7 @@ def start_cloudflared_tunnel(local_port):
                             tunnel_url = captured_url
                             found_url = True
                             tunnel_last_error = ""
+                            tunnel_restart_failures = 0
                             log("")
                             log("=" * 60)
                             log(f"[TUNNEL] Camera Router URL: {tunnel_url}")
@@ -1671,14 +1693,20 @@ def start_cloudflared_tunnel(local_port):
 
         if return_code is not None:
             if found_url:
+                tunnel_restart_failures = 0
                 tunnel_last_error = f"cloudflared exited (code {return_code}); tunnel URL expired"
                 log(f"[WARN] {tunnel_last_error}")
             else:
-                tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
+                if rate_limited:
+                    tunnel_last_error = (
+                        f"cloudflared rate-limited (429/1015) before URL (code {return_code})"
+                    )
+                else:
+                    tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
                 log(f"[ERROR] {tunnel_last_error}")
 
             if tunnel_desired and service_running.is_set():
-                delay = DEFAULT_TUNNEL_RESTART_DELAY_SECONDS
+                delay = _next_tunnel_restart_delay(rate_limited=rate_limited and not found_url)
                 log(f"[WARN] Restarting cloudflared in {delay:.1f}s...")
                 time.sleep(delay)
                 if tunnel_desired and service_running.is_set():
