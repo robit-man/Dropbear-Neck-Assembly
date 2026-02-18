@@ -162,6 +162,8 @@ SCRIPT_WATCH_INTERVAL_SECONDS = 1.0
 DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
 DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS = 45.0
 MAX_TUNNEL_RESTART_DELAY_SECONDS = 300.0
+DEFAULT_ENABLE_UPNP_FALLBACK = True
+UPNP_FALLBACK_REFRESH_SECONDS = 90.0
 service_running = threading.Event()
 
 
@@ -1723,6 +1725,182 @@ def main():
             "lan_ws": lan_ws,
         }
 
+    fallback_lock = Lock()
+    nats_subject_token = secrets.token_hex(8)
+    nkn_topic_token = secrets.token_hex(8)
+    fallback_state = {
+        "upnp": {
+            "state": "inactive",
+            "enabled": DEFAULT_ENABLE_UPNP_FALLBACK,
+            "public_ip": "",
+            "external_port": 0,
+            "public_base_url": "",
+            "http_endpoint": "",
+            "ws_endpoint": "",
+            "error": "",
+            "last_attempt_ms": 0,
+        },
+        "nats": {
+            "state": "inactive",
+            "broker_url": "wss://demo.nats.io:443",
+            "subject": f"dropbear.adapter.{nats_subject_token}",
+            "error": "NATS fallback is advertised but no relay is configured in this build",
+        },
+        "nkn": {
+            "state": "inactive",
+            "topic": f"dropbear.adapter.{nkn_topic_token}",
+            "error": "Per-service NKN sidecar fallback is not configured in this build",
+        },
+    }
+
+    def _snapshot_upnp_fallback():
+        with fallback_lock:
+            return dict(fallback_state["upnp"])
+
+    def _refresh_upnp_fallback(force=False):
+        now_ms = int(time.time() * 1000)
+        with fallback_lock:
+            upnp_payload = dict(fallback_state.get("upnp", {}))
+            enabled = bool(upnp_payload.get("enabled", DEFAULT_ENABLE_UPNP_FALLBACK))
+            last_attempt_ms = int(upnp_payload.get("last_attempt_ms", 0) or 0)
+            if not enabled:
+                fallback_state["upnp"].update(
+                    {
+                        "state": "disabled",
+                        "error": "UPnP fallback disabled",
+                        "last_attempt_ms": now_ms,
+                    }
+                )
+                return dict(fallback_state["upnp"])
+            if not force and last_attempt_ms and (now_ms - last_attempt_ms) < int(UPNP_FALLBACK_REFRESH_SECONDS * 1000):
+                return dict(fallback_state["upnp"])
+            fallback_state["upnp"]["last_attempt_ms"] = now_ms
+
+        result = {
+            "state": "inactive",
+            "enabled": enabled,
+            "public_ip": "",
+            "external_port": 0,
+            "public_base_url": "",
+            "http_endpoint": "",
+            "ws_endpoint": "",
+            "error": "",
+            "last_attempt_ms": now_ms,
+        }
+        try:
+            import miniupnpc  # type: ignore
+        except Exception as exc:
+            result["state"] = "unavailable"
+            result["error"] = f"miniupnpc unavailable: {exc}"
+            with fallback_lock:
+                fallback_state["upnp"].update(result)
+                return dict(fallback_state["upnp"])
+
+        try:
+            upnp = miniupnpc.UPnP()
+            upnp.discoverdelay = 2000
+            discovered = int(upnp.discover() or 0)
+            if discovered <= 0:
+                raise RuntimeError("no UPnP IGD discovered")
+            upnp.selectigd()
+            lan_addr = str(upnp.lanaddr or "").strip()
+            public_ip = str(upnp.externalipaddress() or "").strip()
+            if not lan_addr or not public_ip:
+                raise RuntimeError("missing LAN or public IP from IGD")
+
+            internal_port = int(listen_port)
+            preferred = internal_port if internal_port > 0 else 0
+            candidates = []
+            if preferred:
+                candidates.append(preferred)
+            for _ in range(18):
+                candidates.append(random.randint(20000, 61000))
+
+            mapped_port = 0
+            for external_port in candidates:
+                if external_port <= 0:
+                    continue
+                try:
+                    existing = upnp.getspecificportmapping(external_port, "TCP")
+                except Exception:
+                    existing = None
+                if existing:
+                    try:
+                        existing_host = str(existing[0] or "").strip()
+                        existing_port = int(existing[1] or 0)
+                    except Exception:
+                        existing_host = ""
+                        existing_port = 0
+                    if existing_host != lan_addr or existing_port != internal_port:
+                        continue
+                try:
+                    added = bool(
+                        upnp.addportmapping(
+                            external_port,
+                            "TCP",
+                            lan_addr,
+                            internal_port,
+                            "dropbear-neck-adapter",
+                            "",
+                        )
+                    )
+                except Exception:
+                    added = False
+                if added:
+                    mapped_port = int(external_port)
+                    break
+
+            if mapped_port <= 0:
+                raise RuntimeError("unable to reserve a public UPnP TCP port mapping")
+
+            public_base = f"http://{public_ip}:{mapped_port}"
+            ws_base = public_base.replace("http://", "ws://").replace("https://", "wss://")
+            result.update(
+                {
+                    "state": "active",
+                    "public_ip": public_ip,
+                    "external_port": mapped_port,
+                    "public_base_url": public_base,
+                    "http_endpoint": f"{public_base}{listen_route}",
+                    "ws_endpoint": f"{ws_base}/ws",
+                    "error": "",
+                }
+            )
+        except Exception as exc:
+            result["state"] = "error"
+            result["error"] = str(exc)
+
+        with fallback_lock:
+            fallback_state["upnp"].update(result)
+            return dict(fallback_state["upnp"])
+
+    def _adapter_fallback_payload(current_tunnel, process_running):
+        tunnel_active = bool(process_running and str(current_tunnel or "").strip())
+        if tunnel_active:
+            upnp_payload = _snapshot_upnp_fallback()
+        else:
+            upnp_payload = _refresh_upnp_fallback(force=False)
+        nats_payload = dict(fallback_state.get("nats", {}))
+        nkn_payload = dict(fallback_state.get("nkn", {}))
+
+        selected = "local"
+        if tunnel_active:
+            selected = "cloudflare"
+        elif str(upnp_payload.get("state") or "").strip().lower() == "active":
+            selected = "upnp"
+        elif str(nats_payload.get("state") or "").strip().lower() == "active":
+            selected = "nats"
+        elif str(nkn_payload.get("state") or "").strip().lower() == "active":
+            selected = "nkn"
+
+        return {
+            "selected_transport": selected,
+            "order": ["cloudflare", "upnp", "nats", "nkn", "local"],
+            "upnp": upnp_payload,
+            "nats": nats_payload,
+            "nkn": nkn_payload,
+        }
+
     ADAPTER_INDEX_HTML = """
 <!doctype html>
 <html>
@@ -2408,9 +2586,15 @@ def main():
         local_ws = endpoints["local_ws"]
         lan_http = endpoints["lan_http"]
         lan_ws = endpoints["lan_ws"]
+        fallback_payload = _adapter_fallback_payload(current_tunnel, process_running)
+        selected_transport = str(fallback_payload.get("selected_transport") or "local").strip().lower()
+        upnp_payload = fallback_payload.get("upnp", {}) if isinstance(fallback_payload, dict) else {}
+        upnp_base = str((upnp_payload or {}).get("public_base_url") or "").strip()
+        upnp_http = str((upnp_payload or {}).get("http_endpoint") or "").strip()
+        upnp_ws = str((upnp_payload or {}).get("ws_endpoint") or "").strip()
         tunnel_http = f"{current_tunnel}{listen_route}" if current_tunnel else ""
         tunnel_ws = f"{current_tunnel.replace('https://', 'wss://')}/ws" if current_tunnel else ""
-        effective_base = current_tunnel or local_base
+        effective_base = current_tunnel or (upnp_base if selected_transport == "upnp" else "") or local_base
 
         tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
         if stale_tunnel and not process_running:
@@ -2439,7 +2623,10 @@ def main():
 
         return {
             "service": "adapter",
+            "transport": selected_transport,
             "base_url": effective_base,
+            "http_endpoint": tunnel_http or upnp_http or local_http,
+            "ws_endpoint": tunnel_ws or upnp_ws or local_ws,
             "serial": {
                 "connected": bool(ser is not None and getattr(ser, "is_open", False)),
                 "device": serial_device or "",
@@ -2459,6 +2646,7 @@ def main():
                 "stale_tunnel_url": stale_tunnel,
                 "error": current_error,
             },
+            "fallback": fallback_payload,
             "security": {
                 "require_auth": True,
                 "password_required": True,
@@ -2608,6 +2796,24 @@ def main():
 
             tunnel_thread = threading.Thread(target=start_tunnel_delayed, daemon=True)
             tunnel_thread.start()
+
+    def fallback_refresh_loop():
+        last_upnp_url = ""
+        while service_running.is_set():
+            process_running = tunnel_process is not None and tunnel_process.poll() is None
+            with tunnel_url_lock:
+                current_tunnel = tunnel_url if process_running else ""
+            if not current_tunnel:
+                upnp_state = _refresh_upnp_fallback(force=False)
+                if str(upnp_state.get("state") or "").strip().lower() == "active":
+                    upnp_url = str(upnp_state.get("public_base_url") or "").strip()
+                    if upnp_url and upnp_url != last_upnp_url:
+                        log(f"[FALLBACK] UPnP adapter endpoint ready: {upnp_url}")
+                        last_upnp_url = upnp_url
+            time.sleep(max(15.0, float(UPNP_FALLBACK_REFRESH_SECONDS)))
+
+    _refresh_upnp_fallback(force=True)
+    threading.Thread(target=fallback_refresh_loop, daemon=True).start()
 
     # --- Startup Log & Run ---
     startup_endpoints = _network_endpoints()

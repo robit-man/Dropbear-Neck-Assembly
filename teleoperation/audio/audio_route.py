@@ -177,6 +177,8 @@ DEFAULT_AUTO_INSTALL_CLOUDFLARED = True
 DEFAULT_TUNNEL_RESTART_DELAY_SECONDS = 3.0
 DEFAULT_TUNNEL_RATE_LIMIT_DELAY_SECONDS = 45.0
 MAX_TUNNEL_RESTART_DELAY_SECONDS = 300.0
+DEFAULT_ENABLE_UPNP_FALLBACK = True
+UPNP_FALLBACK_REFRESH_SECONDS = 90.0
 
 DEFAULT_AUDIO_SAMPLE_RATE = 48000
 DEFAULT_AUDIO_CHANNELS = 1
@@ -220,6 +222,32 @@ tunnel_desired = False
 tunnel_url_lock = Lock()
 tunnel_restart_lock = Lock()
 tunnel_restart_failures = 0
+upnp_fallback_lock = Lock()
+upnp_fallback_state = {
+    "state": "inactive",
+    "enabled": DEFAULT_ENABLE_UPNP_FALLBACK,
+    "public_ip": "",
+    "external_port": 0,
+    "public_base_url": "",
+    "list_url": "",
+    "health_url": "",
+    "webrtc_offer_url": "",
+    "error": "",
+    "last_attempt_ms": 0,
+}
+_nats_subject_token = secrets.token_hex(8)
+_nkn_topic_token = secrets.token_hex(8)
+nats_fallback_state = {
+    "state": "inactive",
+    "broker_url": "wss://demo.nats.io:443",
+    "subject": f"dropbear.audio.{_nats_subject_token}",
+    "error": "NATS fallback is advertised but no relay is configured in this build",
+}
+nkn_fallback_state = {
+    "state": "inactive",
+    "topic": f"dropbear.audio.{_nkn_topic_token}",
+    "error": "Per-service NKN sidecar fallback is not configured in this build",
+}
 
 # WebRTC runtime (dedicated loop thread).
 webrtc_loop = None
@@ -246,6 +274,156 @@ def _next_tunnel_restart_delay(rate_limited=False):
     delay = base_delay * (2 ** max(0, tunnel_restart_failures - 1))
     jitter = random.uniform(0.0, min(6.0, max(1.0, delay * 0.15)))
     return min(delay + jitter, MAX_TUNNEL_RESTART_DELAY_SECONDS)
+
+
+def _upnp_snapshot():
+    with upnp_fallback_lock:
+        return dict(upnp_fallback_state)
+
+
+def _refresh_upnp_fallback(listen_port, force=False):
+    now_ms = int(time.time() * 1000)
+    with upnp_fallback_lock:
+        enabled = bool(upnp_fallback_state.get("enabled", DEFAULT_ENABLE_UPNP_FALLBACK))
+        last_attempt_ms = int(upnp_fallback_state.get("last_attempt_ms", 0) or 0)
+        if not enabled:
+            upnp_fallback_state.update(
+                {
+                    "state": "disabled",
+                    "error": "UPnP fallback disabled",
+                    "last_attempt_ms": now_ms,
+                }
+            )
+            return dict(upnp_fallback_state)
+        if not force and last_attempt_ms and (now_ms - last_attempt_ms) < int(UPNP_FALLBACK_REFRESH_SECONDS * 1000):
+            return dict(upnp_fallback_state)
+        upnp_fallback_state["last_attempt_ms"] = now_ms
+
+    result = {
+        "state": "inactive",
+        "enabled": enabled,
+        "public_ip": "",
+        "external_port": 0,
+        "public_base_url": "",
+        "list_url": "",
+        "health_url": "",
+        "webrtc_offer_url": "",
+        "error": "",
+        "last_attempt_ms": now_ms,
+    }
+
+    try:
+        import miniupnpc  # type: ignore
+    except Exception as exc:
+        result["state"] = "unavailable"
+        result["error"] = f"miniupnpc unavailable: {exc}"
+        with upnp_fallback_lock:
+            upnp_fallback_state.update(result)
+            return dict(upnp_fallback_state)
+
+    try:
+        upnp = miniupnpc.UPnP()
+        upnp.discoverdelay = 2000
+        discovered = int(upnp.discover() or 0)
+        if discovered <= 0:
+            raise RuntimeError("no UPnP IGD discovered")
+        upnp.selectigd()
+        lan_addr = str(upnp.lanaddr or "").strip()
+        public_ip = str(upnp.externalipaddress() or "").strip()
+        if not lan_addr or not public_ip:
+            raise RuntimeError("missing LAN or public IP from IGD")
+
+        internal_port = int(listen_port)
+        preferred = internal_port if internal_port > 0 else 0
+        candidates = []
+        if preferred:
+            candidates.append(preferred)
+        for _ in range(18):
+            candidates.append(random.randint(20000, 61000))
+
+        mapped_port = 0
+        for external_port in candidates:
+            if external_port <= 0:
+                continue
+            try:
+                existing = upnp.getspecificportmapping(external_port, "TCP")
+            except Exception:
+                existing = None
+            if existing:
+                try:
+                    existing_host = str(existing[0] or "").strip()
+                    existing_port = int(existing[1] or 0)
+                except Exception:
+                    existing_host = ""
+                    existing_port = 0
+                if existing_host != lan_addr or existing_port != internal_port:
+                    continue
+            try:
+                added = bool(
+                    upnp.addportmapping(
+                        external_port,
+                        "TCP",
+                        lan_addr,
+                        internal_port,
+                        "dropbear-audio-router",
+                        "",
+                    )
+                )
+            except Exception:
+                added = False
+            if added:
+                mapped_port = int(external_port)
+                break
+
+        if mapped_port <= 0:
+            raise RuntimeError("unable to reserve a public UPnP TCP port mapping")
+
+        public_base = f"http://{public_ip}:{mapped_port}"
+        result.update(
+            {
+                "state": "active",
+                "public_ip": public_ip,
+                "external_port": mapped_port,
+                "public_base_url": public_base,
+                "list_url": f"{public_base}/list",
+                "health_url": f"{public_base}/health",
+                "webrtc_offer_url": f"{public_base}/webrtc/offer",
+                "error": "",
+            }
+        )
+    except Exception as exc:
+        result["state"] = "error"
+        result["error"] = str(exc)
+
+    with upnp_fallback_lock:
+        upnp_fallback_state.update(result)
+        return dict(upnp_fallback_state)
+
+
+def _audio_fallback_payload(current_tunnel, process_running, listen_port):
+    tunnel_active = bool(process_running and str(current_tunnel or "").strip())
+    if tunnel_active:
+        upnp_state = _upnp_snapshot()
+    else:
+        upnp_state = _refresh_upnp_fallback(listen_port, force=False)
+
+    selected = "local"
+    if tunnel_active:
+        selected = "cloudflare"
+    elif str(upnp_state.get("state") or "").strip().lower() == "active":
+        selected = "upnp"
+    elif str(nats_fallback_state.get("state") or "").strip().lower() == "active":
+        selected = "nats"
+    elif str(nkn_fallback_state.get("state") or "").strip().lower() == "active":
+        selected = "nkn"
+
+    return {
+        "selected_transport": selected,
+        "order": ["cloudflare", "upnp", "nats", "nkn", "local"],
+        "upnp": upnp_state,
+        "nats": dict(nats_fallback_state),
+        "nkn": dict(nkn_fallback_state),
+    }
 
 
 def log(message):
@@ -948,6 +1126,15 @@ def start_cloudflared_tunnel(local_port):
                 else:
                     tunnel_last_error = f"cloudflared exited before URL (code {return_code})"
                 log(f"[ERROR] {tunnel_last_error}")
+                try:
+                    upnp_state = _refresh_upnp_fallback(local_port, force=True)
+                    if str(upnp_state.get("state") or "").strip().lower() == "active":
+                        log(
+                            f"[FALLBACK] UPnP audio endpoint ready: "
+                            f"{upnp_state.get('public_base_url') or ''}"
+                        )
+                except Exception as exc:
+                    log(f"[WARN] UPnP fallback refresh failed: {exc}")
 
             if tunnel_desired and service_running.is_set():
                 delay = _next_tunnel_restart_delay(rate_limited=rate_limited and not found_url)
@@ -1966,6 +2153,8 @@ def tunnel_info():
     with tunnel_url_lock:
         current_tunnel = tunnel_url if process_running else None
         stale_tunnel = tunnel_url if (tunnel_url and not process_running) else None
+    listen_port = int(network_runtime.get("listen_port", DEFAULT_LISTEN_PORT))
+    fallback_payload = _audio_fallback_payload(current_tunnel or "", process_running, listen_port)
 
     if current_tunnel:
         return jsonify(
@@ -1973,6 +2162,7 @@ def tunnel_info():
                 "status": "success",
                 "tunnel_url": current_tunnel,
                 "running": process_running,
+                "fallback": fallback_payload,
                 "message": "Tunnel URL available",
             }
         )
@@ -1984,6 +2174,7 @@ def tunnel_info():
                 "tunnel_url": "",
                 "stale_tunnel_url": stale_tunnel,
                 "error": tunnel_last_error or "Tunnel URL expired",
+                "fallback": fallback_payload,
                 "message": "Tunnel process is not running; URL is stale",
             }
         )
@@ -1993,6 +2184,7 @@ def tunnel_info():
                 "status": "error",
                 "running": process_running,
                 "error": tunnel_last_error,
+                "fallback": fallback_payload,
                 "message": "Tunnel failed to start",
             }
         )
@@ -2000,6 +2192,7 @@ def tunnel_info():
         {
             "status": "pending",
             "running": process_running,
+            "fallback": fallback_payload,
             "message": "Tunnel URL not yet available",
         }
     )
@@ -2016,6 +2209,11 @@ def router_info():
     listen_port = int(network_runtime.get("listen_port", DEFAULT_LISTEN_PORT))
     listen_host = str(network_runtime.get("listen_host", DEFAULT_LISTEN_HOST))
     local_base = f"http://127.0.0.1:{listen_port}"
+    fallback_payload = _audio_fallback_payload(current_tunnel, process_running, listen_port)
+    selected_transport = str(fallback_payload.get("selected_transport") or "local").strip().lower()
+    upnp_payload = fallback_payload.get("upnp", {}) if isinstance(fallback_payload, dict) else {}
+    upnp_base = str((upnp_payload or {}).get("public_base_url") or "").strip()
+    selected_base = current_tunnel or (upnp_base if selected_transport == "upnp" else "") or local_base
     tunnel_state = "active" if (process_running and current_tunnel) else ("starting" if process_running else "inactive")
     if stale_tunnel and not process_running:
         tunnel_state = "stale"
@@ -2028,6 +2226,8 @@ def router_info():
         {
             "status": "success",
             "service": "audio_router",
+            "transport": selected_transport,
+            "base_url": selected_base,
             "local": {
                 "base_url": local_base,
                 "listen_host": listen_host,
@@ -2046,6 +2246,7 @@ def router_info():
                 "stale_tunnel_url": stale_tunnel,
                 "error": current_error,
             },
+            "fallback": fallback_payload,
             "security": {
                 "require_auth": bool(runtime_security["require_auth"]),
                 "session_timeout": int(SESSION_TIMEOUT),
@@ -2147,6 +2348,18 @@ def main():
         if enable_tunnel:
             threading.Thread(target=lambda: (time.sleep(2), start_cloudflared_tunnel(listen_port)), daemon=True).start()
             log("Cloudflare Tunnel will be available shortly...")
+
+    def fallback_refresh_loop():
+        while service_running.is_set():
+            process_running = tunnel_process is not None and tunnel_process.poll() is None
+            with tunnel_url_lock:
+                current_tunnel = tunnel_url if process_running else ""
+            if not current_tunnel:
+                _refresh_upnp_fallback(listen_port, force=False)
+            time.sleep(max(15.0, float(UPNP_FALLBACK_REFRESH_SECONDS)))
+
+    _refresh_upnp_fallback(listen_port, force=True)
+    threading.Thread(target=fallback_refresh_loop, daemon=True).start()
 
     local_url = f"http://{listen_host}:{listen_port}"
     try:

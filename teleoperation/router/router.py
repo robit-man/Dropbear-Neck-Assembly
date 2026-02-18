@@ -585,6 +585,13 @@ def _prefer_non_loopback_url(*values):
     return first_any
 
 
+def _httpish_url(value):
+    text = str(value or "").strip()
+    if text.startswith("http://") or text.startswith("https://"):
+        return text
+    return ""
+
+
 def _normalize_seed_hex(value):
     text = str(value or "").strip().lower()
     if text.startswith("0x"):
@@ -1566,12 +1573,24 @@ def build_resolved_endpoints(services):
 
     adapter_local = adapter_data.get("local", {}) if isinstance(adapter_data, dict) else {}
     adapter_tunnel = adapter_data.get("tunnel", {}) if isinstance(adapter_data, dict) else {}
+    adapter_fallback = adapter_data.get("fallback", {}) if isinstance(adapter_data, dict) else {}
+    adapter_fallback_upnp = adapter_fallback.get("upnp", {}) if isinstance(adapter_fallback, dict) else {}
+    adapter_fallback_nats = adapter_fallback.get("nats", {}) if isinstance(adapter_fallback, dict) else {}
+    adapter_fallback_nkn = adapter_fallback.get("nkn", {}) if isinstance(adapter_fallback, dict) else {}
 
     camera_local = camera_data.get("local", {}) if isinstance(camera_data, dict) else {}
     camera_tunnel = camera_data.get("tunnel", {}) if isinstance(camera_data, dict) else {}
+    camera_fallback = camera_data.get("fallback", {}) if isinstance(camera_data, dict) else {}
+    camera_fallback_upnp = camera_fallback.get("upnp", {}) if isinstance(camera_fallback, dict) else {}
+    camera_fallback_nats = camera_fallback.get("nats", {}) if isinstance(camera_fallback, dict) else {}
+    camera_fallback_nkn = camera_fallback.get("nkn", {}) if isinstance(camera_fallback, dict) else {}
 
     audio_local = audio_data.get("local", {}) if isinstance(audio_data, dict) else {}
     audio_tunnel = audio_data.get("tunnel", {}) if isinstance(audio_data, dict) else {}
+    audio_fallback = audio_data.get("fallback", {}) if isinstance(audio_data, dict) else {}
+    audio_fallback_upnp = audio_fallback.get("upnp", {}) if isinstance(audio_fallback, dict) else {}
+    audio_fallback_nats = audio_fallback.get("nats", {}) if isinstance(audio_fallback, dict) else {}
+    audio_fallback_nkn = audio_fallback.get("nkn", {}) if isinstance(audio_fallback, dict) else {}
 
     adapter_tunnel_url = _first_nonempty(
         adapter_tunnel.get("tunnel_url"),
@@ -1579,12 +1598,37 @@ def build_resolved_endpoints(services):
         adapter_data.get("tunnel_url"),
     )
     adapter_local_base = str(adapter_local.get("base_url") or adapter_data.get("local_base_url") or "").strip()
+    adapter_upnp_base = _httpish_url(
+        adapter_fallback_upnp.get("public_base_url")
+        or adapter_fallback_upnp.get("base_url")
+    )
+    adapter_nats_base = _httpish_url(
+        adapter_fallback_nats.get("public_base_url")
+        or adapter_fallback_nats.get("base_url")
+    )
+    adapter_nkn_base = _httpish_url(
+        adapter_fallback_nkn.get("public_base_url")
+        or adapter_fallback_nkn.get("base_url")
+    )
+    adapter_fallback_http = _first_nonempty(
+        _httpish_url(adapter_fallback_upnp.get("http_endpoint")),
+        _httpish_url(adapter_fallback_nats.get("http_endpoint")),
+        _httpish_url(adapter_fallback_nkn.get("http_endpoint")),
+    )
+    adapter_fallback_ws = _first_nonempty(
+        adapter_fallback_upnp.get("ws_endpoint"),
+        adapter_fallback_nats.get("ws_endpoint"),
+        adapter_fallback_nkn.get("ws_endpoint"),
+    )
     adapter_local_http = str(adapter_local.get("http_endpoint") or adapter_data.get("local_http_endpoint") or "").strip()
     adapter_local_ws = str(adapter_local.get("ws_endpoint") or adapter_data.get("local_ws_endpoint") or "").strip()
     adapter_http = str(adapter_tunnel.get("http_endpoint") or adapter_data.get("http_endpoint") or "").strip()
     adapter_ws = str(adapter_tunnel.get("ws_endpoint") or adapter_data.get("ws_endpoint") or "").strip()
     adapter_base = _prefer_non_loopback_url(
         adapter_tunnel_url,
+        adapter_upnp_base,
+        adapter_nats_base,
+        adapter_nkn_base,
         adapter_data.get("base_url"),
     )
     if not adapter_base:
@@ -1592,37 +1636,173 @@ def build_resolved_endpoints(services):
     if not adapter_http:
         if adapter_tunnel_url:
             adapter_http = f"{adapter_tunnel_url}/send_command"
+        elif adapter_fallback_http:
+            adapter_http = adapter_fallback_http
         else:
             adapter_http = adapter_local_http
     if not adapter_ws:
         if adapter_tunnel_url:
             adapter_ws = f"{adapter_tunnel_url.replace('https://', 'wss://')}/ws"
+        elif adapter_fallback_ws:
+            adapter_ws = str(adapter_fallback_ws).strip()
         else:
             adapter_ws = adapter_local_ws
+    adapter_transport = str(
+        _first_nonempty(
+            adapter_fallback.get("selected_transport"),
+            adapter_data.get("transport"),
+        )
+    ).strip().lower()
+    if not adapter_transport:
+        if adapter_tunnel_url and not _is_loopback_url(adapter_tunnel_url):
+            adapter_transport = "cloudflare"
+        elif adapter_upnp_base:
+            adapter_transport = "upnp"
+        elif adapter_nats_base:
+            adapter_transport = "nats"
+        elif adapter_nkn_base:
+            adapter_transport = "nkn"
+        else:
+            adapter_transport = "local"
 
     camera_tunnel_url = _first_nonempty(
         camera_tunnel.get("tunnel_url"),
         camera_tunnel.get("stale_tunnel_url"),
         camera_data.get("tunnel_url"),
     )
-    camera_base = camera_tunnel_url
+    camera_upnp_base = _httpish_url(
+        camera_fallback_upnp.get("public_base_url")
+        or camera_fallback_upnp.get("base_url")
+    )
+    camera_nats_base = _httpish_url(
+        camera_fallback_nats.get("public_base_url")
+        or camera_fallback_nats.get("base_url")
+    )
+    camera_nkn_base = _httpish_url(
+        camera_fallback_nkn.get("public_base_url")
+        or camera_fallback_nkn.get("base_url")
+    )
+    camera_base = _prefer_non_loopback_url(
+        camera_tunnel_url,
+        camera_upnp_base,
+        camera_nats_base,
+        camera_nkn_base,
+    )
     if not camera_base:
         camera_base = str(camera_local.get("base_url") or "").strip()
+    camera_list = _first_nonempty(
+        camera_tunnel.get("list_url"),
+        camera_fallback_upnp.get("list_url"),
+        camera_fallback_nats.get("list_url"),
+        camera_fallback_nkn.get("list_url"),
+        f"{camera_base}/list" if camera_base else "",
+    )
+    camera_health = _first_nonempty(
+        camera_tunnel.get("health_url"),
+        camera_fallback_upnp.get("health_url"),
+        camera_fallback_nats.get("health_url"),
+        camera_fallback_nkn.get("health_url"),
+        f"{camera_base}/health" if camera_base else "",
+    )
+    camera_transport = str(
+        _first_nonempty(
+            camera_fallback.get("selected_transport"),
+            camera_data.get("transport"),
+        )
+    ).strip().lower()
+    if not camera_transport:
+        if camera_tunnel_url and not _is_loopback_url(camera_tunnel_url):
+            camera_transport = "cloudflare"
+        elif camera_upnp_base:
+            camera_transport = "upnp"
+        elif camera_nats_base:
+            camera_transport = "nats"
+        elif camera_nkn_base:
+            camera_transport = "nkn"
+        else:
+            camera_transport = "local"
 
     audio_tunnel_url = _first_nonempty(
         audio_tunnel.get("tunnel_url"),
         audio_tunnel.get("stale_tunnel_url"),
         audio_data.get("tunnel_url"),
     )
-    audio_base = audio_tunnel_url
+    audio_upnp_base = _httpish_url(
+        audio_fallback_upnp.get("public_base_url")
+        or audio_fallback_upnp.get("base_url")
+    )
+    audio_nats_base = _httpish_url(
+        audio_fallback_nats.get("public_base_url")
+        or audio_fallback_nats.get("base_url")
+    )
+    audio_nkn_base = _httpish_url(
+        audio_fallback_nkn.get("public_base_url")
+        or audio_fallback_nkn.get("base_url")
+    )
+    audio_base = _prefer_non_loopback_url(
+        audio_tunnel_url,
+        audio_upnp_base,
+        audio_nats_base,
+        audio_nkn_base,
+    )
     if not audio_base:
         audio_base = str(audio_local.get("base_url") or "").strip()
+    audio_list = _first_nonempty(
+        audio_tunnel.get("list_url"),
+        audio_fallback_upnp.get("list_url"),
+        audio_fallback_nats.get("list_url"),
+        audio_fallback_nkn.get("list_url"),
+        f"{audio_base}/list" if audio_base else "",
+    )
+    audio_health = _first_nonempty(
+        audio_tunnel.get("health_url"),
+        audio_fallback_upnp.get("health_url"),
+        audio_fallback_nats.get("health_url"),
+        audio_fallback_nkn.get("health_url"),
+        f"{audio_base}/health" if audio_base else "",
+    )
+    audio_webrtc_offer = _first_nonempty(
+        audio_tunnel.get("webrtc_offer_url"),
+        audio_fallback_upnp.get("webrtc_offer_url"),
+        audio_fallback_nats.get("webrtc_offer_url"),
+        audio_fallback_nkn.get("webrtc_offer_url"),
+        f"{audio_base}/webrtc/offer" if audio_base else "",
+    )
+    audio_transport = str(
+        _first_nonempty(
+            audio_fallback.get("selected_transport"),
+            audio_data.get("transport"),
+        )
+    ).strip().lower()
+    if not audio_transport:
+        if audio_tunnel_url and not _is_loopback_url(audio_tunnel_url):
+            audio_transport = "cloudflare"
+        elif audio_upnp_base:
+            audio_transport = "upnp"
+        elif audio_nats_base:
+            audio_transport = "nats"
+        elif audio_nkn_base:
+            audio_transport = "nkn"
+        else:
+            audio_transport = "local"
 
     adapter_health = str(
-        adapter_local.get("health_url") or (f"{adapter_base}/health" if adapter_base else "")
+        _first_nonempty(
+            adapter_local.get("health_url"),
+            adapter_fallback_upnp.get("health_url"),
+            adapter_fallback_nats.get("health_url"),
+            adapter_fallback_nkn.get("health_url"),
+            f"{adapter_base}/health" if adapter_base else "",
+        )
     ).strip()
     adapter_dashboard = str(
-        adapter_local.get("dashboard_url") or (f"{adapter_base}/" if adapter_base else "")
+        _first_nonempty(
+            adapter_local.get("dashboard_url"),
+            adapter_fallback_upnp.get("dashboard_url"),
+            adapter_fallback_nats.get("dashboard_url"),
+            adapter_fallback_nkn.get("dashboard_url"),
+            f"{adapter_base}/" if adapter_base else "",
+        )
     ).strip()
     adapter_auth = str(
         adapter_local.get("auth_route") or "/auth"
@@ -1630,6 +1810,7 @@ def build_resolved_endpoints(services):
 
     return {
         "adapter": {
+            "transport": adapter_transport,
             "tunnel_url": adapter_tunnel_url,
             "base_url": adapter_base,
             "local_base_url": adapter_local_base,
@@ -1640,27 +1821,26 @@ def build_resolved_endpoints(services):
             "health_url": adapter_health,
             "dashboard_url": adapter_dashboard,
             "auth_route": adapter_auth,
+            "fallback": adapter_fallback,
         },
         "camera": {
+            "transport": camera_transport,
             "tunnel_url": camera_tunnel_url,
             "base_url": camera_base,
-            "list_url": str(camera_tunnel.get("list_url") or (f"{camera_base}/list" if camera_base else "")).strip(),
-            "health_url": str(
-                camera_tunnel.get("health_url") or (f"{camera_base}/health" if camera_base else "")
-            ).strip(),
+            "list_url": str(camera_list).strip(),
+            "health_url": str(camera_health).strip(),
             "local_base_url": str(camera_local.get("base_url") or "").strip(),
+            "fallback": camera_fallback,
         },
         "audio": {
+            "transport": audio_transport,
             "tunnel_url": audio_tunnel_url,
             "base_url": audio_base,
-            "list_url": str(audio_tunnel.get("list_url") or (f"{audio_base}/list" if audio_base else "")).strip(),
-            "health_url": str(
-                audio_tunnel.get("health_url") or (f"{audio_base}/health" if audio_base else "")
-            ).strip(),
-            "webrtc_offer_url": str(
-                audio_tunnel.get("webrtc_offer_url") or (f"{audio_base}/webrtc/offer" if audio_base else "")
-            ).strip(),
+            "list_url": str(audio_list).strip(),
+            "health_url": str(audio_health).strip(),
+            "webrtc_offer_url": str(audio_webrtc_offer).strip(),
             "local_base_url": str(audio_local.get("base_url") or "").strip(),
+            "fallback": audio_fallback,
         },
     }
 

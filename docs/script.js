@@ -1850,7 +1850,7 @@ function normalizeServiceEndpointForAuth(service, endpoint) {
       return "";
     }
   }
-  if (!isCloudflareTunnelOrigin(origin)) {
+  if (!isRoutableServiceOrigin(origin)) {
     return "";
   }
   return origin;
@@ -2192,7 +2192,7 @@ function setResolvedServiceAuthEndpoint(service, endpoint) {
 function getServicePreferredAuthEndpoint(service) {
   const key = String(service || "").trim().toLowerCase();
   const resolved = String(resolvedServiceAuthEndpoints[key] || "").trim();
-  if (resolved && isCloudflareTunnelOrigin(resolved)) {
+  if (resolved && isRoutableServiceOrigin(resolved)) {
     return resolved;
   }
   return "";
@@ -2353,7 +2353,7 @@ function hydrateEndpointInputs(prefer = "address") {
     setAdapterEndpointPreview(httpRaw, wsRaw);
     return null;
   }
-  if (!isCloudflareTunnelOrigin(endpoints.origin)) {
+  if (!isRoutableServiceOrigin(endpoints.origin)) {
     setAdapterEndpointPreview("", "");
     return null;
   }
@@ -2405,7 +2405,7 @@ function ensureEndpointInputBindings() {
 function fetchTunnelUrl() {
   const endpoints = hydrateEndpointInputs("address");
   if (!endpoints) {
-    alert("Resolve adapter service endpoints first; only router-resolved Cloudflare endpoints are allowed.");
+    alert("Resolve adapter service endpoints first; only router-resolved non-loopback endpoints are allowed.");
     return;
   }
 
@@ -2432,18 +2432,18 @@ async function connectToAdapter() {
     hydrateEndpointInputs(addressRaw ? "address" : "http") ||
     buildAdapterEndpoints(httpInputRaw || wsInputRaw || HTTP_URL || WS_URL);
   if (!normalized) {
-    alert("Adapter endpoint must be a Cloudflare tunnel URL resolved from service endpoints");
+    alert("Adapter endpoint must be a router-resolved non-loopback endpoint");
     return;
   }
-  if (!isCloudflareTunnelOrigin(normalized.origin)) {
-    alert("Adapter endpoint must be a Cloudflare tunnel URL resolved from service endpoints");
+  if (!isRoutableServiceOrigin(normalized.origin)) {
+    alert("Adapter endpoint must be a router-resolved non-loopback endpoint");
     return;
   }
   const resolvedAdapterEndpoint = getServicePreferredAuthEndpoint("adapter");
   const normalizedOrigin = normalizeServiceEndpointForAuth("adapter", normalized.origin);
   if (!resolvedAdapterEndpoint || !normalizedOrigin || normalizedOrigin !== resolvedAdapterEndpoint) {
-    alert("Adapter endpoint must match the router-resolved Cloudflare service endpoint");
-    logToConsole("[WARN] Adapter connect blocked: endpoint does not match router-resolved adapter tunnel");
+    alert("Adapter endpoint must match the router-resolved service endpoint");
+    logToConsole("[WARN] Adapter connect blocked: endpoint does not match router-resolved adapter endpoint");
     return;
   }
 
@@ -3052,13 +3052,64 @@ function isCloudflareTunnelOrigin(rawInput) {
   }
 }
 
+function isLoopbackHostname(hostname) {
+  const host = String(hostname || "").trim().toLowerCase();
+  if (!host) {
+    return false;
+  }
+  if (host === "localhost" || host === "::1" || host === "[::1]") {
+    return true;
+  }
+  if (host.endsWith(".localhost")) {
+    return true;
+  }
+  if (host.startsWith("127.")) {
+    return true;
+  }
+  return false;
+}
+
+function isLoopbackServiceOrigin(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) {
+    return false;
+  }
+  try {
+    const candidate = raw.includes("://") ? raw : `https://${raw}`;
+    const parsed = new URL(candidate);
+    return isLoopbackHostname(parsed.hostname);
+  } catch (err) {
+    return false;
+  }
+}
+
+function isRoutableServiceOrigin(rawInput) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) {
+    return false;
+  }
+  try {
+    const origin = normalizeServiceOrigin(raw);
+    if (!origin) {
+      return false;
+    }
+    return !isLoopbackServiceOrigin(origin);
+  } catch (err) {
+    return false;
+  }
+}
+
 function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
   const value = String(rawOrigin || "").trim();
   if (!value) {
     return "";
   }
-  if (isCloudflareTunnelOrigin(value)) {
-    return value;
+  if (isRoutableServiceOrigin(value)) {
+    try {
+      return normalizeServiceOrigin(value);
+    } catch (err) {
+      return "";
+    }
   }
   if (storageKey) {
     try {
@@ -3070,6 +3121,7 @@ function sanitizeStoredRemoteOrigin(rawOrigin, storageKey = "") {
 
 function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
   let firstCloudflare = "";
+  let firstRoutable = "";
   for (const value of candidates) {
     const text = String(value || "").trim();
     if (!text) {
@@ -3088,19 +3140,26 @@ function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
       if (!firstCloudflare) {
         firstCloudflare = origin;
       }
+      continue;
+    }
+    if (isRoutableServiceOrigin(origin) && !firstRoutable) {
+      firstRoutable = origin;
     }
   }
 
   if (firstCloudflare) {
     return firstCloudflare;
   }
+  if (firstRoutable) {
+    return firstRoutable;
+  }
 
-  const currentCloudflare = sanitizeStoredRemoteOrigin(currentOrigin);
-  if (currentCloudflare) {
-    return currentCloudflare;
+  const currentRemote = sanitizeStoredRemoteOrigin(currentOrigin);
+  if (currentRemote) {
+    return currentRemote;
   }
   if (serviceLabel) {
-    logToConsole(`[ROUTER] Ignoring non-Cloudflare ${serviceLabel} endpoint update`);
+    logToConsole(`[ROUTER] Ignoring loopback ${serviceLabel} endpoint update`);
   }
   return "";
 }
@@ -3609,21 +3668,27 @@ function applyResolvedEndpoints(resolved) {
     adapterLocal.base_url,
   ];
   let firstCloudflareAdapterEndpoints = null;
+  let firstRoutableAdapterEndpoints = null;
   for (const candidate of adapterCandidates) {
     const parsed = buildAdapterEndpoints(candidate);
     if (parsed) {
       if (isCloudflareTunnelOrigin(parsed.origin) && !firstCloudflareAdapterEndpoints) {
         firstCloudflareAdapterEndpoints = parsed;
+      } else if (isRoutableServiceOrigin(parsed.origin) && !firstRoutableAdapterEndpoints) {
+        firstRoutableAdapterEndpoints = parsed;
       }
     }
   }
   const currentAdapterEndpoints = buildAdapterEndpoints(HTTP_URL || WS_URL || "");
   let adapterEndpoints = firstCloudflareAdapterEndpoints;
-  if (!adapterEndpoints && currentAdapterEndpoints && isCloudflareTunnelOrigin(currentAdapterEndpoints.origin)) {
+  if (!adapterEndpoints && firstRoutableAdapterEndpoints) {
+    adapterEndpoints = firstRoutableAdapterEndpoints;
+  }
+  if (!adapterEndpoints && currentAdapterEndpoints && isRoutableServiceOrigin(currentAdapterEndpoints.origin)) {
     adapterEndpoints = currentAdapterEndpoints;
   }
   if (!adapterEndpoints && Object.keys(adapter).length > 0) {
-    logToConsole("[ROUTER] Ignoring non-Cloudflare adapter endpoint update");
+    logToConsole("[ROUTER] Ignoring loopback adapter endpoint update");
   }
 
   if (adapterEndpoints) {
