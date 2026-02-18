@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { createAmberGridMaterial } from "./amber-grid-material.js";
 
 const PROJECTION_STORAGE_KEY = "orientationProjectionMode";
 
@@ -11,6 +12,8 @@ const GRAVITY_AXIS_MIN = 7.0;
 const GRAVITY_AXIS_MAX = 12.6;
 const GRAVITY_AXIS_STEADY_ANGLE_RAD = THREE.MathUtils.degToRad(5.5);
 const GRAVITY_AXIS_SETTLE_SECONDS = 0.45;
+const ORIENTATION_GRID_BASE_ROTATION_X = -Math.PI * 0.5;
+const ORIENTATION_GRID_BASE_OPACITY = 0.12;
 
 const defaultTuneables = {
   orientationSensitivity: 1.0,
@@ -429,12 +432,14 @@ function applyLocalVisual() {
     state.grid.visible = mode === "plane";
     if (mode === "plane") {
       const gravityDir = calibratedGravityDirection(state.accG);
-      const targetTiltX = gravityDir ? clamp(gravityDir.z * 0.92, -0.78, 0.78) : 0;
+      const targetTiltX = ORIENTATION_GRID_BASE_ROTATION_X + (
+        gravityDir ? clamp(gravityDir.z * 0.92, -0.78, 0.78) : 0
+      );
       const targetTiltZ = gravityDir ? clamp(-gravityDir.x * 0.92, -0.78, 0.78) : 0;
       state.grid.rotation.x += (targetTiltX - state.grid.rotation.x) * 0.22;
       state.grid.rotation.z += (targetTiltZ - state.grid.rotation.z) * 0.22;
     } else {
-      state.grid.rotation.x += (0 - state.grid.rotation.x) * 0.18;
+      state.grid.rotation.x += (ORIENTATION_GRID_BASE_ROTATION_X - state.grid.rotation.x) * 0.18;
       state.grid.rotation.z += (0 - state.grid.rotation.z) * 0.18;
     }
   }
@@ -902,8 +907,16 @@ function initScene() {
   dir.position.set(5, 8, 5);
   state.scene.add(dir);
 
-  state.grid = new THREE.GridHelper(20, 20, 0x222222, 0x111111);
+  const gridMaterial = createAmberGridMaterial({
+    colorHex: 0xffae00,
+    baseOpacity: ORIENTATION_GRID_BASE_OPACITY,
+    scale: 26,
+  });
+  state.grid = new THREE.Mesh(new THREE.PlaneGeometry(22, 22), gridMaterial);
+  state.grid.rotation.x = ORIENTATION_GRID_BASE_ROTATION_X;
   state.grid.position.y = 0.01;
+  state.grid.frustumCulled = false;
+  state.grid.renderOrder = 1;
   state.scene.add(state.grid);
 
   state.globe = new THREE.Mesh(

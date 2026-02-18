@@ -7585,7 +7585,7 @@ function onHybridDragPointerMove(event) {
     deltas.Y = dx * lateralGain;
     deltas.Z = dy * dorsalGain;
   } else if (mode === "roll_height") {
-    const rollGain = hybridDragState.button === 1 ? -2.4 : 2.4;
+    const rollGain = hybridDragState.button === 1 ? 2.4 : -2.4;
     deltas.R = dx * rollGain;
     deltas.H = -dy * 0.2;
   } else {

@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { createAmberGridMaterial } from './amber-grid-material.js';
 import vision from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0';
 
 const { FaceLandmarker, FilesetResolver } = vision;
@@ -10,6 +11,9 @@ const streamStatusEl = document.getElementById('hybridModeStatus') || document.g
 const commandStreamEl = document.getElementById('commandStream');
 const hybridCommandReadoutEl = document.getElementById('hybridControlReadout');
 const viewport = document.getElementById('morphCanvasWrap');
+const GRID_HUD_DEPTH = 2.85;
+const GRID_HUD_NDC_Y = -0.74;
+const GRID_BASE_OPACITY = 0.08;
 
 const COMMAND_INTERVAL_MS = 90;
 let lastCommandSentAt = 0;
@@ -404,6 +408,26 @@ async function main() {
 
   const camera = new THREE.PerspectiveCamera(60, 1, 1, 100);
   camera.position.z = 3.8;
+  scene.add(camera);
+
+  const gridPivot = new THREE.Group();
+  camera.add(gridPivot);
+  const gridMaterial = createAmberGridMaterial({
+    colorHex: 0xffae00,
+    baseOpacity: GRID_BASE_OPACITY,
+    scale: 26,
+  });
+  const gridMesh = new THREE.Mesh(new THREE.PlaneGeometry(8.8, 6.4), gridMaterial);
+  gridMesh.rotation.x = -Math.PI * 0.5;
+  gridMesh.frustumCulled = false;
+  gridMesh.renderOrder = 1;
+  gridPivot.add(gridMesh);
+
+  const syncOverlayGrid = () => {
+    const fovRad = THREE.MathUtils.degToRad(camera.fov * 0.5);
+    const halfH = Math.tan(fovRad) * GRID_HUD_DEPTH;
+    gridPivot.position.set(0, halfH * GRID_HUD_NDC_Y, -GRID_HUD_DEPTH);
+  };
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableZoom = false;
@@ -411,9 +435,14 @@ async function main() {
   controls.enablePan = false;
 
   resizeViewport(renderer, camera);
-  window.addEventListener('resize', () => resizeViewport(renderer, camera));
+  syncOverlayGrid();
+  window.addEventListener('resize', () => {
+    resizeViewport(renderer, camera);
+    syncOverlayGrid();
+  });
   window.addEventListener('hybrid-preview-resize', (event) => {
     resizeViewport(renderer, camera);
+    syncOverlayGrid();
     const mode = event && event.detail ? String(event.detail.mode || '') : '';
     if (mode && mode !== 'morph' && streamPlaybackEnabled) {
       setStreamPlaybackEnabled(false);

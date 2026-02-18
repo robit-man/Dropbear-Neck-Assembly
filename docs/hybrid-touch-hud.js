@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { createAmberGridMaterial } from "./amber-grid-material.js";
 
 const HUD_COLOR_HEX = 0xffae00;
 const HUD_COLOR_CSS = "#ffae00";
@@ -177,50 +178,10 @@ function ndcToHud(ndcX, ndcY, depth = HUD_DEPTH) {
 }
 
 function createGridMaterial() {
-  return new THREE.ShaderMaterial({
-    transparent: true,
-    depthTest: false,
-    depthWrite: false,
-    blending: THREE.AdditiveBlending,
-    side: THREE.DoubleSide,
-    uniforms: {
-      uColor: { value: new THREE.Color(HUD_COLOR_HEX) },
-      uOpacity: { value: GRID_BASE_OPACITY },
-      uScale: { value: 26.0 },
-    },
-    vertexShader: `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `,
-    fragmentShader: `
-      varying vec2 vUv;
-      uniform vec3 uColor;
-      uniform float uOpacity;
-      uniform float uScale;
-
-      float gridLine(vec2 uv, float scale) {
-        vec2 coord = uv * scale;
-        vec2 grid = abs(fract(coord - 0.5) - 0.5) / fwidth(coord);
-        float line = min(grid.x, grid.y);
-        return 1.0 - clamp(line, 0.0, 1.0);
-      }
-
-      void main() {
-        float major = gridLine(vUv, uScale);
-        float minor = gridLine(vUv + vec2(0.125, 0.085), uScale * 0.5) * 0.45;
-        float grid = max(major, minor);
-        vec2 centered = vUv * 2.0 - 1.0;
-        float edgeFade = 1.0 - smoothstep(0.58, 1.06, length(centered));
-        float alpha = grid * edgeFade * uOpacity;
-        if (alpha <= 0.001) {
-          discard;
-        }
-        gl_FragColor = vec4(uColor, alpha);
-      }
-    `,
+  return createAmberGridMaterial({
+    colorHex: HUD_COLOR_HEX,
+    baseOpacity: GRID_BASE_OPACITY,
+    scale: 26.0,
   });
 }
 
