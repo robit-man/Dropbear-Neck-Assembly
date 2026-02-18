@@ -3061,6 +3061,52 @@ function isFrontendLoopbackOrigin() {
   }
 }
 
+function pickPreferredResolvedOrigin(candidates, currentOrigin, serviceLabel) {
+  let firstPublic = "";
+  let firstLoopback = "";
+  for (const value of candidates) {
+    const text = String(value || "").trim();
+    if (!text) {
+      continue;
+    }
+    let origin = "";
+    try {
+      origin = normalizeServiceOrigin(text);
+    } catch (err) {
+      continue;
+    }
+    if (!origin) {
+      continue;
+    }
+    if (isLoopbackServiceOrigin(origin)) {
+      if (!firstLoopback) {
+        firstLoopback = origin;
+      }
+      continue;
+    }
+    if (!firstPublic) {
+      firstPublic = origin;
+    }
+  }
+
+  if (firstPublic) {
+    return firstPublic;
+  }
+  if (!firstLoopback) {
+    return "";
+  }
+
+  const frontendIsLoopback = isFrontendLoopbackOrigin();
+  const currentIsPublic = String(currentOrigin || "").trim() && !isLoopbackServiceOrigin(currentOrigin);
+  if (!frontendIsLoopback && currentIsPublic) {
+    if (serviceLabel) {
+      logToConsole(`[ROUTER] Ignoring loopback ${serviceLabel} endpoint update while using a remote frontend origin`);
+    }
+    return String(currentOrigin || "").trim();
+  }
+  return firstLoopback;
+}
+
 function pickFirstValidServiceOrigin(...values) {
   for (const value of values) {
     const text = String(value || "").trim();
@@ -3653,7 +3699,7 @@ function applyResolvedEndpoints(resolved) {
     changed = changed || adapterHadValues;
   }
 
-  const cameraCandidate = pickFirstValidServiceOrigin(
+  const cameraCandidate = pickPreferredResolvedOrigin([
     camera.tunnel_url,
     cameraTunnel.tunnel_url,
     camera.base_url,
@@ -3665,7 +3711,7 @@ function applyResolvedEndpoints(resolved) {
     cameraLocal.base_url,
     cameraLocal.list_url,
     cameraLocal.health_url
-  );
+  ], cameraRouterBaseUrl, "camera");
   if (cameraCandidate) {
     const previousBase = cameraRouterBaseUrl;
     cameraRouterBaseUrl = cameraCandidate;
@@ -3719,7 +3765,7 @@ function applyResolvedEndpoints(resolved) {
     changed = changed || cameraHadValue;
   }
 
-  const audioCandidate = pickFirstValidServiceOrigin(
+  const audioCandidate = pickPreferredResolvedOrigin([
     audio.tunnel_url,
     audioTunnel.tunnel_url,
     audioTunnel.base_url,
@@ -3735,7 +3781,7 @@ function applyResolvedEndpoints(resolved) {
     audioLocal.list_url,
     audioLocal.health_url,
     audioLocal.webrtc_offer_url
-  );
+  ], audioRouterBaseUrl, "audio");
   if (audioCandidate) {
     const previousBase = audioRouterBaseUrl;
     audioRouterBaseUrl = audioCandidate;
