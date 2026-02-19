@@ -1232,6 +1232,7 @@ function reorganizeUnifiedViews() {
     const hybridOrientationTuneablesMount = document.getElementById("hybridOrientationTuneablesMount");
     const debugControlMount = document.getElementById("debugControlMount");
     const debugCameraMount = document.getElementById("debugCameraMount");
+    const debugAudioMount = document.getElementById("debugAudioMount");
 
     const routerDiscoverySection = document.querySelector("#connectionModal .modal-section");
     moveNodeToMount(routerDiscoverySection, authRouterMount);
@@ -1249,12 +1250,32 @@ function reorganizeUnifiedViews() {
         }
         moveNodeToMount(section, debugCameraMount);
     });
+    // Enforce Mode and Feed placement in Debug > Camera Stream Test, above Preview.
+    const modeAndFeedSection = Array.from(document.querySelectorAll("#streamsCameraDetails .control-section")).find((section) => {
+        const heading = section.querySelector("h3");
+        return heading && heading.textContent.trim() === "Mode and Feed";
+    });
+    if (modeAndFeedSection && debugCameraMount) {
+        const previewSection = Array.from(debugCameraMount.children || []).find((child) => {
+            const heading = child && child.querySelector ? child.querySelector("h3") : null;
+            return !!(heading && heading.textContent.trim() === "Preview");
+        });
+        if (previewSection) {
+            debugCameraMount.insertBefore(modeAndFeedSection, previewSection);
+        } else {
+            debugCameraMount.prepend(modeAndFeedSection);
+        }
+    }
 
     const audioBody = document.querySelector("#streamsAudioDetails .streams-panel-body");
     const audioSections = collectDirectChildSections(audioBody);
     audioSections.forEach((section, index) => {
-        if (index <= 1) {
+        if (index === 0) {
             moveNodeToMount(section, authAudioMount);
+            return;
+        }
+        if (index === 1) {
+            moveNodeToMount(section, debugAudioMount);
             return;
         }
         moveNodeToMount(section, hybridAudioMount);
