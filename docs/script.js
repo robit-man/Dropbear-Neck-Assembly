@@ -1243,7 +1243,7 @@ function reorganizeUnifiedViews() {
     const cameraBody = document.querySelector("#streamsCameraDetails .streams-panel-body");
     const cameraSections = collectDirectChildSections(cameraBody);
     cameraSections.forEach((section, index) => {
-        if (index <= 1) {
+        if (index === 0) {
             moveNodeToMount(section, authCameraMount);
             return;
         }
