@@ -1035,8 +1035,12 @@ function setHybridTab(tab, options = {}) {
         const mode = String(btn.dataset.hybridModeToggle || "").trim();
         const isActive = mode === nextTab;
         btn.classList.toggle("active", isActive);
-        btn.disabled = !isActive;
         btn.hidden = !isActive;
+        btn.style.display = isActive ? "inline-flex" : "none";
+        if (!isActive) {
+            // Keep non-active mode buttons out of the way rather than merely disabled.
+            btn.disabled = false;
+        }
         btn.setAttribute("aria-hidden", isActive ? "false" : "true");
     });
     document.querySelectorAll(".hybrid-tuneables-panel[data-hybrid-tuneables-mode]").forEach((panel) => {

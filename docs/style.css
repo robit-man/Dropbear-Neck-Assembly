@@ -1311,6 +1311,10 @@ h3 {
     display: none;
 }
 
+.hybrid-mode-toggle[hidden] {
+    display: none !important;
+}
+
 .hybrid-mode-toggle.active {
     display: inline-flex;
 }
