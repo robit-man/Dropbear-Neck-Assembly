@@ -61,6 +61,8 @@ let hybridTabsInitialized = false;
 let debugUiInitialized = false;
 let activeHybridTab = "touch";
 let activeDebugControl = "direct";
+let hybridRetestPortsVisible = false;
+let hybridRetestPortsInFlight = false;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "uiSidebarCollapsed";
 let sidebarUiInitialized = false;
 let buttonIconsObserver = null;
@@ -90,6 +92,7 @@ const BUTTON_ICON_BY_ID = Object.freeze({
     routerQrScannerStopBtn: "stop",
     controlsMenuToggleBtn: "sliders",
     pinnedStreamCloseBtn: "close",
+    hybridRetestPortsBtn: "refresh",
 });
 
 const BUTTON_ICON_SVGS = Object.freeze({
@@ -1515,6 +1518,87 @@ async function adapterApiFetch(path, options = {}) {
     return fetch(`${adapterOrigin}${normalizedPath}`, options);
 }
 
+function isAdapterSerialPortError(message) {
+    const text = String(message || "").trim().toLowerCase();
+    if (!text) {
+        return false;
+    }
+    if (!text.includes("serial")) {
+        return false;
+    }
+    return text.includes("not connected") || text.includes("disconnected") || text.includes("not open");
+}
+
+function setHybridRetestPortsButtonVisible(visible) {
+    hybridRetestPortsVisible = !!visible;
+    const retestBtn = document.getElementById("hybridRetestPortsBtn");
+    if (!retestBtn) {
+        return;
+    }
+    retestBtn.hidden = !hybridRetestPortsVisible;
+    retestBtn.disabled = hybridRetestPortsInFlight;
+}
+
+function handleAdapterCommandError(message) {
+    const text = String(message || "").trim();
+    if (!isAdapterSerialPortError(text)) {
+        return;
+    }
+    setHybridRetestPortsButtonVisible(true);
+    setHybridStatus("Adapter serial disconnected. Tap Retest Ports to rebind the controller.", true);
+}
+
+async function retestAdapterPorts() {
+    if (!SESSION_KEY) {
+        logToConsole("[ERROR] No session key - please authenticate first");
+        showConnectionModal();
+        return;
+    }
+    if (hybridRetestPortsInFlight) {
+        return;
+    }
+
+    hybridRetestPortsInFlight = true;
+    setHybridRetestPortsButtonVisible(true);
+    logToConsole("[RETEST] Retesting adapter serial ports via HEALTH discovery...");
+    try {
+        const response = await adapterApiFetch("/serial_retest", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ session_key: SESSION_KEY }),
+        });
+
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (jsonErr) {}
+
+        if (!response.ok || data.status !== "success") {
+            const msg = data.message || `HTTP ${response.status}`;
+            logToConsole("[ERROR] Serial retest failed: " + msg);
+            setHybridStatus(`Retest failed: ${msg}`, true);
+            setHybridRetestPortsButtonVisible(true);
+            return;
+        }
+
+        const resolvedPort = String(data.serial_device || "").trim();
+        const resolvedBaud = Number(data.baudrate);
+        const resolvedLabel = resolvedPort
+            ? `${resolvedPort}${Number.isFinite(resolvedBaud) ? `@${resolvedBaud}` : ""}`
+            : "detected controller";
+        logToConsole(`[OK] Serial retest complete on ${resolvedLabel}`);
+        setHybridStatus(`Adapter serial reconnected on ${resolvedLabel}.`, false);
+        setHybridRetestPortsButtonVisible(false);
+    } catch (err) {
+        logToConsole("[ERROR] Serial retest request failed: " + err);
+        setHybridStatus(`Retest request failed: ${err}`, true);
+        setHybridRetestPortsButtonVisible(true);
+    } finally {
+        hybridRetestPortsInFlight = false;
+        setHybridRetestPortsButtonVisible(hybridRetestPortsVisible);
+    }
+}
+
 async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
     if (!SESSION_KEY) {
         logToConsole("[ERROR] No session key - please authenticate first");
@@ -1547,6 +1631,7 @@ async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
 
         const homeSent = data.home_sent ? ` + ${data.home_sent}` : "";
         logToConsole(`[OK] Serial reset complete${homeSent}`);
+        setHybridRetestPortsButtonVisible(false);
         resetSliders({silent: true});
     } catch (err) {
         logToConsole("[ERROR] Serial reset request failed: " + err);
@@ -1681,12 +1766,16 @@ async function sendCommand(command) {
             const data = await response.json();
             logToConsole(`${adapterUseNkn ? "NKN" : "HTTP"} -> ` + command);
             if (data.status !== 'success') {
-                logToConsole("[ERROR] " + (data.message || JSON.stringify(data)));
-                if (data.message && data.message.includes('session')) {
+                const message = data.message || JSON.stringify(data);
+                logToConsole("[ERROR] " + message);
+                handleAdapterCommandError(message);
+                if (String(message).includes('session')) {
                     SESSION_KEY = "";
                     localStorage.removeItem('sessionKey');
                     showConnectionModal();
                 }
+            } else {
+                setHybridRetestPortsButtonVisible(false);
             }
             const elapsed = (Date.now() - metrics.lastCommandTime) / 1000;
             if (elapsed > 0) {
@@ -1753,12 +1842,16 @@ function initWebSocket() {
           hideConnectionModal();
         } else if (parsed.status === 'error') {
           logToConsole("[ERROR] WS error: " + parsed.message);
+          handleAdapterCommandError(parsed.message);
           if (parsed.message && parsed.message.includes('session')) {
             SESSION_KEY = "";
             localStorage.removeItem('sessionKey');
             showConnectionModal();
           }
         } else {
+          if (parsed.status === "success") {
+            setHybridRetestPortsButtonVisible(false);
+          }
           logToConsole("WS <- " + JSON.stringify(parsed));
         }
       } catch (err) {
@@ -1834,12 +1927,16 @@ async function sendCommandHttpOnly(command) {
         const data = await response.json();
         logToConsole(`${adapterUseNkn ? "NKN" : "HTTP"} -> ` + command);
         if (data.status !== 'success') {
-            logToConsole("[ERROR] " + (data.message || JSON.stringify(data)));
-            if (data.message && data.message.includes('session')) {
+            const message = data.message || JSON.stringify(data);
+            logToConsole("[ERROR] " + message);
+            handleAdapterCommandError(message);
+            if (String(message).includes('session')) {
                 SESSION_KEY = "";
                 localStorage.removeItem('sessionKey');
                 showConnectionModal();
             }
+        } else {
+            setHybridRetestPortsButtonVisible(false);
         }
         const elapsed = (Date.now() - metrics.lastCommandTime) / 1000;
         if (elapsed > 0) {
@@ -8895,6 +8992,14 @@ function setupHybridUi() {
     });
   }
 
+  const retestBtn = document.getElementById("hybridRetestPortsBtn");
+  if (retestBtn) {
+    retestBtn.addEventListener("click", () => {
+      retestAdapterPorts().catch(() => {});
+    });
+  }
+  setHybridRetestPortsButtonVisible(hybridRetestPortsVisible);
+
   const homeSoftBtn = document.getElementById("hybridHomeSoftBtn");
   if (homeSoftBtn) {
     homeSoftBtn.addEventListener("click", () => {
@@ -9260,6 +9365,7 @@ window.sendCommandHttpOnly = sendCommandHttpOnly;
 window.sendHomeCommand = sendHomeCommand;
 window.sendHomeSoftCommand = sendHomeSoftCommand;
 window.resetAdapterPort = resetAdapterPort;
+window.retestAdapterPorts = retestAdapterPorts;
 window.showConnectionModal = showConnectionModal;
 window.hideConnectionModal = hideConnectionModal;
 window.fetchTunnelUrl = fetchTunnelUrl;

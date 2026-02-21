@@ -1638,6 +1638,30 @@ def main():
         message += ")"
         return True, message, outbound_home if trigger_home else None
 
+    def retest_serial_ports():
+        """Force a HEALTH-based serial rediscovery scan without issuing movement commands."""
+        nonlocal serial_device, baudrate, serial_health_report
+
+        preferred_device = serial_device
+        preferred_baudrate = baudrate
+        connected, reconnect_message = _connect_serial_controller(
+            preferred_device=preferred_device,
+            preferred_baudrate=preferred_baudrate,
+            context_label="[RETEST]",
+            save_if_changed=True,
+        )
+        if not connected:
+            return False, f"Retest failed: {reconnect_message}"
+
+        detected_key = _normalize_device_key(
+            serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+        )
+        message = f"Serial retest complete ({serial_device}@{baudrate}"
+        if detected_key:
+            message += f", DEVICE={detected_key}"
+        message += ")"
+        return True, message
+
     # --- Network Host/Port/Route ---
     listen_host = adapter_settings["listen_host"]
     listen_route = _normalize_route(adapter_settings["listen_route"])
@@ -2762,6 +2786,32 @@ def main():
             ),
             "serial_health": dict(serial_health_report) if isinstance(serial_health_report, dict) else {},
             "home_sent": home_sent,
+        }
+        return jsonify(response)
+
+    @app.route("/serial_retest", methods=["POST"])
+    def http_serial_retest():
+        """Retest serial ports using HEALTH discovery and bind the first matching controller."""
+        data = request.get_json() or {}
+        session_key = data.get("session_key", "")
+
+        if not validate_session(session_key):
+            return jsonify({"status": "error", "message": "Invalid or expired session"}), 401
+
+        ok, message = retest_serial_ports()
+        if not ok:
+            return jsonify({"status": "error", "message": message}), 500
+
+        response = {
+            "status": "success",
+            "message": message,
+            "serial_device": serial_device,
+            "baudrate": int(baudrate),
+            "serial_expected_device_key": serial_expected_device_key,
+            "serial_detected_device_key": _normalize_device_key(
+                serial_health_report.get("DEVICE") if isinstance(serial_health_report, dict) else ""
+            ),
+            "serial_health": dict(serial_health_report) if isinstance(serial_health_report, dict) else {},
         }
         return jsonify(response)
 
