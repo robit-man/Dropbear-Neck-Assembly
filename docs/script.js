@@ -5284,6 +5284,8 @@ let cameraRecoveryInFlight = false;
 let cameraSessionRotateInFlight = false;
 let cameraSelectInteractionUntilMs = 0;
 const cameraProfileDraftByFeed = Object.create(null);
+const cameraOrientationDraftByFeed = Object.create(null);
+const CAMERA_ORIENTATION_VALUES = Object.freeze([0, 90, 180, 270]);
 let cameraShareButtonResetTimer = null;
 let streamUiInitialized = false;
 let pinnedPreviewUiInitialized = false;
@@ -6618,6 +6620,7 @@ function renderCameraFeedOptions(options = {}) {
   const feedSelect = document.getElementById("cameraFeedSelect");
   const feedList = document.getElementById("cameraFeedList");
   const profileSelect = document.getElementById("cameraProfileSelect");
+  const orientationSelect = document.getElementById("cameraOrientationSelect");
   if (!feedSelect || !feedList) {
     return;
   }
@@ -6665,6 +6668,9 @@ function renderCameraFeedOptions(options = {}) {
   if (profileSelect && !preserveSelectors) {
     renderCameraProfileOptions(feedSelect.value || "");
   }
+  if (orientationSelect && !preserveSelectors) {
+    renderCameraOrientationOptions(feedSelect.value || "");
+  }
   renderHybridFeedOptions();
 }
 
@@ -6702,6 +6708,26 @@ function cameraProfileKey(profile) {
   return `${pix}|${width}|${height}|${fps.toFixed(3)}`;
 }
 
+function normalizeCameraOrientationDegrees(value) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+  return CAMERA_ORIENTATION_VALUES.includes(parsed) ? parsed : null;
+}
+
+function getFeedEffectiveRotation(feed) {
+  if (!feed || typeof feed !== "object") {
+    return 0;
+  }
+  const resolved =
+    normalizeCameraOrientationDegrees(feed.effective_rotation_degrees) ??
+    normalizeCameraOrientationDegrees(feed.rotation_degrees) ??
+    normalizeCameraOrientationDegrees(feed.configured_rotation_degrees) ??
+    normalizeCameraOrientationDegrees(feed.default_rotation_degrees);
+  return resolved === null ? 0 : resolved;
+}
+
 function setCameraProfileDraft(cameraId, profile) {
   const key = String(cameraId || "").trim();
   const profileKey = cameraProfileKey(profile);
@@ -6727,13 +6753,59 @@ function getCameraProfileDraft(cameraId) {
   return String(cameraProfileDraftByFeed[key] || "");
 }
 
+function setCameraOrientationDraft(cameraId, rotationDegrees) {
+  const key = String(cameraId || "").trim();
+  const normalized = normalizeCameraOrientationDegrees(rotationDegrees);
+  if (!key || normalized === null) {
+    return;
+  }
+  cameraOrientationDraftByFeed[key] = normalized;
+}
+
+function clearCameraOrientationDraft(cameraId) {
+  const key = String(cameraId || "").trim();
+  if (!key) {
+    return;
+  }
+  delete cameraOrientationDraftByFeed[key];
+}
+
+function getCameraOrientationDraft(cameraId) {
+  const key = String(cameraId || "").trim();
+  if (!key || !Object.prototype.hasOwnProperty.call(cameraOrientationDraftByFeed, key)) {
+    return null;
+  }
+  return normalizeCameraOrientationDegrees(cameraOrientationDraftByFeed[key]);
+}
+
 function hasPendingCameraProfileSelection() {
   const feedSelect = document.getElementById("cameraFeedSelect");
   const cameraId = String((feedSelect && feedSelect.value) || "").trim();
   if (!cameraId) {
     return false;
   }
-  return !!getCameraProfileDraft(cameraId);
+  return !!getCameraProfileDraft(cameraId) || getCameraOrientationDraft(cameraId) !== null;
+}
+
+function renderCameraOrientationOptions(cameraId) {
+  const orientationSelect = document.getElementById("cameraOrientationSelect");
+  if (!orientationSelect) {
+    return;
+  }
+
+  const feed = cameraRouterFeeds.find((item) => item.id === cameraId) || null;
+  if (!feed) {
+    orientationSelect.value = "0";
+    orientationSelect.disabled = true;
+    return;
+  }
+
+  const draftRotation = getCameraOrientationDraft(cameraId);
+  const effectiveRotation = getFeedEffectiveRotation(feed);
+  const selectedRotation = draftRotation === null ? effectiveRotation : draftRotation;
+  const normalizedSelected = normalizeCameraOrientationDegrees(selectedRotation);
+  orientationSelect.value = String(normalizedSelected === null ? 0 : normalizedSelected);
+  orientationSelect.disabled = false;
 }
 
 function renderCameraProfileOptions(cameraId) {
@@ -6806,20 +6878,21 @@ function renderCameraProfileOptions(cameraId) {
   const profileError = feed.profile_query_error ? ` | ${feed.profile_query_error}` : "";
   profileStatus.textContent = `${feed.device_path || feed.id}: ${activeRes} (${activeBackend})${profileError}`;
   if (profileApplyBtn) {
-    profileApplyBtn.disabled = !isMutable;
+    profileApplyBtn.disabled = false;
   }
 }
 
 async function applySelectedCameraProfile() {
   const feedSelect = document.getElementById("cameraFeedSelect");
   const profileSelect = document.getElementById("cameraProfileSelect");
-  if (!feedSelect || !profileSelect) {
+  const orientationSelect = document.getElementById("cameraOrientationSelect");
+  if (!feedSelect || !profileSelect || !orientationSelect) {
     return;
   }
 
   const cameraId = feedSelect.value || "";
   if (!cameraId) {
-    setStreamStatus("Select a feed before applying a profile", true);
+    setStreamStatus("Select a feed before applying camera options", true);
     return;
   }
   const feed = cameraRouterFeeds.find((item) => item.id === cameraId) || null;
@@ -6827,35 +6900,66 @@ async function applySelectedCameraProfile() {
     setStreamStatus("Selected feed metadata is unavailable", true);
     return;
   }
-  if (String(feed.source_type || "") !== "default") {
-    setStreamStatus("Profile changes are only supported for default V4L2 feeds", true);
-    return;
+
+  const payload = {};
+  let profileChanged = false;
+  let rotationChanged = false;
+
+  const requestedRotation = normalizeCameraOrientationDegrees(orientationSelect.value);
+  const effectiveRotation = getFeedEffectiveRotation(feed);
+  if (requestedRotation !== null && requestedRotation !== effectiveRotation) {
+    payload.rotation_degrees = requestedRotation;
+    rotationChanged = true;
   }
 
-  const profiles = Array.isArray(feed.available_profiles) ? feed.available_profiles : [];
-  let requestedProfile = feed.capture_profile || null;
-  const selectedIndex = parseInt(profileSelect.value, 10);
-  if (profiles.length > 0 && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < profiles.length) {
-    requestedProfile = profiles[selectedIndex];
-  }
-  if (!requestedProfile) {
-    setStreamStatus("No profile available to apply", true);
-    return;
-  }
-  if (feed.capture_profile && profileMatches(requestedProfile, feed.capture_profile)) {
+  const isProfileMutable = String(feed.source_type || "") === "default";
+  if (isProfileMutable) {
+    const profiles = Array.isArray(feed.available_profiles) ? feed.available_profiles : [];
+    let requestedProfile = feed.capture_profile || null;
+    const selectedIndex = parseInt(profileSelect.value, 10);
+    if (profiles.length > 0 && Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < profiles.length) {
+      requestedProfile = profiles[selectedIndex];
+    }
+    if (!requestedProfile) {
+      if (!rotationChanged) {
+        setStreamStatus("No camera profile available to apply", true);
+        return;
+      }
+    } else if (!feed.capture_profile || !profileMatches(requestedProfile, feed.capture_profile)) {
+      payload.profile = requestedProfile;
+      profileChanged = true;
+    }
+  } else {
     clearCameraProfileDraft(cameraId);
-    setStreamStatus(`Capture profile already active on ${cameraId}`);
+  }
+
+  if (!profileChanged && !rotationChanged) {
+    if (requestedRotation === effectiveRotation) {
+      clearCameraOrientationDraft(cameraId);
+    }
+    if (feed.capture_profile && !isProfileMutable) {
+      clearCameraProfileDraft(cameraId);
+    }
+    setStreamStatus(`Camera options already active on ${cameraId}`);
     return;
   }
 
   try {
-    setStreamStatus(`Applying profile to ${cameraId}...`);
+    const changedBits = [];
+    if (profileChanged) {
+      changedBits.push("profile");
+    }
+    if (rotationChanged) {
+      changedBits.push("orientation");
+    }
+    const changeLabel = changedBits.join(" + ");
+    setStreamStatus(`Applying ${changeLabel} to ${cameraId}...`);
     const response = await cameraRouterFetch(
       `/stream_options/${encodeURIComponent(cameraId)}`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile: requestedProfile }),
+        body: JSON.stringify(payload),
       },
       true
     );
@@ -6864,16 +6968,22 @@ async function applySelectedCameraProfile() {
       throw new Error(data.message || `HTTP ${response.status}`);
     }
 
-    clearCameraProfileDraft(cameraId);
+    if (profileChanged) {
+      clearCameraProfileDraft(cameraId);
+    }
+    if (rotationChanged) {
+      clearCameraOrientationDraft(cameraId);
+    }
     await refreshCameraFeeds({ silent: true, suppressErrors: true });
     renderCameraProfileOptions(cameraId);
-    setStreamStatus(`Applied profile on ${cameraId}`);
+    renderCameraOrientationOptions(cameraId);
+    setStreamStatus(`Applied ${changeLabel} on ${cameraId}`);
 
     if (cameraPreview.desired && cameraPreview.targetCameraId === cameraId) {
-      await startCameraPreview({ autoRestart: true, cameraId, reason: "profile change" });
+      await startCameraPreview({ autoRestart: true, cameraId, reason: "camera option change" });
     }
   } catch (err) {
-    setStreamStatus(`Profile apply failed: ${err}`, true);
+    setStreamStatus(`Camera option apply failed: ${err}`, true);
   }
 }
 
@@ -7372,6 +7482,7 @@ function setupStreamConfigUi() {
   const stopBtn = document.getElementById("cameraPreviewStopBtn");
   const shareBtn = document.getElementById("cameraPreviewShareBtn");
   const profileSelect = document.getElementById("cameraProfileSelect");
+  const orientationSelect = document.getElementById("cameraOrientationSelect");
   const profileApplyBtn = document.getElementById("cameraProfileApplyBtn");
   const modeSelect = document.getElementById("cameraModeSelect");
   const feedSelect = document.getElementById("cameraFeedSelect");
@@ -7452,6 +7563,7 @@ function setupStreamConfigUi() {
       localStorage.setItem("cameraRouterSelectedFeed", nextFeed);
       cameraPreview.targetCameraId = nextFeed;
       renderCameraProfileOptions(nextFeed);
+      renderCameraOrientationOptions(nextFeed);
       if (cameraPreview.desired && nextFeed) {
         startCameraPreview({ autoRestart: true, cameraId: nextFeed, reason: "feed change" }).catch(() => {});
       } else {
@@ -7490,6 +7602,39 @@ function setupStreamConfigUi() {
         }
       } else {
         clearCameraProfileDraft(cameraId);
+      }
+    });
+  }
+  if (orientationSelect) {
+    orientationSelect.addEventListener("pointerdown", () => {
+      markCameraSelectInteraction(2500);
+    });
+    orientationSelect.addEventListener("focus", () => {
+      markCameraSelectInteraction(2500);
+    });
+    orientationSelect.addEventListener("keydown", () => {
+      markCameraSelectInteraction(1800);
+    });
+    orientationSelect.addEventListener("blur", () => {
+      markCameraSelectInteraction(350);
+    });
+    orientationSelect.addEventListener("change", () => {
+      markCameraSelectInteraction(12000);
+      const cameraId = String((feedSelect && feedSelect.value) || "").trim();
+      const feed = cameraRouterFeeds.find((item) => item.id === cameraId) || null;
+      if (!cameraId || !feed) {
+        return;
+      }
+      const selectedRotation = normalizeCameraOrientationDegrees(orientationSelect.value);
+      if (selectedRotation === null) {
+        clearCameraOrientationDraft(cameraId);
+        orientationSelect.value = String(getFeedEffectiveRotation(feed));
+        return;
+      }
+      if (selectedRotation === getFeedEffectiveRotation(feed)) {
+        clearCameraOrientationDraft(cameraId);
+      } else {
+        setCameraOrientationDraft(cameraId, selectedRotation);
       }
     });
   }
