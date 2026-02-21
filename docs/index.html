@@ -843,7 +843,31 @@
               <button id="audioBridgeStartBtn" class="primary" type="button">Start Audio Bridge</button>
               <button id="audioBridgeStopBtn" type="button">Stop Audio Bridge</button>
             </div>
-            <audio id="audioRemotePlayer" autoplay controls playsinline></audio>
+            <audio id="audioRemotePlayer" autoplay playsinline></audio>
+            <div class="audio-wave-stack" aria-label="Audio waveform monitor">
+              <div class="audio-wave-channel" data-source="remote">
+                <div class="audio-wave-header">
+                  <span class="audio-wave-title">Remote Output</span>
+                  <span id="audioRemoteSignalState" class="audio-wave-state">No stream</span>
+                </div>
+                <canvas id="audioRemoteWaveCanvas" class="audio-wave-canvas" width="640" height="86" aria-hidden="true"></canvas>
+                <div class="audio-wave-metrics">
+                  <code id="audioRemoteAmpMetric">Amp --</code>
+                  <code id="audioRemotePeakMetric">Peak --</code>
+                </div>
+              </div>
+              <div class="audio-wave-channel" data-source="browser">
+                <div class="audio-wave-header">
+                  <span class="audio-wave-title">Browser Mic Uplink</span>
+                  <span id="audioBrowserSignalState" class="audio-wave-state">Mic off</span>
+                </div>
+                <canvas id="audioBrowserWaveCanvas" class="audio-wave-canvas" width="640" height="86" aria-hidden="true"></canvas>
+                <div class="audio-wave-metrics">
+                  <code id="audioBrowserAmpMetric">Amp --</code>
+                  <code id="audioBrowserPeakMetric">Peak --</code>
+                </div>
+              </div>
+            </div>
             <p id="audioConnectionMeta" class="imu-readout-meta">No active audio bridge.</p>
           </div>
         </div>
@@ -860,7 +884,23 @@
 
       <div id="hybridTabTouch" class="hybrid-tab-panel active">
         <div class="control-section">
-          <div id="hybridFeedButtons" class="hybrid-feed-buttons" role="group" aria-label="Available camera feeds"></div>
+          <div class="hybrid-feed-toolbar">
+            <div id="hybridFeedButtons" class="hybrid-feed-buttons" role="group" aria-label="Available camera feeds"></div>
+            <button
+              id="hybridRefreshFeedsBtn"
+              class="hybrid-refresh-feeds-btn has-ui-icon"
+              type="button"
+              aria-label="Refresh camera feeds"
+              title="Refresh camera feeds"
+            >
+              <span class="ui-btn-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24">
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+                  <path d="M21 3v6h-6"></path>
+                </svg>
+              </span>
+            </button>
+          </div>
           <p id="hybridStatus" style="margin:0.25rem 0 0 0;opacity:0.85;">Authenticate with camera router to load feeds.</p>
         </div>
 
@@ -875,7 +915,6 @@
                 </svg>
               </span>
             </button>
-            <button id="hybridRefreshFeedsBtn" type="button">Refresh Feeds</button>
             <button id="hybridRetestPortsBtn" type="button" hidden>Retest Ports</button>
             <div id="hybridModeActionMount" class="hybrid-mode-action-mount" aria-live="polite"></div>
           </div>

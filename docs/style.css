@@ -830,10 +830,89 @@ nav {
 }
 
 #audioRemotePlayer {
-    width: 100%;
-    border-radius: 0.45rem;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+    overflow: hidden;
+}
+
+.audio-wave-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.48rem;
+}
+
+.audio-wave-channel {
     border: 1px solid var(--border-light);
-    background: #111;
+    border-radius: 0.45rem;
+    background: linear-gradient(180deg, rgba(18, 21, 24, 0.96) 0%, rgba(10, 12, 16, 0.96) 100%);
+    padding: 0.45rem 0.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.audio-wave-channel.is-active {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(255, 174, 0, 0.2);
+}
+
+.audio-wave-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.audio-wave-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 0.88;
+}
+
+.audio-wave-state {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    opacity: 0.72;
+}
+
+.audio-wave-channel[data-source="remote"].is-active .audio-wave-state {
+    color: #5dd8ff;
+}
+
+.audio-wave-channel[data-source="browser"].is-active .audio-wave-state {
+    color: var(--accent);
+}
+
+.audio-wave-canvas {
+    width: 100%;
+    height: 4.2rem;
+    border-radius: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: #090d13;
+    display: block;
+}
+
+.audio-wave-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+}
+
+.audio-wave-metrics code {
+    font-size: 0.72rem;
+    padding: 0.15rem 0.42rem;
+    border: 1px solid var(--border-light);
+    border-radius: 0.3rem;
+    background: rgba(255, 255, 255, 0.02);
+    opacity: 0.9;
 }
 
 button {
@@ -1182,6 +1261,29 @@ h3 {
     overflow-x: auto;
     padding-bottom: 0.2rem;
     scrollbar-width: thin;
+    min-width: 0;
+}
+
+.hybrid-feed-toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.45rem;
+    align-items: start;
+}
+
+.hybrid-refresh-feeds-btn {
+    width: 2.1rem;
+    height: 2.1rem;
+    padding: 0;
+    border-radius: 0.5rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.hybrid-refresh-feeds-btn .ui-btn-icon {
+    width: 1rem;
+    height: 1rem;
 }
 
 .hybrid-feed-btn {

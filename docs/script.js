@@ -63,6 +63,10 @@ let activeHybridTab = "touch";
 let activeDebugControl = "direct";
 let hybridRetestPortsVisible = false;
 let hybridRetestPortsInFlight = false;
+let hybridRetestSerialDevice = "";
+let hybridRetestSerialBaudrate = null;
+let hybridRetestPortRefreshInFlight = null;
+let hybridRetestPortRefreshAtMs = 0;
 const SIDEBAR_COLLAPSED_STORAGE_KEY = "uiSidebarCollapsed";
 let sidebarUiInitialized = false;
 let buttonIconsObserver = null;
@@ -1533,14 +1537,142 @@ function isAdapterSerialPortError(message) {
     return text.includes("not connected") || text.includes("disconnected") || text.includes("not open");
 }
 
+function formatHybridRetestButtonLabel(serialDevice) {
+    const portText = String(serialDevice || "").trim();
+    return portText || "Retest Ports";
+}
+
+function setHybridRetestPortsButtonLabel(serialDevice = "", baudrate = null) {
+    const resolvedDevice = String(serialDevice || "").trim();
+    const resolvedBaud = Number(baudrate);
+    hybridRetestSerialDevice = resolvedDevice;
+    hybridRetestSerialBaudrate = Number.isFinite(resolvedBaud) ? resolvedBaud : null;
+
+    const retestBtn = document.getElementById("hybridRetestPortsBtn");
+    if (!retestBtn) {
+        return;
+    }
+
+    const nextLabel = formatHybridRetestButtonLabel(resolvedDevice);
+    let labelEl = retestBtn.querySelector(".ui-btn-label");
+    if (labelEl) {
+        labelEl.textContent = nextLabel;
+    } else if (retestBtn.classList.contains("has-ui-icon") && retestBtn.querySelector(".ui-btn-icon")) {
+        labelEl = document.createElement("span");
+        labelEl.className = "ui-btn-label";
+        labelEl.textContent = nextLabel;
+        retestBtn.appendChild(labelEl);
+    } else {
+        retestBtn.textContent = nextLabel;
+        applyIconToElement(retestBtn, inferButtonIconKey(retestBtn) || "refresh");
+    }
+
+    const baudSuffix = hybridRetestSerialBaudrate ? `@${hybridRetestSerialBaudrate}` : "";
+    const tooltip = resolvedDevice
+        ? `Retest serial ports (current: ${resolvedDevice}${baudSuffix})`
+        : "Retest serial ports";
+    retestBtn.title = tooltip;
+    retestBtn.setAttribute("aria-label", tooltip);
+}
+
+function extractAdapterSerialPortInfo(payload) {
+    const data = asObject(payload);
+    const serialInfo = asObject(data.serial);
+    const discoveryInfo = asObject(data.discovery);
+    const discoverySerial = asObject(discoveryInfo.serial);
+    const serialDevice = pickFirstNonEmptyString(
+        data.serial_device,
+        serialInfo.device,
+        discoverySerial.device,
+        data.device
+    );
+    const baudCandidates = [
+        data.baudrate,
+        serialInfo.baudrate,
+        discoverySerial.baudrate,
+        data.serial_baudrate,
+    ];
+    let baudrate = null;
+    for (const rawValue of baudCandidates) {
+        const parsed = Number(rawValue);
+        if (Number.isFinite(parsed) && parsed > 0) {
+            baudrate = parsed;
+            break;
+        }
+    }
+    return { serialDevice, baudrate };
+}
+
+async function refreshHybridRetestPortLabel(options = {}) {
+    const force = !!options.force;
+    const quiet = options.quiet !== false;
+    if (!SESSION_KEY) {
+        setHybridRetestPortsButtonLabel(hybridRetestSerialDevice, hybridRetestSerialBaudrate);
+        return null;
+    }
+
+    const now = Date.now();
+    if (!force && hybridRetestPortRefreshInFlight) {
+        return hybridRetestPortRefreshInFlight;
+    }
+    if (!force && now - hybridRetestPortRefreshAtMs < 2500) {
+        return null;
+    }
+    hybridRetestPortRefreshAtMs = now;
+
+    hybridRetestPortRefreshInFlight = (async () => {
+        let latestError = "";
+        const candidatePaths = ["/health", "/router_info"];
+        for (const path of candidatePaths) {
+            try {
+                const response = await adapterApiFetch(path, { cache: "no-store" });
+                let data = {};
+                try {
+                    data = await response.json();
+                } catch (jsonErr) {
+                    data = {};
+                }
+                if (!response.ok) {
+                    latestError = data.message || `HTTP ${response.status}`;
+                    continue;
+                }
+                const serialInfo = extractAdapterSerialPortInfo(data);
+                if (serialInfo.serialDevice) {
+                    setHybridRetestPortsButtonLabel(serialInfo.serialDevice, serialInfo.baudrate);
+                    return serialInfo;
+                }
+            } catch (err) {
+                latestError = String(err || "");
+            }
+        }
+        if (!hybridRetestSerialDevice) {
+            setHybridRetestPortsButtonLabel("", null);
+        }
+        if (!quiet && latestError) {
+            logToConsole(`[WARN] Failed to read adapter serial port: ${latestError}`);
+        }
+        return null;
+    })();
+
+    try {
+        return await hybridRetestPortRefreshInFlight;
+    } finally {
+        hybridRetestPortRefreshInFlight = null;
+    }
+}
+
 function setHybridRetestPortsButtonVisible(visible) {
     hybridRetestPortsVisible = !!visible;
     const retestBtn = document.getElementById("hybridRetestPortsBtn");
     if (!retestBtn) {
         return;
     }
+    setHybridRetestPortsButtonLabel(hybridRetestSerialDevice, hybridRetestSerialBaudrate);
     retestBtn.hidden = !hybridRetestPortsVisible;
     retestBtn.disabled = hybridRetestPortsInFlight;
+    if (hybridRetestPortsVisible) {
+        refreshHybridRetestPortLabel({ quiet: true }).catch(() => {});
+    }
 }
 
 function handleAdapterCommandError(message) {
@@ -1549,7 +1681,9 @@ function handleAdapterCommandError(message) {
         return;
     }
     setHybridRetestPortsButtonVisible(true);
-    setHybridStatus("Adapter serial disconnected. Tap Retest Ports to rebind the controller.", true);
+    const buttonLabel = formatHybridRetestButtonLabel(hybridRetestSerialDevice);
+    setHybridStatus(`Adapter serial disconnected. Tap ${buttonLabel} to rebind the controller.`, true);
+    refreshHybridRetestPortLabel({ force: true, quiet: true }).catch(() => {});
 }
 
 async function retestAdapterPorts() {
@@ -1585,8 +1719,10 @@ async function retestAdapterPorts() {
             return;
         }
 
-        const resolvedPort = String(data.serial_device || "").trim();
-        const resolvedBaud = Number(data.baudrate);
+        const serialInfo = extractAdapterSerialPortInfo(data);
+        const resolvedPort = String(serialInfo.serialDevice || "").trim();
+        const resolvedBaud = Number(serialInfo.baudrate);
+        setHybridRetestPortsButtonLabel(resolvedPort, resolvedBaud);
         const resolvedLabel = resolvedPort
             ? `${resolvedPort}${Number.isFinite(resolvedBaud) ? `@${resolvedBaud}` : ""}`
             : "detected controller";
@@ -1634,6 +1770,8 @@ async function resetAdapterPort(triggerHome = false, homeCommand = "HOME") {
         }
 
         const homeSent = data.home_sent ? ` + ${data.home_sent}` : "";
+        const serialInfo = extractAdapterSerialPortInfo(data);
+        setHybridRetestPortsButtonLabel(serialInfo.serialDevice, serialInfo.baudrate);
         logToConsole(`[OK] Serial reset complete${homeSent}`);
         setHybridRetestPortsButtonVisible(false);
         resetSliders({silent: true});
@@ -1711,6 +1849,7 @@ async function authenticate(password, wsUrl, httpUrl) {
             authenticated = true;
 
             logToConsole("[OK] Authenticated successfully");
+            refreshHybridRetestPortLabel({ force: true, quiet: true }).catch(() => {});
             updateMetrics();
             return true;
         } else {
@@ -5330,6 +5469,40 @@ const audioBridge = {
   lastError: "",
   active: false,
 };
+const AUDIO_WAVE_CHANNEL_META = Object.freeze({
+  remote: {
+    canvasId: "audioRemoteWaveCanvas",
+    ampId: "audioRemoteAmpMetric",
+    peakId: "audioRemotePeakMetric",
+    stateId: "audioRemoteSignalState",
+    activeColor: "#5dd8ff",
+  },
+  browser: {
+    canvasId: "audioBrowserWaveCanvas",
+    ampId: "audioBrowserAmpMetric",
+    peakId: "audioBrowserPeakMetric",
+    stateId: "audioBrowserSignalState",
+    activeColor: "#ffae00",
+  },
+});
+const audioWaveform = {
+  context: null,
+  rafId: 0,
+  channels: {
+    remote: {
+      sourceNode: null,
+      analyser: null,
+      dataBuffer: null,
+      state: "No stream",
+    },
+    browser: {
+      sourceNode: null,
+      analyser: null,
+      dataBuffer: null,
+      state: "Mic off",
+    },
+  },
+};
 let audioPlaybackUnlockContext = null;
 let audioPlaybackUnlockInFlight = null;
 let audioPlaybackUnlocked = false;
@@ -7713,6 +7886,260 @@ function setAudioConnectionMeta(message, error = false) {
   metaEl.style.color = error ? "#ff4444" : "var(--accent)";
 }
 
+function getAudioWaveChannelElements(channelKey) {
+  const meta = AUDIO_WAVE_CHANNEL_META[channelKey];
+  if (!meta) {
+    return {};
+  }
+  return {
+    canvas: document.getElementById(meta.canvasId),
+    amp: document.getElementById(meta.ampId),
+    peak: document.getElementById(meta.peakId),
+    state: document.getElementById(meta.stateId),
+    row: document.querySelector(`.audio-wave-channel[data-source="${channelKey}"]`),
+  };
+}
+
+function resizeAudioWaveCanvas(canvas) {
+  if (!canvas) {
+    return { width: 0, height: 0, dpr: 1 };
+  }
+  const dpr = Math.min(2, Number(window.devicePixelRatio || 1) || 1);
+  const rect = canvas.getBoundingClientRect();
+  const cssWidth = Math.max(180, Math.round(rect.width || canvas.clientWidth || 320));
+  const cssHeight = Math.max(56, Math.round(rect.height || canvas.clientHeight || 68));
+  const targetWidth = Math.max(1, Math.round(cssWidth * dpr));
+  const targetHeight = Math.max(1, Math.round(cssHeight * dpr));
+  if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+  }
+  return { width: targetWidth, height: targetHeight, dpr };
+}
+
+function drawAudioWaveBackground(context, width, height) {
+  if (!context || !width || !height) {
+    return;
+  }
+  context.fillStyle = "#090d13";
+  context.fillRect(0, 0, width, height);
+  context.strokeStyle = "rgba(255,255,255,0.08)";
+  context.lineWidth = Math.max(1, Math.round(height * 0.018));
+  context.beginPath();
+  context.moveTo(0, height * 0.5);
+  context.lineTo(width, height * 0.5);
+  context.stroke();
+}
+
+function setAudioWaveChannelState(channelKey, stateText, isActive = false) {
+  const channel = audioWaveform.channels[channelKey];
+  if (!channel) {
+    return;
+  }
+  channel.state = String(stateText || "Idle");
+  const { state, row } = getAudioWaveChannelElements(channelKey);
+  if (state) {
+    state.textContent = channel.state;
+  }
+  if (row) {
+    row.classList.toggle("is-active", !!isActive);
+  }
+}
+
+function setAudioWaveChannelMetrics(channelKey, rms = null, peak = null) {
+  const { amp, peak: peakEl } = getAudioWaveChannelElements(channelKey);
+  if (!amp || !peakEl) {
+    return;
+  }
+  if (!Number.isFinite(rms) || !Number.isFinite(peak)) {
+    amp.textContent = "Amp --";
+    peakEl.textContent = "Peak --";
+    return;
+  }
+  const boundedRms = Math.max(0, Math.min(1, Number(rms)));
+  const boundedPeak = Math.max(0, Math.min(1, Number(peak)));
+  const dbfs = 20 * Math.log10(Math.max(0.000001, boundedRms));
+  amp.textContent = `Amp ${Math.round(boundedRms * 100)}% (${dbfs.toFixed(1)} dBFS)`;
+  peakEl.textContent = `Peak ${Math.round(boundedPeak * 100)}%`;
+}
+
+function renderAudioWaveChannel(channelKey) {
+  const channel = audioWaveform.channels[channelKey];
+  if (!channel) {
+    return false;
+  }
+  const meta = AUDIO_WAVE_CHANNEL_META[channelKey];
+  const { canvas } = getAudioWaveChannelElements(channelKey);
+  if (!canvas || !meta) {
+    return false;
+  }
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return false;
+  }
+
+  const { width, height, dpr } = resizeAudioWaveCanvas(canvas);
+  drawAudioWaveBackground(context, width, height);
+
+  if (!channel.analyser || !channel.dataBuffer) {
+    return false;
+  }
+
+  channel.analyser.getByteTimeDomainData(channel.dataBuffer);
+  const buffer = channel.dataBuffer;
+  const sampleCount = buffer.length;
+  const midY = height * 0.5;
+  const amplitudeY = Math.max(6, midY * 0.82);
+  const stepX = sampleCount > 1 ? width / (sampleCount - 1) : width;
+  let sumSq = 0;
+  let peak = 0;
+
+  context.strokeStyle = meta.activeColor;
+  context.lineWidth = Math.max(1, 1.5 * dpr);
+  context.beginPath();
+  for (let i = 0; i < sampleCount; i += 1) {
+    const normalized = (buffer[i] - 128) / 128;
+    const x = i * stepX;
+    const y = midY + normalized * amplitudeY;
+    if (i === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+    sumSq += normalized * normalized;
+    peak = Math.max(peak, Math.abs(normalized));
+  }
+  context.stroke();
+
+  const rms = Math.sqrt(sumSq / Math.max(1, sampleCount));
+  const active = peak >= 0.06 || rms >= 0.02;
+  setAudioWaveChannelState(channelKey, active ? "Active" : "Listening", active);
+  setAudioWaveChannelMetrics(channelKey, rms, peak);
+  return true;
+}
+
+function scheduleAudioWaveRender() {
+  if (audioWaveform.rafId) {
+    return;
+  }
+  audioWaveform.rafId = window.requestAnimationFrame(renderAudioWaves);
+}
+
+function maybeStopAudioWaveRender() {
+  const hasAnalyser = Object.keys(audioWaveform.channels).some((channelKey) => {
+    const channel = audioWaveform.channels[channelKey];
+    return !!(channel && channel.analyser && channel.dataBuffer);
+  });
+  if (hasAnalyser) {
+    return;
+  }
+  if (audioWaveform.rafId) {
+    window.cancelAnimationFrame(audioWaveform.rafId);
+    audioWaveform.rafId = 0;
+  }
+}
+
+function disconnectAudioWaveChannel(channelKey) {
+  const channel = audioWaveform.channels[channelKey];
+  if (!channel) {
+    return;
+  }
+  if (channel.sourceNode) {
+    try {
+      channel.sourceNode.disconnect();
+    } catch (err) {}
+  }
+  if (channel.analyser) {
+    try {
+      channel.analyser.disconnect();
+    } catch (err) {}
+  }
+  channel.sourceNode = null;
+  channel.analyser = null;
+  channel.dataBuffer = null;
+}
+
+function detachAudioWaveChannel(channelKey, stateText = "Idle") {
+  disconnectAudioWaveChannel(channelKey);
+  setAudioWaveChannelState(channelKey, stateText, false);
+  setAudioWaveChannelMetrics(channelKey, null, null);
+  renderAudioWaveChannel(channelKey);
+  maybeStopAudioWaveRender();
+}
+
+async function ensureAudioWaveContext() {
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) {
+    return null;
+  }
+  if (!audioWaveform.context || audioWaveform.context.state === "closed") {
+    audioWaveform.context = new AudioContextCtor();
+  }
+  if (audioWaveform.context.state === "suspended") {
+    try {
+      await audioWaveform.context.resume();
+    } catch (err) {}
+  }
+  return audioWaveform.context;
+}
+
+async function attachAudioWaveChannel(channelKey, stream) {
+  if (!stream) {
+    detachAudioWaveChannel(channelKey, channelKey === "browser" ? "Mic off" : "No stream");
+    return false;
+  }
+  const context = await ensureAudioWaveContext();
+  if (!context) {
+    setAudioWaveChannelState(channelKey, "Visualizer unavailable", false);
+    setAudioWaveChannelMetrics(channelKey, null, null);
+    return false;
+  }
+
+  disconnectAudioWaveChannel(channelKey);
+  const channel = audioWaveform.channels[channelKey];
+  if (!channel) {
+    return false;
+  }
+
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.72;
+  const sourceNode = context.createMediaStreamSource(stream);
+  sourceNode.connect(analyser);
+  channel.sourceNode = sourceNode;
+  channel.analyser = analyser;
+  channel.dataBuffer = new Uint8Array(analyser.fftSize);
+  setAudioWaveChannelState(channelKey, "Listening", false);
+  setAudioWaveChannelMetrics(channelKey, null, null);
+  scheduleAudioWaveRender();
+  return true;
+}
+
+function renderAudioWaves() {
+  audioWaveform.rafId = 0;
+  let activeCount = 0;
+  Object.keys(audioWaveform.channels).forEach((channelKey) => {
+    const active = renderAudioWaveChannel(channelKey);
+    if (active) {
+      activeCount += 1;
+    }
+  });
+  if (activeCount > 0) {
+    scheduleAudioWaveRender();
+  } else {
+    maybeStopAudioWaveRender();
+  }
+}
+
+function initializeAudioWaveUi() {
+  setAudioWaveChannelState("remote", "No stream", false);
+  setAudioWaveChannelState("browser", "Mic off", false);
+  setAudioWaveChannelMetrics("remote", null, null);
+  setAudioWaveChannelMetrics("browser", null, null);
+  renderAudioWaveChannel("remote");
+  renderAudioWaveChannel("browser");
+}
+
 function installAudioPlaybackGestureHooks() {
   if (audioPlaybackGestureHooksInstalled) {
     return;
@@ -7965,6 +8392,8 @@ async function stopAudioBridge(options = {}) {
   audioBridge.remoteTrack = null;
   audioBridge.active = false;
   resetAudioPlayer();
+  detachAudioWaveChannel("remote", keepDesired ? "Reconnecting" : "No stream");
+  detachAudioWaveChannel("browser", keepDesired ? "Reconnecting" : "Mic off");
   updateMetrics();
   if (!silent) {
     setAudioStatus("Audio bridge stopped");
@@ -8297,6 +8726,10 @@ async function startAudioBridge(options = {}) {
   try {
     await stopAudioBridge({ keepDesired: true, silent: true });
     const sendBrowserMic = !!(document.getElementById("audioBrowserMicToggle") || {}).checked;
+    detachAudioWaveChannel("remote", "Awaiting stream");
+    if (!sendBrowserMic) {
+      detachAudioWaveChannel("browser", "Mic off");
+    }
 
     setAudioStatus("Starting bidirectional audio bridge...");
     if (!window.RTCPeerConnection) {
@@ -8308,10 +8741,12 @@ async function startAudioBridge(options = {}) {
     peer.addTransceiver("audio", { direction: "recvonly" });
 
     if (sendBrowserMic) {
+      setAudioWaveChannelState("browser", "Opening mic", false);
       audioBridge.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       audioBridge.localStream.getAudioTracks().forEach((track) => {
         peer.addTrack(track, audioBridge.localStream);
       });
+      await attachAudioWaveChannel("browser", audioBridge.localStream);
     }
 
     peer.ontrack = (event) => {
@@ -8338,6 +8773,7 @@ async function startAudioBridge(options = {}) {
       requestAudioAutoplayUnlock()
         .catch(() => false)
         .finally(replay);
+      attachAudioWaveChannel("remote", stream).catch(() => {});
     };
 
     peer.onconnectionstatechange = () => {
@@ -8388,6 +8824,7 @@ function setupAudioConfigUi() {
   }
   audioUiInitialized = true;
   installAudioPlaybackGestureHooks();
+  initializeAudioWaveUi();
 
   const baseInput = document.getElementById("audioRouterBaseInput");
   const passInput = document.getElementById("audioRouterPasswordInput");
@@ -8448,6 +8885,12 @@ function setupAudioConfigUi() {
 
   if (browserMicToggle) {
     initializeCheckboxToggleButtons(browserMicToggle.closest(".toggle-checkbox-btn") || document);
+    browserMicToggle.addEventListener("change", () => {
+      if (audioBridge.active || audioBridge.starting) {
+        return;
+      }
+      setAudioWaveChannelState("browser", browserMicToggle.checked ? "Ready" : "Mic off", false);
+    });
   }
 
   if (audioRouterBaseUrl && audioRouterSessionKey) {
@@ -9147,7 +9590,9 @@ function setupHybridUi() {
       retestAdapterPorts().catch(() => {});
     });
   }
+  setHybridRetestPortsButtonLabel(hybridRetestSerialDevice, hybridRetestSerialBaudrate);
   setHybridRetestPortsButtonVisible(hybridRetestPortsVisible);
+  refreshHybridRetestPortLabel({ force: true, quiet: true }).catch(() => {});
 
   const homeSoftBtn = document.getElementById("hybridHomeSoftBtn");
   if (homeSoftBtn) {
